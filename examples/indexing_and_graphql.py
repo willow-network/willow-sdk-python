@@ -6,8 +6,8 @@ This example demonstrates blockchain indexing features:
 2. Check subgraph/indexer status
 3. Verify indexing results with cryptographic proofs
 
-Willow provides 50-100x faster blockchain indexing than alternatives
-with cryptographic proofs for every query result.
+Willow provides blockchain indexing with cryptographic proofs for every
+query result, enabling trustless verification.
 
 Prerequisites:
 - pip install willow-sdk
@@ -134,8 +134,8 @@ async def main():
 
     print("\n" + "=" * 50)
     print("Key Benefits of Willow:")
-    print("- 50-100x faster than The Graph")
     print("- Cryptographic proofs for every query")
+    print("- Trustless verification of indexed data")
     print("- Decentralized indexer network")
     print("- Automatic reorg handling")
 

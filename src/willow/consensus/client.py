@@ -394,8 +394,55 @@ class ConsensusClient:
             return None
     
     async def _get_next_nonce(self, did: str) -> int:
-        """Get the next nonce for a DID."""
-        current_nonce = self._nonce_cache.get(did, 0)
-        next_nonce = current_nonce + 1
-        self._nonce_cache[did] = next_nonce
-        return next_nonce
+        """
+        Get the next nonce for a DID.
+
+        Fetches the current nonce from the blockchain and returns the next value.
+        Falls back to in-memory cache if API is unavailable.
+        """
+        try:
+            current_nonce = await self._get_account_nonce(did)
+            next_nonce = current_nonce + 1
+            self._nonce_cache[did] = next_nonce
+            return next_nonce
+        except Exception as e:
+            # Fall back to cache if API unavailable
+            logger.warning(f"Failed to fetch nonce from API, using cache: {e}")
+            current_nonce = self._nonce_cache.get(did, 0)
+            next_nonce = current_nonce + 1
+            self._nonce_cache[did] = next_nonce
+            return next_nonce
+
+    async def _get_account_nonce(self, did: str) -> int:
+        """
+        Get the current nonce for an account from the blockchain.
+
+        Args:
+            did: The DID to get the nonce for
+
+        Returns:
+            Current nonce value from the blockchain
+
+        Raises:
+            ConsensusError: If nonce cannot be fetched
+        """
+        if not self.config.api_url:
+            # No API URL configured, use cache
+            return self._nonce_cache.get(did, 0)
+
+        from urllib.parse import quote
+        url = f"{self.config.api_url}/account/{quote(did, safe='')}/nonce"
+
+        try:
+            async with self._session.get(url) as response:
+                if response.status != 200:
+                    raise ConsensusError(f"Failed to fetch nonce: HTTP {response.status}")
+
+                data = await response.json()
+
+                if not data.get('success') or 'data' not in data:
+                    raise ConsensusError(data.get('error', 'Failed to fetch nonce'))
+
+                return data['data'].get('nonce', 0)
+        except aiohttp.ClientError as e:
+            raise ConsensusError(f"Failed to fetch nonce: {e}")

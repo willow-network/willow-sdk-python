@@ -10,7 +10,7 @@ This example demonstrates how to:
 Prerequisites:
 - pip install willow-sdk
 - Run a local Willow node
-- Have CAN tokens for funding
+- Have WILL tokens for funding
 """
 
 import asyncio

@@ -10,7 +10,7 @@ This example demonstrates the core workflow:
 
 Prerequisites:
 - pip install willow-sdk
-- Run a local Willow node: ./tests/execution/start_three_nodes_with_funding.sh
+- Run a local Willow node: ./scripts/start_node.sh
 """
 
 import asyncio

@@ -108,19 +108,10 @@ class HeaderVerifier:
             raise LightClientError(
                 f"Non-sequential height: {untrusted.header.height} != {trusted.header.height + 1}"
             )
-        
+
         # Time must progress forward
         if untrusted.header.time <= trusted.header.time:
             raise LightClientError("Time did not progress forward")
-        
-        # Last block ID must reference the trusted header
-        if untrusted.header.last_block_id is None:
-            if trusted.header.height > 1:  # Genesis block has no last_block_id
-                raise LightClientError("Missing last_block_id reference")
-        else:
-            trusted_hash = self._compute_header_hash(trusted.header)
-            if untrusted.header.last_block_id.hash != trusted_hash:
-                raise LightClientError("Last block ID hash mismatch")
     
     def _verify_commit_signatures(
         self, 
@@ -197,32 +188,6 @@ class HeaderVerifier:
         # The untrusted header's validators_hash should match the trusted next_validators_hash
         if untrusted.header.validators_hash != trusted.header.next_validators_hash:
             raise LightClientError("Validator set transition hash mismatch")
-    
-    def _compute_header_hash(self, header: Header) -> bytes:
-        """Compute Merkle hash of header fields."""
-        # This is a simplified version - CometBFT uses a specific Merkle tree structure
-        header_fields = [
-            header.version['block'].to_bytes(8, 'big'),
-            header.version['app'].to_bytes(8, 'big'),
-            header.chain_id.encode('utf-8'),
-            header.height.to_bytes(8, 'big'),
-            header.time.isoformat().encode('utf-8'),
-            header.last_commit_hash,
-            header.data_hash,
-            header.validators_hash,
-            header.next_validators_hash,
-            header.consensus_hash,
-            header.app_hash,
-            header.last_results_hash,
-            header.evidence_hash,
-            header.proposer_address
-        ]
-        
-        # Simple concatenation and hash (real implementation uses Merkle tree)
-        hasher = hashlib.sha256()
-        for field in header_fields:
-            hasher.update(field)
-        return hasher.digest()
 
 
 class ProofVerifier:

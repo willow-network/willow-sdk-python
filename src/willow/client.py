@@ -4,6 +4,7 @@ This module provides the main WillowClient class for interacting with
 the Willow decentralized data indexing protocol.
 """
 
+import asyncio
 import httpx
 import logging
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
@@ -746,6 +747,10 @@ class WillowClient:
         if proof_verification_options:
             configure_proof_verification(proof_verification_options)
 
+        # Light client for trustless verification
+        self._light_client: Optional["LightClient"] = None
+        self._light_client_init_lock = asyncio.Lock()
+
         # Initialize sub-clients
         self.data = DataOperations(self)
         self.registration = RegistrationOperations(self)
@@ -871,23 +876,69 @@ class WillowClient:
         """Clear current session (logout)."""
         self.session = None
 
-    async def get_root_hash(self) -> str:
-        """Get the verified root hash from the blockchain.
+    async def _get_or_create_light_client(self) -> "LightClient":
+        """Get or create a light client for trustless verification.
 
-        This method returns the root hash that has been confirmed by the blockchain
-        consensus, providing stronger security guarantees than the local root hash.
-        Use this method when you need cryptographically verified state information.
+        This auto-initializes a light client using trust-on-first-use:
+        the first block received from validators is trusted, and all subsequent
+        blocks are verified against it.
+
+        Important: TODO: When mainnet/testnet launches, replace trust-on-first-use
+        with hardcoded checkpoint headers for true trustless initialization.
+        Trust-on-first-use is secure for subsequent operations but trusts the
+        initial block from the connected validators.
+        """
+        if self._light_client is not None:
+            return self._light_client
+
+        async with self._light_client_init_lock:
+            # Double-check after acquiring lock
+            if self._light_client is not None:
+                return self._light_client
+
+            # Import here to avoid circular imports
+            from .light_client import LightClient, LightClientConfig
+
+            # TODO: When mainnet/testnet launches, use hardcoded checkpoint headers
+            # instead of trust-on-first-use for true trustless initialization from genesis.
+            config = LightClientConfig(
+                chain_id="willow-chain",
+                # Derive CometBFT RPC endpoint from API URL (typically :3031 -> :26657)
+                validator_endpoints=[self.api_url.replace(":3031", ":26657")],
+                trust_threshold_numerator=2,
+                trust_threshold_denominator=3,
+                trusting_period_secs=86400,  # 24 hours
+                max_clock_drift_secs=30,
+                auto_sync=False,
+                min_validators_for_consensus=1,  # For single-node development
+                request_timeout_secs=30,
+                sync_interval_secs=60
+            )
+
+            lc = LightClient(config)
+            await lc.initialize_with_trust_on_first_use()
+            self._light_client = lc
+            return lc
+
+    async def get_root_hash(self) -> str:
+        """Get the verified root hash using the light client.
+
+        This uses trustless verification through the light client instead of
+        asking the node for the root hash.
+
+        Important: TODO: When mainnet/testnet launches, the light client will be
+        initialized with hardcoded checkpoint headers instead of trust-on-first-use.
 
         Returns:
-            Verified root hash as hex string from the blockchain
+            Verified root hash as hex string from the light client
 
         Raises:
-            WillowError: If root hash is not available or request fails
+            WillowError: If root hash is not available
         """
-        response = await self._request("GET", "/state/root-hash/verified")
-        if "data" not in response or "root_hash" not in response["data"]:
-            raise WillowError("No root hash in response")
-        return response["data"]["root_hash"]
+        # Always use light client for trustless verification
+        # This auto-initializes the light client on first use (trust-on-first-use)
+        light_client = await self._get_or_create_light_client()
+        return await light_client.get_verified_root_hash()
 
     async def get_root_hash_local(self) -> str:
         """Get the current local root hash from the node.

@@ -28,11 +28,12 @@ class TransactionStatus(Enum):
 class ConsensusConfig:
     """Configuration for consensus client."""
     consensus_rpc_url: str
+    api_url: Optional[str] = None  # REST API URL for account queries (nonce, etc.)
     chain_id: str = "willow-chain"
     request_timeout_secs: int = 30
     max_retries: int = 3
     retry_delay_secs: float = 1.0
-    
+
     def __post_init__(self):
         if not self.consensus_rpc_url:
             raise ValueError("consensus_rpc_url is required")

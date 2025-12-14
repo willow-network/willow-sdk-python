@@ -78,10 +78,61 @@ class LightClient:
         
         logger.info("Light client stopped")
     
+    async def initialize_with_trust_on_first_use(self):
+        """
+        Initialize the light client using trust-on-first-use.
+
+        This fetches the latest block from validators and trusts it as the initial state.
+        All subsequent blocks are verified against this initial trusted state.
+
+        Important: TODO: When mainnet/testnet launches, replace trust-on-first-use
+        with hardcoded checkpoint headers for true trustless initialization.
+        Trust-on-first-use is secure for subsequent operations but trusts the
+        initial block from the connected validators.
+        """
+        # Ensure session is started
+        if not self._session:
+            await self.start()
+
+        # Fetch the latest block from validators
+        # TODO: When mainnet/testnet launches, use hardcoded checkpoint headers
+        # instead of trust-on-first-use for true trustless initialization from genesis.
+        latest_header = await self._fetch_header_from_validators(0)  # 0 = latest
+        if not latest_header:
+            raise LightClientError("Could not fetch latest header from validators for trust-on-first-use initialization")
+
+        # Trust this header as our initial state
+        height = latest_header.header.height
+        self._trusted_headers[height] = latest_header
+        self._latest_height = height
+        self._verified_height_range = (height, height)
+
+        logger.info(f"Initialized with trust-on-first-use at height {height}")
+
+    async def get_verified_root_hash(self) -> str:
+        """
+        Get the verified root hash (app_hash) from the latest trusted header.
+
+        This is the cryptographically verified root hash that proofs should be
+        verified against for trustless data verification.
+
+        Returns:
+            The app_hash as a hex string
+        """
+        # Initialize with trust-on-first-use if not already initialized
+        if not self._trusted_headers:
+            await self.initialize_with_trust_on_first_use()
+
+        latest_header = await self.get_latest_header()
+        if not latest_header:
+            raise LightClientError("No trusted header available")
+
+        return latest_header.header.app_hash.hex()
+
     async def initialize_with_trusted_header(self, trusted_header: LightBlock):
         """
         Initialize the light client with a trusted header.
-        
+
         This is the bootstrap process that establishes initial trust.
         The trusted header should be obtained through a secure channel.
         """

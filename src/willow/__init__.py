@@ -194,6 +194,26 @@ from .consensus import (
 
 __version__ = "0.2.0"
 
+# Pre-funded test account for local devnet development.
+# This account is pre-registered and funded in the devnet genesis.
+# Use it for SDK testing and development - DO NOT use in production!
+#
+# Example usage:
+#     from willow import WillowClient, DEVNET_TEST_ACCOUNT
+#
+#     async with WillowClient("http://localhost:3031") as client:
+#         await client.authenticate(
+#             DEVNET_TEST_ACCOUNT["did"],
+#             DEVNET_TEST_ACCOUNT["private_key"],
+#             DEVNET_TEST_ACCOUNT["public_key_id"]
+#         )
+DEVNET_TEST_ACCOUNT = {
+    "did": "did:willow:devnet-test",
+    "private_key": "b5ecc03536f5e039e3c5bc46ad178d7faf80cee5f063016a4f4084e163409b3c",
+    "public_key": "c153874d3d284a11e3cb12b524e1a9cc32fef966d56b903c79688a95d5193c8f",
+    "public_key_id": "did:willow:devnet-test#key-1",
+}
+
 __all__ = [
     # Client
     "WillowClient",
@@ -347,4 +367,6 @@ __all__ = [
     "BroadcastResult",
     "TransactionStatus",
     "ConsensusModuleError",
+    # Test Account
+    "DEVNET_TEST_ACCOUNT",
 ]

@@ -137,7 +137,7 @@ async def main():
 
     print("\n" + "=" * 50)
     print("Economic Model Summary:")
-    print("- CAN token for storage fees and staking")
+    print("- WILL token for storage fees and staking")
     print("- Pay-per-storage model (automatic deduction)")
     print("- Validators secure the network via PoS")
     print("- Indexers earn rewards for indexing work")

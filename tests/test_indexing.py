@@ -2,7 +2,7 @@
 Indexing tests for Willow Python SDK
 
 These tests require a running three-node network with funded DID.
-Run: ./tests/execution/start_three_nodes_with_funding.sh
+Run: ./scripts/start_network.sh
 """
 
 import pytest

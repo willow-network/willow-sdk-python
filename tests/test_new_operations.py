@@ -60,7 +60,7 @@ class TestTokenOperations:
             "success": True,
             "data": {
                 "name": "Willow",
-                "symbol": "CAN",
+                "symbol": "WILL",
                 "decimals": 18,
                 "total_supply": 1000000000,
                 "minted_supply": 500000000
@@ -73,7 +73,7 @@ class TestTokenOperations:
 
         assert isinstance(result, TokenInfo)
         assert result.name == "Willow"
-        assert result.symbol == "CAN"
+        assert result.symbol == "WILL"
         assert result.decimals == 18
         assert result.total_supply == 1000000000
 
