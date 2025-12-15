@@ -186,12 +186,8 @@ result = await client.data.query("app_id", "subgrove_id", {
 # $lt - Less than
 # $lte - Less than or equal
 # $in - In array
-# $contains - Contains substring (for fulltext)
-
-# Query with fulltext search
-result = await client.data.query("app_id", "subgrove_id", {
-    "search": {"field": "content", "query": "search terms"}
-})
+# $contains - Contains value (for arrays)
+# $startsWith - String prefix matching
 
 # Query without verification (for performance)
 result = await client.data.query_unverified("app_id", "subgrove_id", {...})
