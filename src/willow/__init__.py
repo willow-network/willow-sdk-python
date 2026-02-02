@@ -108,6 +108,10 @@ from .types import (
     QuerySort,
     QueryRequest,
     QueryResponse,
+    # Historical Query Types
+    HistoricalQueryRequest,
+    HistoricalQueryResponse,
+    CheckpointInfo,
     # Data Operation Types
     StoreDataRequest,
     FundAppRequest,

@@ -371,6 +371,74 @@ class QueryResponse(BaseModel):
 
 
 # ============================================================================
+# Historical Query Types (for checkpoint data)
+# ============================================================================
+
+class HistoricalQueryRequest(BaseModel):
+    """Request for querying historical checkpoint data."""
+    path: List[List[int]]  # GroveDB path as byte arrays
+    key: Optional[List[int]] = None  # Key to query (for single-key queries)
+    query_type: Optional[str] = None  # Query type: "get", "get_range", "get_path"
+    include_proof: Optional[bool] = None  # Whether to include proof
+
+
+class HistoricalQueryResponse(BaseModel):
+    """Response from historical query."""
+    success: bool
+    provider_did: Optional[str] = None
+    provider_endpoint: Optional[str] = None
+    state_root: str  # Checkpoint state root for proof verification
+    block_range: tuple[int, int]  # Block range covered by the checkpoint
+    data: Any  # Query results from the indexer
+    proof: Optional[str] = None  # Merkle proof (hex-encoded)
+    can_reindex: Optional[bool] = None  # Whether data can be re-indexed
+    error: Optional[str] = None
+
+    def verify_proof(self) -> str:
+        """
+        Verify the proof against the checkpoint state root.
+
+        Returns:
+            Computed root hash
+
+        Raises:
+            WillowError: If proof verification fails
+        """
+        from .proof import verify_query_proof
+        from .errors import WillowError, ProofVerificationError
+
+        if not self.proof:
+            raise WillowError("Historical query response does not contain proof data")
+
+        # Verify proof and get computed root hash
+        documents = self.data if isinstance(self.data, list) else [self.data]
+        computed_root = verify_query_proof(self.proof, documents)
+
+        # Compare with checkpoint state root
+        normalized_computed = computed_root.lower().lstrip("0x")
+        normalized_expected = self.state_root.lower().lstrip("0x")
+
+        if normalized_computed != normalized_expected:
+            raise ProofVerificationError(
+                f"Historical proof verification failed: computed root {computed_root} "
+                f"does not match checkpoint state root {self.state_root}"
+            )
+
+        return computed_root
+
+
+class CheckpointInfo(BaseModel):
+    """Information about a checkpoint."""
+    checkpoint_id: str
+    subgrove_id: str
+    state_root: str  # State root hash (hex)
+    block_range: tuple[int, int]
+    indexer_did: str
+    submitted_at: int  # Unix timestamp
+    is_trusted: bool
+
+
+# ============================================================================
 # Data Operation Types
 # ============================================================================
 

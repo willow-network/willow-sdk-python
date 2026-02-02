@@ -309,6 +309,88 @@ class DataOperations:
         data = {item["key"]: item["value"] for item in items}
         await self.store(app_id, subgrove_id, data)
 
+    async def get_checkpoint_state_root(self, subgrove_id: str, checkpoint_id: str) -> "CheckpointInfo":
+        """Get checkpoint information including state root.
+
+        Args:
+            subgrove_id: Subgrove/dataset identifier
+            checkpoint_id: Checkpoint ID (hex string)
+
+        Returns:
+            Checkpoint information
+        """
+        from .types import CheckpointInfo
+        response = await self.client._request(
+            "GET",
+            f"/checkpoints/{subgrove_id}/{checkpoint_id}/state-root"
+        )
+        return CheckpointInfo(**response["data"])
+
+    async def query_historical(
+        self,
+        subgrove_id: str,
+        checkpoint_id: str,
+        query: Dict[str, Any]
+    ) -> "HistoricalQueryResponse":
+        """Query historical indexed data from a checkpoint.
+
+        Routes through consensus to available indexer nodes that serve
+        historical data for this checkpoint.
+
+        Args:
+            subgrove_id: Subgrove/dataset identifier
+            checkpoint_id: Checkpoint ID (hex string)
+            query: Query parameters (path, key, query_type, include_proof)
+
+        Returns:
+            Historical query response with data and optional proof
+        """
+        from .types import HistoricalQueryRequest, HistoricalQueryResponse
+
+        query_request = HistoricalQueryRequest(**query)
+        response = await self.client._request(
+            "POST",
+            f"/historical/query/{subgrove_id}/{checkpoint_id}",
+            json=query_request.model_dump(exclude_none=True)
+        )
+        return HistoricalQueryResponse(**response["data"])
+
+    async def query_historical_verified(
+        self,
+        subgrove_id: str,
+        checkpoint_id: str,
+        query: Dict[str, Any]
+    ) -> "HistoricalQueryResponse":
+        """Query historical data with automatic proof verification.
+
+        Forces proof inclusion and verifies the proof against the
+        checkpoint's state root.
+
+        Args:
+            subgrove_id: Subgrove/dataset identifier
+            checkpoint_id: Checkpoint ID (hex string)
+            query: Query parameters (path, key, query_type)
+
+        Returns:
+            Verified historical query response
+
+        Raises:
+            ProofVerificationError: If proof verification fails
+            WillowError: If proof is missing from response
+        """
+        from .types import HistoricalQueryRequest, HistoricalQueryResponse
+        from .errors import WillowError, ProofVerificationError
+
+        # Force proof inclusion
+        query["include_proof"] = True
+
+        result = await self.query_historical(subgrove_id, checkpoint_id, query)
+
+        # Verify the proof against checkpoint state root
+        result.verify_proof()
+
+        return result
+
 
 class RegistrationOperations:
     """Registration operations for Willow client.
