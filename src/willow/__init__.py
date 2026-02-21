@@ -183,6 +183,21 @@ from .light_client import (
     VerificationResult,
     LightClientError as LightClientModuleError,
 )
+from .computed_fields import (
+    ComputedFieldDefinition,
+    ComputedFieldSet,
+    ComputedFieldRegistry,
+    ComputeFunction,
+    apply_computed_fields,
+    apply_computed_fields_to_response,
+    UNISWAP_V2_PAIR_FIELDS,
+    UNISWAP_V2_TOKEN_FIELDS,
+    UNISWAP_V2_AGGREGATION_FIELDS,
+    GENERIC_AMM_PAIR_FIELDS,
+    LENDING_PROTOCOL_FIELDS,
+    LP_SHARE_FIELDS,
+    global_computed_field_registry,
+)
 from .consensus import (
     ConsensusClient,
     ConsensusConfig,
@@ -373,4 +388,18 @@ __all__ = [
     "ConsensusModuleError",
     # Test Account
     "DEVNET_TEST_ACCOUNT",
+    # Computed Fields
+    "ComputedFieldDefinition",
+    "ComputedFieldSet",
+    "ComputedFieldRegistry",
+    "ComputeFunction",
+    "apply_computed_fields",
+    "apply_computed_fields_to_response",
+    "UNISWAP_V2_PAIR_FIELDS",
+    "UNISWAP_V2_TOKEN_FIELDS",
+    "UNISWAP_V2_AGGREGATION_FIELDS",
+    "GENERIC_AMM_PAIR_FIELDS",
+    "LENDING_PROTOCOL_FIELDS",
+    "LP_SHARE_FIELDS",
+    "global_computed_field_registry",
 ]

@@ -47,6 +47,11 @@ from .errors import (
 )
 from .utils import require_auth
 from .proof import ProofVerifier, ProofVerificationOptions, configure_proof_verification
+from .computed_fields import (
+    ComputedFieldRegistry,
+    ComputedFieldSet,
+    apply_computed_fields_to_response,
+)
 
 if TYPE_CHECKING:
     from .light_client import LightClient
@@ -264,6 +269,11 @@ class DataOperations:
             except Exception as e:
                 logger.warning(f"Could not fetch consensus root hash for verification: {e}")
 
+        # Apply computed fields if registered for this app/dataset
+        computed_fields = self.client._computed_fields.get(app_id, subgrove_id)
+        if computed_fields:
+            query_response = apply_computed_fields_to_response(query_response, computed_fields)
+
         return query_response
 
     @require_auth
@@ -294,7 +304,14 @@ class DataOperations:
             json=query_dict,
             authenticated=True
         )
-        return QueryResponse(**response["data"])
+        query_response = QueryResponse(**response["data"])
+
+        # Apply computed fields if registered for this app/dataset
+        computed_fields = self.client._computed_fields.get(app_id, subgrove_id)
+        if computed_fields:
+            query_response = apply_computed_fields_to_response(query_response, computed_fields)
+
+        return query_response
 
     @require_auth
     async def batch_store(self, app_id: str, subgrove_id: str, items: List[Dict[str, Any]]) -> None:
@@ -833,6 +850,9 @@ class WillowClient:
         self._light_client: Optional["LightClient"] = None
         self._light_client_init_lock = asyncio.Lock()
 
+        # Computed fields registry for SDK-side derived field computation
+        self._computed_fields = ComputedFieldRegistry()
+
         # Initialize sub-clients
         self.data = DataOperations(self)
         self.registration = RegistrationOperations(self)
@@ -957,6 +977,52 @@ class WillowClient:
     def clear_session(self):
         """Clear current session (logout)."""
         self.session = None
+
+    def register_computed_fields(
+        self,
+        app_id: str,
+        dataset_id: str,
+        fields: ComputedFieldSet
+    ) -> None:
+        """Register computed fields for a specific app/dataset combination.
+
+        Computed fields are derived values calculated client-side from proven data.
+        For example, token prices computed from proven reserves.
+
+        Args:
+            app_id: The application ID
+            dataset_id: The dataset ID
+            fields: The computed field definitions to apply
+
+        Example:
+            >>> from willow.computed_fields import UNISWAP_V2_PAIR_FIELDS
+            >>> client.register_computed_fields('uniswap-v2', 'pairs', UNISWAP_V2_PAIR_FIELDS)
+        """
+        self._computed_fields.register(app_id, dataset_id, fields)
+
+    def unregister_computed_fields(self, app_id: str, dataset_id: str) -> bool:
+        """Remove computed fields for an app/dataset.
+
+        Args:
+            app_id: The application ID
+            dataset_id: The dataset ID
+
+        Returns:
+            True if fields were removed, False if they weren't registered.
+        """
+        return self._computed_fields.unregister(app_id, dataset_id)
+
+    def has_computed_fields(self, app_id: str, dataset_id: str) -> bool:
+        """Check if computed fields are registered for an app/dataset.
+
+        Args:
+            app_id: The application ID
+            dataset_id: The dataset ID
+
+        Returns:
+            True if fields are registered, False otherwise.
+        """
+        return self._computed_fields.has(app_id, dataset_id)
 
     async def _get_or_create_light_client(self) -> "LightClient":
         """Get or create a light client for trustless verification.
