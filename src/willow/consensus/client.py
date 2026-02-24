@@ -130,44 +130,40 @@ class ConsensusClient:
         self,
         subgrove_id: str,
         app_id: str,
-        name: str,
         schema: str,
         owner_did: str,
         private_key: str,
         public_key_id: str,
-        writers: Optional[list] = None,
-        readers: Optional[list] = None
+        mode: Optional[Dict[str, Any]] = None
     ) -> BroadcastResult:
         """
         Register a subgrove (dataset) on the blockchain.
-        
+
         Args:
             subgrove_id: Unique subgrove identifier
             app_id: Parent application ID
-            name: Human-readable subgrove name
             schema: JSON schema definition
             owner_did: DID of the subgrove owner
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
-            writers: List of writer DIDs (optional)
-            readers: List of reader DIDs (optional)
-            
+            mode: SubgroveMode dict, e.g. {"DataStorage": {"name": "...", ...}}
+                  or {"BlockchainIndexing": {"manifest_ipfs": "...", ...}}.
+                  Defaults to DataStorage when omitted.
+
         Returns:
             BroadcastResult with transaction status
         """
         tx = RegisterSubgroveTx(
             subgrove_id=subgrove_id,
             app_id=app_id,
-            name=name,
             schema=schema,
             owner_did=owner_did,
-            writers=writers or [],
-            readers=readers or [],
+            mode=mode,
             signature="",
             public_key_id=public_key_id,
             nonce=await self._get_next_nonce(owner_did)
         )
-        
+
         return await self._sign_and_broadcast("RegisterSubgrove", tx, private_key)
     
     async def transfer(

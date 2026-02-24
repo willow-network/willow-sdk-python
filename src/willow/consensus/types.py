@@ -118,33 +118,55 @@ class RegisterAppTx:
 
 
 @dataclass
+class SubgroveDataStorage:
+    """DataStorage mode configuration for a subgrove."""
+    name: str = ""
+    writers: List[str] = field(default_factory=list)
+    free_readers: List[str] = field(default_factory=list)
+    read_pricing: Optional[Any] = None
+    required_verifications: int = 1
+
+
+@dataclass
+class SubgroveBlockchainIndexing:
+    """BlockchainIndexing mode configuration for a subgrove."""
+    manifest_ipfs: str = ""
+    manifest_content: Optional[List[int]] = None
+    wasm_modules: Optional[List[Any]] = None
+    execution_mode: Optional[Any] = None
+    indexer_config: Optional[Any] = None
+
+
+# SubgroveMode is represented as a dict with a single key: "DataStorage" or "BlockchainIndexing"
+SubgroveMode = Union[Dict[str, Any], None]
+
+
+@dataclass
 class RegisterSubgroveTx:
     """Subgrove registration transaction."""
     subgrove_id: str
     app_id: str
-    name: str
     schema: str  # JSON schema as string
     owner_did: str
-    writers: List[str] = field(default_factory=list)
-    readers: List[str] = field(default_factory=list)
+    mode: SubgroveMode = None  # None defaults to DataStorage
     signature: str = ""  # hex-encoded
     public_key_id: str = ""
     nonce: int = 0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "subgrove_id": self.subgrove_id,
             "app_id": self.app_id,
-            "name": self.name,
             "schema": self.schema,
             "owner_did": self.owner_did,
-            "writers": self.writers,
-            "readers": self.readers,
             "signature": self.signature,
             "public_key_id": self.public_key_id,
             "nonce": self.nonce
         }
+        if self.mode is not None:
+            result["mode"] = self.mode
+        return result
 
 
 @dataclass
@@ -227,15 +249,30 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
     
     elif tx_type == "RegisterSubgrove":
         tx = transaction
+        mode = tx.mode
+        if mode and "BlockchainIndexing" in mode:
+            bi = mode["BlockchainIndexing"]
+            return (
+                f"RegisterSubgrove\n"
+                f"Subgrove ID: {tx.subgrove_id}\n"
+                f"App ID: {tx.app_id}\n"
+                f"Mode: BlockchainIndexing\n"
+                f"Schema: {tx.schema}\n"
+                f"ManifestIPFS: {bi.get('manifest_ipfs', '')}\n"
+                f"Owner: {tx.owner_did}\n"
+                f"Nonce: {tx.nonce}"
+            )
+        # DataStorage mode (default)
+        ds = mode.get("DataStorage", {}) if mode and "DataStorage" in mode else {}
         return (
             f"RegisterSubgrove\n"
             f"Subgrove ID: {tx.subgrove_id}\n"
             f"App ID: {tx.app_id}\n"
-            f"Name: {tx.name}\n"
+            f"Name: {ds.get('name', '')}\n"
             f"Schema: {tx.schema}\n"
             f"Owner: {tx.owner_did}\n"
-            f"Writers: {','.join(tx.writers)}\n"
-            f"Readers: {','.join(tx.readers)}\n"
+            f"Writers: {','.join(ds.get('writers', []))}\n"
+            f"Readers: {','.join(ds.get('free_readers', []))}\n"
             f"Nonce: {tx.nonce}"
         )
     
