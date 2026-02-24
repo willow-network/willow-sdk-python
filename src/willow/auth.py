@@ -181,5 +181,40 @@ def detect_algorithm_from_did(did: str) -> SignatureAlgorithm:
         return "Ed25519"
 
 
+def sign_request(
+    did: str,
+    private_key_hex: str,
+    public_key_id: str,
+    method: str,
+    path: str
+) -> Dict[str, str]:
+    """
+    Sign an HTTP request for per-request authentication.
+
+    Creates a timestamp-based signature over the request method and path,
+    returning headers that should be included in the HTTP request.
+
+    Args:
+        did: The DID to authenticate as
+        private_key_hex: Hex-encoded private key
+        public_key_id: Public key ID from DID document
+        method: HTTP method (e.g., "GET", "POST")
+        path: API path (e.g., "/data/my-app/my-data")
+
+    Returns:
+        Dictionary of authentication headers to include in the request
+    """
+    timestamp = int(time.time())
+    message = f"{method}:{path}:{timestamp}"
+    algorithm = detect_algorithm_from_did(did)
+    signature = sign_challenge(message, private_key_hex, algorithm)
+    return {
+        "X-DID": did,
+        "X-Public-Key-ID": public_key_id,
+        "X-Signature": signature,
+        "X-Timestamp": str(timestamp),
+    }
+
+
 # Alias for sign_challenge - used by consensus client
 sign_message = sign_challenge

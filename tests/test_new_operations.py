@@ -4,7 +4,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from willow import WillowClient
 from willow.types import (
-    Session,
     TokenInfo,
     BalanceInfo,
     FeeSchedule,
@@ -39,10 +38,10 @@ def mock_http_client():
 @pytest.fixture
 def authenticated_client(client, mock_http_client):
     """Create authenticated client."""
-    client.session = Session(
-        did="did:willow:test",
-        token="test-token",
-        expires_at=9999999999
+    client.set_identity(
+        "did:willow:test",
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "#key1"
     )
     client._http = mock_http_client
     return client

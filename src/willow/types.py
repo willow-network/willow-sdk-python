@@ -7,7 +7,6 @@ indexing-related structures.
 
 from typing import Dict, List, Optional, Any, Literal, Union
 from pydantic import BaseModel, Field
-from datetime import datetime
 from enum import Enum
 
 
@@ -126,47 +125,6 @@ class DidInfo(BaseModel):
     def public_key_hex(self) -> str:
         """Get hex-encoded public key."""
         return self.public_key.hex()
-
-
-# ============================================================================
-# Authentication Types
-# ============================================================================
-
-class AuthenticationChallenge(BaseModel):
-    """Authentication challenge from server."""
-    challenge: str
-    timestamp: int = Field(alias="expires_at")
-    did: Optional[str] = None
-    nonce: Optional[str] = None
-
-    model_config = {"populate_by_name": True}
-
-
-class AuthenticationResponse(BaseModel):
-    """Authentication response to send to server."""
-    did: str
-    challenge: str
-    signature: str
-    public_key_id: str = Field(alias="public_key_id")
-
-    model_config = {"populate_by_name": True}
-
-
-class Session(BaseModel):
-    """Authenticated session information."""
-    session_id: Optional[str] = Field(None, alias="session_id")
-    did: str
-    token: Optional[str] = None
-    created_at: Optional[int] = Field(None, alias="created_at")
-    expires_at: int = Field(alias="expires_at")
-    permissions: Optional[List[str]] = None
-
-    model_config = {"populate_by_name": True}
-
-    def is_expired(self) -> bool:
-        """Check if session is expired."""
-        # Server uses seconds, not milliseconds
-        return int(datetime.now().timestamp()) > self.expires_at
 
 
 # ============================================================================

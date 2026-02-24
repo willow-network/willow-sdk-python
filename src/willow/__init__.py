@@ -13,8 +13,8 @@ Example usage:
             did_info = generate_did()
             await client.register_did(did_info["did_document"])
 
-            # Authenticate
-            await client.authenticate(
+            # Set identity for per-request signing
+            client.set_identity(
                 did_info["did"],
                 did_info["private_key"],
                 did_info["public_key_id"]
@@ -52,7 +52,6 @@ from .errors import (
     HttpError,
     AuthenticationError,
     NotAuthenticatedError,
-    SessionExpiredError,
     ValidationError,
     NotFoundError,
     PermissionDeniedError,
@@ -83,10 +82,6 @@ from .types import (
     PublicKey,
     DidDocument,
     DidInfo,
-    # Authentication Types
-    AuthenticationChallenge,
-    AuthenticationResponse,
-    Session,
     # Schema Types
     FieldType,
     SchemaField,
@@ -221,7 +216,7 @@ __version__ = "0.2.0"
 #     from willow import WillowClient, DEVNET_TEST_ACCOUNT
 #
 #     async with WillowClient("http://localhost:3031") as client:
-#         await client.authenticate(
+#         client.set_identity(
 #             DEVNET_TEST_ACCOUNT["did"],
 #             DEVNET_TEST_ACCOUNT["private_key"],
 #             DEVNET_TEST_ACCOUNT["public_key_id"]
@@ -254,7 +249,6 @@ __all__ = [
     "HttpError",
     "AuthenticationError",
     "NotAuthenticatedError",
-    "SessionExpiredError",
     "ValidationError",
     "NotFoundError",
     "PermissionDeniedError",
@@ -283,10 +277,6 @@ __all__ = [
     "PublicKey",
     "DidDocument",
     "DidInfo",
-    # Authentication Types
-    "AuthenticationChallenge",
-    "AuthenticationResponse",
-    "Session",
     # Schema Types
     "FieldType",
     "SchemaField",

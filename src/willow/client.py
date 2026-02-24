@@ -11,9 +11,6 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from .types import (
     DidDocument,
-    AuthenticationChallenge,
-    AuthenticationResponse,
-    Session,
     RegisterAppRequest,
     RegisterDatasetRequest,
     ApiResponse,
@@ -35,13 +32,12 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import sign_challenge, detect_algorithm_from_did
+from .auth import sign_request
 from .errors import (
     WillowError,
     AuthenticationError,
     NetworkError,
     NotAuthenticatedError,
-    SessionExpiredError,
     ProofVerificationError,
     parse_api_error,
 )
@@ -810,8 +806,8 @@ class WillowClient:
             did_info = generate_did()
             await client.register_did(did_info["did_document"])
 
-            # Authenticate
-            await client.authenticate(
+            # Set identity for per-request signing
+            client.set_identity(
                 did_info["did"],
                 did_info["private_key"],
                 did_info["public_key_id"]
@@ -840,7 +836,9 @@ class WillowClient:
         self.api_url = api_url.rstrip("/")
         self.timeout = timeout
         self.retry_config = retry_config or RetryConfig()
-        self.session: Optional[Session] = None
+        self._did: Optional[str] = None
+        self._private_key: Optional[str] = None
+        self._public_key_id: Optional[str] = None
 
         # Configure proof verification if options provided
         if proof_verification_options:
@@ -913,70 +911,35 @@ class WillowClient:
         )
         return DidDocument(**response["data"])
 
-    async def authenticate(
+    def set_identity(
         self,
         did: str,
         private_key_hex: str,
         public_key_id: str
-    ) -> Session:
-        """Authenticate with DID and private key.
+    ) -> None:
+        """Set identity for per-request authentication.
+
+        Each authenticated request will be signed with the provided
+        private key. No session is created on the server.
 
         Args:
             did: DID to authenticate as
             private_key_hex: Hex-encoded private key
             public_key_id: Public key ID from DID document
-
-        Returns:
-            Authenticated session
         """
-        # Get challenge
-        response = await self._request("GET", f"/auth/challenge/{did}")
-        challenge_data = AuthenticationChallenge(**response["data"])
-
-        # Sign challenge
-        message = f"{did}:{challenge_data.challenge}:{challenge_data.timestamp}"
-        algorithm = detect_algorithm_from_did(did)
-        signature = sign_challenge(message, private_key_hex, algorithm)
-
-        # Create auth response
-        auth_response = AuthenticationResponse(
-            did=did,
-            challenge=challenge_data.challenge,
-            signature=signature,
-            public_key_id=public_key_id
-        )
-
-        # Verify authentication
-        response = await self._request(
-            "POST",
-            "/auth/verify",
-            json=[
-                challenge_data.model_dump(),
-                auth_response.model_dump(by_alias=True)
-            ]
-        )
-
-        # Store session
-        self.session = Session(**response["data"])
-        return self.session
+        self._did = did
+        self._private_key = private_key_hex
+        self._public_key_id = public_key_id
 
     def is_authenticated(self) -> bool:
-        """Check if client is authenticated with a valid session."""
-        return self.session is not None and not self.session.is_expired()
+        """Check if client has identity set for per-request signing."""
+        return self._did is not None and self._private_key is not None
 
-    def get_session(self) -> Optional[Session]:
-        """Get current session if valid.
-
-        Returns:
-            Current session or None if not authenticated or expired
-        """
-        if self.is_authenticated():
-            return self.session
-        return None
-
-    def clear_session(self):
-        """Clear current session (logout)."""
-        self.session = None
+    def clear_identity(self) -> None:
+        """Clear identity (logout)."""
+        self._did = None
+        self._private_key = None
+        self._public_key_id = None
 
     def register_computed_fields(
         self,
@@ -1128,31 +1091,26 @@ class WillowClient:
             WillowError: On API errors
             NetworkError: On network errors
             NotAuthenticatedError: If authentication required but not present
-            SessionExpiredError: If session has expired
         """
         url = f"{self.api_url}{path}"
 
         # Check authentication if required
-        if authenticated:
-            if self.session is None:
-                raise NotAuthenticatedError()
-            if self.session.is_expired():
-                raise SessionExpiredError()
+        if authenticated and not self.is_authenticated():
+            raise NotAuthenticatedError()
 
-        # Add authentication if available
-        params = {}
-        if authenticated and self.session:
-            params = {
-                "did": self.session.did,
-                "session": self.session.token
-            }
+        # Sign request with identity if authenticated
+        headers = {}
+        if authenticated and self.is_authenticated():
+            headers = sign_request(
+                self._did, self._private_key, self._public_key_id, method, path
+            )
 
         try:
             response = await self._http.request(
                 method,
                 url,
                 json=json,
-                params=params
+                headers=headers
             )
 
             # Parse response

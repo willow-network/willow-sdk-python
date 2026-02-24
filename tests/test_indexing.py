@@ -83,7 +83,7 @@ class TestSchemaAndIndexRegistration:
     async def test_register_dataset_with_indexes(self, client1, funded_did, app_id):
         """Test registering a dataset with multiple index types."""
         # Authenticate
-        await client1.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         # Define schema with various field types
         schema = SchemaDefinition(
@@ -152,8 +152,8 @@ class TestIndexedDataStorage:
     async def test_store_indexed_documents(self, client1, client2, funded_did, app_id):
         """Test storing documents that will be indexed."""
         # Authenticate both clients
-        await client1.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         # Test data
         test_posts = [
@@ -213,7 +213,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_query_by_indexed_field(self, client2, funded_did, app_id):
         """Test querying by indexed field (author)."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "filters": {
@@ -228,7 +228,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_range_queries(self, client2, funded_did, app_id):
         """Test range queries on numeric fields."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "filters": {
@@ -246,7 +246,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_fulltext_search(self, client2, funded_did, app_id):
         """Test fulltext search functionality."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "search": {
@@ -262,7 +262,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_sorting(self, client2, funded_did, app_id):
         """Test sorting query results."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "sort": {
@@ -281,7 +281,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_pagination(self, client2, funded_did, app_id):
         """Test pagination with limit and offset."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         # First page
         page1_query = {
@@ -309,7 +309,7 @@ class TestQueryOperations:
     @pytest.mark.asyncio
     async def test_compound_queries(self, client2, funded_did, app_id):
         """Test compound queries with multiple conditions."""
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "filters": {
@@ -335,9 +335,9 @@ class TestCrossNodeConsistency:
     async def test_query_consistency_across_nodes(self, client1, client2, client3, funded_did, app_id):
         """Test that all nodes return consistent query results."""
         # Authenticate all clients
-        await client1.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
-        await client2.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
-        await client3.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client3.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         query = {
             "sort": {"field": "timestamp", "order": "asc"}
@@ -367,7 +367,7 @@ class TestUniqueConstraints:
     @pytest.mark.asyncio
     async def test_unique_constraint_enforcement(self, client1, funded_did, app_id):
         """Test that unique constraints are enforced."""
-        await client1.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         duplicate_post = {
             "title": "Introduction to Python SDK",  # Duplicate title
@@ -388,7 +388,7 @@ class TestPerformance:
     @pytest.mark.asyncio
     async def test_bulk_indexing_performance(self, client1, funded_did, app_id):
         """Test bulk indexing performance."""
-        await client1.authenticate(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
         # Create performance test dataset
         perf_schema = SchemaDefinition(

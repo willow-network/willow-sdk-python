@@ -82,17 +82,7 @@ class NotAuthenticatedError(AuthenticationError):
     authentication was provided at all.
     """
 
-    def __init__(self, message: str = "Not authenticated. Please call authenticate() first."):
-        super().__init__(message, status_code=401)
-
-
-class SessionExpiredError(AuthenticationError):
-    """Error raised when the session has expired.
-
-    The user needs to re-authenticate to continue.
-    """
-
-    def __init__(self, message: str = "Session has expired. Please re-authenticate."):
+    def __init__(self, message: str = "Not authenticated. Please call set_identity() first."):
         super().__init__(message, status_code=401)
 
 
