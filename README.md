@@ -295,9 +295,9 @@ count = await client.validators.get_active_count()
 ### GraphQL Indexing Operations
 
 ```python
-# Execute GraphQL query against a subgraph
+# Execute GraphQL query against a subgrove
 response = await client.indexing.graphql_query(
-    "my-subgraph",
+    "my-subgrove",
     """
     query GetUsers($first: Int!) {
         users(first: $first) {
@@ -318,16 +318,16 @@ if response.errors:
     for error in response.errors:
         print(f"Error: {error.message}")
 
-# List subgraphs
-subgraphs = await client.indexing.list_subgraphs()
+# List subgroves
+subgroves = await client.indexing.list_subgroves()
 
-# Get subgraph info
-subgraph = await client.indexing.get_subgraph("my-subgraph")
-print(f"Status: {subgraph.status}")
-print(f"Latest block: {subgraph.latest_block}")
+# Get subgrove info
+subgrove = await client.indexing.get_subgrove("my-subgrove")
+print(f"Status: {subgrove.status}")
+print(f"Latest block: {subgrove.latest_block}")
 
 # Get indexing status
-status = await client.indexing.get_indexing_status("my-subgraph")
+status = await client.indexing.get_indexing_status("my-subgrove")
 print(f"Progress: {status.progress_percentage}%")
 
 # List indexers
@@ -427,7 +427,7 @@ from willow import (
     # Enums
     SignatureAlgorithm,
     ValidatorStatus,
-    SubgraphStatus,
+    SubgroveStatus,
     IndexerStatus,
 
     # DID Types
@@ -449,7 +449,7 @@ from willow import (
     ValidatorInfo,
 
     # Indexing Types
-    SubgraphInfo,
+    SubgroveInfo,
     IndexerInfo,
     GraphQLResponse,
 )

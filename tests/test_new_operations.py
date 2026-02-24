@@ -10,9 +10,9 @@ from willow.types import (
     ValidatorInfo,
     ValidatorStatus,
     GraphQLResponse,
-    SubgraphInfo,
-    SubgraphStatus,
-    SubgraphIndexingStatus,
+    SubgroveInfo,
+    SubgroveStatus,
+    SubgroveIndexingStatus,
     IndexerInfo,
     IndexerStatus,
     VerificationStats,
@@ -266,7 +266,7 @@ class TestIndexingOperations:
         client._http = mock_http_client
 
         result = await client.indexing.graphql_query(
-            "my-subgraph",
+            "my-subgrove",
             "query { users { id name } }",
             variables={"first": 10}
         )
@@ -275,16 +275,16 @@ class TestIndexingOperations:
         assert result.data["users"][0]["name"] == "Alice"
 
     @pytest.mark.asyncio
-    async def test_list_subgraphs(self, client, mock_http_client):
-        """Test list subgraphs."""
+    async def test_list_subgroves(self, client, mock_http_client):
+        """Test list subgroves."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "success": True,
             "data": [
                 {
-                    "subgraph_id": "subgraph-1",
-                    "name": "My Subgraph",
+                    "subgrove_id": "subgrove-1",
+                    "name": "My Subgrove",
                     "owner_did": "did:willow:test",
                     "status": "synced",
                     "latest_block": 1000,
@@ -296,11 +296,11 @@ class TestIndexingOperations:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.indexing.list_subgraphs()
+        result = await client.indexing.list_subgroves()
 
         assert len(result) == 1
-        assert isinstance(result[0], SubgraphInfo)
-        assert result[0].status == SubgraphStatus.SYNCED
+        assert isinstance(result[0], SubgroveInfo)
+        assert result[0].status == SubgroveStatus.SYNCED
 
     @pytest.mark.asyncio
     async def test_get_indexing_status(self, client, mock_http_client):
@@ -310,7 +310,7 @@ class TestIndexingOperations:
         mock_response.json.return_value = {
             "success": True,
             "data": {
-                "subgraph_id": "subgraph-1",
+                "subgrove_id": "subgrove-1",
                 "synced_block": 900,
                 "target_block": 1000,
                 "progress_percentage": 90.0,
@@ -321,9 +321,9 @@ class TestIndexingOperations:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.indexing.get_indexing_status("subgraph-1")
+        result = await client.indexing.get_indexing_status("subgrove-1")
 
-        assert isinstance(result, SubgraphIndexingStatus)
+        assert isinstance(result, SubgroveIndexingStatus)
         assert result.progress_percentage == 90.0
 
     @pytest.mark.asyncio
@@ -336,7 +336,7 @@ class TestIndexingOperations:
             "data": [
                 {
                     "indexer_did": "did:willow:indexer1",
-                    "subgraphs": ["subgraph-1"],
+                    "subgroves": ["subgrove-1"],
                     "stake_amount": 50000,
                     "endpoint": "http://indexer1.example.com",
                     "status": "active",

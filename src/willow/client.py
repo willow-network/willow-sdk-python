@@ -25,8 +25,8 @@ from .types import (
     FeeSchedule,
     ValidatorInfo,
     GraphQLResponse,
-    SubgraphInfo,
-    SubgraphIndexingStatus,
+    SubgroveInfo,
+    SubgroveIndexingStatus,
     IndexerInfo,
     VerificationStats,
     HealthStatus,
@@ -664,14 +664,14 @@ class IndexingOperations:
 
     async def graphql_query(
         self,
-        subgraph_id: str,
+        subgrove_id: str,
         query: str,
         variables: Optional[Dict[str, Any]] = None
     ) -> GraphQLResponse:
-        """Execute a GraphQL query against a subgraph.
+        """Execute a GraphQL query against a subgrove.
 
         Args:
-            subgraph_id: Subgraph identifier
+            subgrove_id: Subgrove identifier
             query: GraphQL query string
             variables: Optional query variables
 
@@ -684,43 +684,43 @@ class IndexingOperations:
 
         response = await self.client._request(
             "POST",
-            f"/indexing/subgraphs/{subgraph_id}/graphql",
+            f"/indexing/subgroves/{subgrove_id}/graphql",
             json=request_data
         )
         return GraphQLResponse(**response["data"])
 
-    async def list_subgraphs(self) -> List[SubgraphInfo]:
-        """List all subgraphs.
+    async def list_subgroves(self) -> List[SubgroveInfo]:
+        """List all subgroves.
 
         Returns:
-            List of subgraph information
+            List of subgrove information
         """
-        response = await self.client._request("GET", "/indexing/subgraphs")
-        return [SubgraphInfo(**sg) for sg in response.get("data", [])]
+        response = await self.client._request("GET", "/indexing/subgroves")
+        return [SubgroveInfo(**sg) for sg in response.get("data", [])]
 
-    async def get_subgraph(self, subgraph_id: str) -> SubgraphInfo:
-        """Get subgraph information.
+    async def get_subgrove(self, subgrove_id: str) -> SubgroveInfo:
+        """Get subgrove information.
 
         Args:
-            subgraph_id: Subgraph identifier
+            subgrove_id: Subgrove identifier
 
         Returns:
-            Subgraph information
+            Subgrove information
         """
-        response = await self.client._request("GET", f"/indexing/subgraphs/{subgraph_id}")
-        return SubgraphInfo(**response["data"])
+        response = await self.client._request("GET", f"/indexing/subgroves/{subgrove_id}")
+        return SubgroveInfo(**response["data"])
 
-    async def get_indexing_status(self, subgraph_id: str) -> SubgraphIndexingStatus:
-        """Get indexing status for a subgraph.
+    async def get_indexing_status(self, subgrove_id: str) -> SubgroveIndexingStatus:
+        """Get indexing status for a subgrove.
 
         Args:
-            subgraph_id: Subgraph identifier
+            subgrove_id: Subgrove identifier
 
         Returns:
             Indexing status with progress information
         """
-        response = await self.client._request("GET", f"/indexing/subgraphs/{subgraph_id}/status")
-        return SubgraphIndexingStatus(**response["data"])
+        response = await self.client._request("GET", f"/indexing/subgroves/{subgrove_id}/status")
+        return SubgroveIndexingStatus(**response["data"])
 
     async def list_indexers(self) -> List[IndexerInfo]:
         """List all indexers.

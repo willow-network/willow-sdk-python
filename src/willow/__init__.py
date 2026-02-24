@@ -72,7 +72,7 @@ from .types import (
     # Enums
     SignatureAlgorithm,
     ValidatorStatus,
-    SubgraphStatus,
+    SubgroveStatus,
     IndexerStatus,
     PermissionRole,
     IndexType,
@@ -126,9 +126,9 @@ from .types import (
     EthereumAnchor,
     MerkleProof,
     QueryProof,
-    # Subgraph / Indexer Types
-    SubgraphInfo,
-    SubgraphIndexingStatus,
+    # Subgrove / Indexer Types
+    SubgroveInfo,
+    SubgroveIndexingStatus,
     IndexerInfo,
     # Verification Types
     VerificationStats,
@@ -267,7 +267,7 @@ __all__ = [
     # Enums
     "SignatureAlgorithm",
     "ValidatorStatus",
-    "SubgraphStatus",
+    "SubgroveStatus",
     "IndexerStatus",
     "PermissionRole",
     "IndexType",
@@ -317,9 +317,9 @@ __all__ = [
     "EthereumAnchor",
     "MerkleProof",
     "QueryProof",
-    # Subgraph / Indexer Types
-    "SubgraphInfo",
-    "SubgraphIndexingStatus",
+    # Subgrove / Indexer Types
+    "SubgroveInfo",
+    "SubgroveIndexingStatus",
     "IndexerInfo",
     # Verification Types
     "VerificationStats",

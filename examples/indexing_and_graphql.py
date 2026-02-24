@@ -3,7 +3,7 @@ Willow Python SDK - Indexing and GraphQL Example
 
 This example demonstrates blockchain indexing features:
 1. Query indexed blockchain data via GraphQL
-2. Check subgraph/indexer status
+2. Check subgrove/indexer status
 3. Verify indexing results with cryptographic proofs
 
 Willow provides blockchain indexing with cryptographic proofs for every
@@ -12,7 +12,7 @@ query result, enabling trustless verification.
 Prerequisites:
 - pip install willow-sdk
 - Run a local Willow node with indexing enabled
-- Have a deployed subgraph
+- Have a deployed subgrove
 """
 
 import asyncio
@@ -45,7 +45,7 @@ async def main():
         try:
             # Query indexed blockchain events
             result = await client.indexing.graphql_query(
-                subgraph_id="uniswap-v3-mainnet",
+                subgrove_id="uniswap-v3-mainnet",
                 query="""
                     query GetRecentSwaps {
                         swaps(first: 5, orderBy: timestamp, orderDirection: desc) {
@@ -72,27 +72,27 @@ async def main():
         except WillowError as e:
             print(f"Query error: {e}")
 
-        # 2. List Available Subgraphs
-        print("\n2. List Available Subgraphs")
+        # 2. List Available Subgroves
+        print("\n2. List Available Subgroves")
         print("-" * 40)
 
         try:
-            subgraphs = await client.indexing.list_subgraphs()
-            print(f"Found {len(subgraphs)} subgraphs:")
-            for sg in subgraphs[:5]:  # Show first 5
+            subgroves = await client.indexing.list_subgroves()
+            print(f"Found {len(subgroves)} subgroves:")
+            for sg in subgroves[:5]:  # Show first 5
                 print(f"  - {sg.id}: {sg.name}")
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 3. Get Subgraph Details
-        print("\n3. Get Subgraph Details")
+        # 3. Get Subgrove Details
+        print("\n3. Get Subgrove Details")
         print("-" * 40)
 
         try:
-            subgraph = await client.indexing.get_subgraph("uniswap-v3-mainnet")
-            print(f"Name: {subgraph.name}")
-            print(f"Status: {subgraph.status}")
-            print(f"Network: {subgraph.network}")
+            subgrove = await client.indexing.get_subgrove("uniswap-v3-mainnet")
+            print(f"Name: {subgrove.name}")
+            print(f"Status: {subgrove.status}")
+            print(f"Network: {subgrove.network}")
         except WillowError as e:
             print(f"Error: {e}")
 

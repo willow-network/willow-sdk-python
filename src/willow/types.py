@@ -28,8 +28,8 @@ class ValidatorStatus(str, Enum):
     INACTIVE = "inactive"
 
 
-class SubgraphStatus(str, Enum):
-    """Subgraph status."""
+class SubgroveStatus(str, Enum):
+    """Subgrove status."""
     SYNCING = "syncing"
     SYNCED = "synced"
     PAUSED = "paused"
@@ -562,15 +562,15 @@ class GraphQLResponse(BaseModel):
 
 
 # ============================================================================
-# Subgraph / Indexer Types
+# Subgrove / Indexer Types
 # ============================================================================
 
-class SubgraphInfo(BaseModel):
-    """Subgraph information."""
-    subgraph_id: str = Field(alias="subgraph_id")
+class SubgroveInfo(BaseModel):
+    """Subgrove information."""
+    subgrove_id: str = Field(alias="subgrove_id")
     name: str
     owner_did: str = Field(alias="owner_did")
-    status: SubgraphStatus
+    status: SubgroveStatus
     latest_block: int = Field(alias="latest_block")
     indexers: List[str] = Field(default_factory=list)
     manifest_ipfs: str = Field(alias="manifest_ipfs")
@@ -578,9 +578,9 @@ class SubgraphInfo(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-class SubgraphIndexingStatus(BaseModel):
-    """Subgraph indexing status with detailed progress."""
-    subgraph_id: str = Field(alias="subgraph_id")
+class SubgroveIndexingStatus(BaseModel):
+    """Subgrove indexing status with detailed progress."""
+    subgrove_id: str = Field(alias="subgrove_id")
     synced_block: int = Field(alias="synced_block")
     target_block: int = Field(alias="target_block")
     progress_percentage: float = Field(alias="progress_percentage")
@@ -593,7 +593,7 @@ class SubgraphIndexingStatus(BaseModel):
 class IndexerInfo(BaseModel):
     """Indexer information."""
     indexer_did: str = Field(alias="indexer_did")
-    subgraphs: List[str] = Field(default_factory=list)
+    subgroves: List[str] = Field(default_factory=list)
     stake_amount: int = Field(alias="stake_amount")
     endpoint: str
     status: IndexerStatus
