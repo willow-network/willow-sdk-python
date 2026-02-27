@@ -98,13 +98,14 @@ class RegisterAppTx:
     app_type: str
     owner_did: str
     admins: List[str] = field(default_factory=list)
+    initial_funding: Optional[int] = None
     signature: str = ""  # hex-encoded
     public_key_id: str = ""
     nonce: int = 0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
+        result = {
             "app_id": self.app_id,
             "name": self.name,
             "description": self.description,
@@ -115,6 +116,9 @@ class RegisterAppTx:
             "public_key_id": self.public_key_id,
             "nonce": self.nonce
         }
+        if self.initial_funding is not None:
+            result["initial_funding"] = self.initial_funding
+        return result
 
 
 @dataclass
@@ -236,7 +240,7 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
     
     elif tx_type == "RegisterApp":
         tx = transaction
-        return (
+        msg = (
             f"RegisterApp\n"
             f"App ID: {tx.app_id}\n"
             f"Name: {tx.name}\n"
@@ -246,6 +250,9 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
             f"Admins: {','.join(tx.admins)}\n"
             f"Nonce: {tx.nonce}"
         )
+        if tx.initial_funding is not None and tx.initial_funding > 0:
+            msg += f"\nFunding: {tx.initial_funding}"
+        return msg
     
     elif tx_type == "RegisterSubgrove":
         tx = transaction
