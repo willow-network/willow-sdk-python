@@ -561,6 +561,21 @@ class GraphQLResponse(BaseModel):
     proof: Optional[QueryProof] = None
 
 
+class SqlRequest(BaseModel):
+    """Request body for SQL queries."""
+    query: str
+    include_proof: Optional[bool] = None
+
+
+class SqlResponse(BaseModel):
+    """Response from a SQL query."""
+    columns: List[str]
+    rows: List[List[Any]]
+    total: Optional[int] = None
+    warnings: List[str] = Field(default_factory=list)
+    proof: Optional[QueryProof] = None
+
+
 # ============================================================================
 # Subgrove / Indexer Types
 # ============================================================================

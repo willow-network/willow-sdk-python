@@ -25,6 +25,8 @@ from .types import (
     FeeSchedule,
     ValidatorInfo,
     GraphQLResponse,
+    SqlRequest,
+    SqlResponse,
     SubgroveInfo,
     SubgroveIndexingStatus,
     IndexerInfo,
@@ -688,6 +690,30 @@ class IndexingOperations:
             json=request_data
         )
         return GraphQLResponse(**response["data"])
+
+    async def sql_query(
+        self,
+        subgrove_id: str,
+        query: str,
+        include_proof: bool = True,
+    ) -> SqlResponse:
+        """Execute a SQL query against a subgrove.
+
+        Args:
+            subgrove_id: The subgrove to query
+            query: SQL SELECT query string
+            include_proof: Whether to include Merkle proof
+
+        Returns:
+            SqlResponse with columns, rows, and optional proof
+        """
+        request = SqlRequest(query=query, include_proof=include_proof)
+        response = await self.client._request(
+            "POST",
+            f"/sql/{subgrove_id}",
+            json=request.model_dump(exclude_none=True),
+        )
+        return SqlResponse(**response)
 
     async def list_subgroves(self) -> List[SubgroveInfo]:
         """List all subgroves.
