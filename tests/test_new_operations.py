@@ -288,8 +288,7 @@ class TestIndexingOperations:
                     "owner_did": "did:willow:test",
                     "status": "synced",
                     "latest_block": 1000,
-                    "indexers": ["indexer-1"],
-                    "manifest_ipfs": "QmTest"
+                    "indexers": ["indexer-1"]
                 }
             ]
         }

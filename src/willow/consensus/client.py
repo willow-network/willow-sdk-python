@@ -147,7 +147,7 @@ class ConsensusClient:
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
             mode: SubgroveMode dict, e.g. {"DataStorage": {"name": "...", ...}}
-                  or {"BlockchainIndexing": {"manifest_ipfs": "...", ...}}.
+                  or {"BlockchainIndexing": {"manifest_content": [...], ...}}.
                   Defaults to DataStorage when omitted.
 
         Returns:

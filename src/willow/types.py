@@ -588,7 +588,6 @@ class SubgroveInfo(BaseModel):
     status: SubgroveStatus
     latest_block: int = Field(alias="latest_block")
     indexers: List[str] = Field(default_factory=list)
-    manifest_ipfs: str = Field(alias="manifest_ipfs")
 
     model_config = {"populate_by_name": True}
 

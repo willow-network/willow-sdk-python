@@ -134,7 +134,6 @@ class SubgroveDataStorage:
 @dataclass
 class SubgroveBlockchainIndexing:
     """BlockchainIndexing mode configuration for a subgrove."""
-    manifest_ipfs: str = ""
     manifest_content: Optional[List[int]] = None
     wasm_modules: Optional[List[Any]] = None
     execution_mode: Optional[Any] = None
@@ -265,7 +264,6 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
                 f"App ID: {tx.app_id}\n"
                 f"Mode: BlockchainIndexing\n"
                 f"Schema: {tx.schema}\n"
-                f"ManifestIPFS: {bi.get('manifest_ipfs', '')}\n"
                 f"Owner: {tx.owner_did}\n"
                 f"Nonce: {tx.nonce}"
             )
