@@ -153,11 +153,86 @@ class Erc8004ValidationSummary:
     dispute_stats: DisputeStats
 
 
+@dataclass
+class AgentReputationBrief:
+    score: int
+    tier: str
+
+
+@dataclass
+class Erc8004AgentListItem:
+    did: str
+    agent_uri: str
+    chain_id: int
+    agent_id: int
+    reputation: AgentReputationBrief
+    validation_count: int
+    average_validation_score: float
+    registered_at: int
+    eth_address: Optional[str] = None
+
+
+@dataclass
+class Erc8004AgentListResponse:
+    agents: List[Erc8004AgentListItem]
+    total: int
+    offset: int
+    limit: int
+
+
 class Erc8004Client:
     """Client for ERC-8004 agent identity operations."""
 
     def __init__(self, api_url: str):
         self._api_url = api_url.rstrip("/")
+
+    async def list_agents(
+        self,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        min_score: Optional[int] = None,
+        tier: Optional[str] = None,
+    ) -> Erc8004AgentListResponse:
+        """List/search ERC-8004 registered agents with optional filters."""
+        params = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if offset is not None:
+            params["offset"] = str(offset)
+        if min_score is not None:
+            params["min_score"] = str(min_score)
+        if tier is not None:
+            params["tier"] = tier
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._api_url}/agents", params=params
+            ) as resp:
+                body = await resp.json()
+                if body.get("success") is False:
+                    raise Exception(body.get("error", "Unknown error"))
+                data = body["data"]
+                return Erc8004AgentListResponse(
+                    agents=[
+                        Erc8004AgentListItem(
+                            did=a["did"],
+                            eth_address=a.get("eth_address"),
+                            agent_uri=a["agent_uri"],
+                            chain_id=a["chain_id"],
+                            agent_id=a["agent_id"],
+                            reputation=AgentReputationBrief(
+                                score=a["reputation"]["score"],
+                                tier=a["reputation"]["tier"],
+                            ),
+                            validation_count=a["validation_count"],
+                            average_validation_score=a["average_validation_score"],
+                            registered_at=a["registered_at"],
+                        )
+                        for a in data["agents"]
+                    ],
+                    total=data["total"],
+                    offset=data["offset"],
+                    limit=data["limit"],
+                )
 
     async def get_agent_registration(self, did: str) -> AgentRegistrationJson:
         """Fetch the ERC-8004 registration JSON for an agent DID."""
