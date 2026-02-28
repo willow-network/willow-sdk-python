@@ -693,6 +693,7 @@ class IndexingOperations:
 
     async def sql_query(
         self,
+        app_id: str,
         subgrove_id: str,
         query: str,
         include_proof: bool = True,
@@ -700,6 +701,7 @@ class IndexingOperations:
         """Execute a SQL query against a subgrove.
 
         Args:
+            app_id: The application ID
             subgrove_id: The subgrove to query
             query: SQL SELECT query string
             include_proof: Whether to include Merkle proof
@@ -710,7 +712,7 @@ class IndexingOperations:
         request = SqlRequest(query=query, include_proof=include_proof)
         response = await self.client._request(
             "POST",
-            f"/sql/{subgrove_id}",
+            f"/sql/{app_id}/{subgrove_id}",
             json=request.model_dump(exclude_none=True),
         )
         return SqlResponse(**response)
