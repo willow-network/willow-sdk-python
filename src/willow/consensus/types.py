@@ -128,7 +128,6 @@ class SubgroveDataStorage:
     writers: List[str] = field(default_factory=list)
     free_readers: List[str] = field(default_factory=list)
     read_pricing: Optional[Any] = None
-    required_verifications: int = 1
 
 
 @dataclass
