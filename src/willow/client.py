@@ -50,6 +50,7 @@ from .computed_fields import (
     ComputedFieldSet,
     apply_computed_fields_to_response,
 )
+from .privacy import PrivacyOperations
 
 if TYPE_CHECKING:
     from .light_client import LightClient
@@ -886,6 +887,7 @@ class WillowClient:
         self.token = TokenOperations(self)
         self.validators = ValidatorOperations(self)
         self.indexing = IndexingOperations(self)
+        self.privacy = PrivacyOperations(self)
 
         # HTTP client
         self._http = httpx.AsyncClient(timeout=timeout)

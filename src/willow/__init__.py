@@ -205,6 +205,12 @@ from .consensus import (
     TransactionStatus,
     ConsensusError as ConsensusModuleError,
 )
+from .privacy import (
+    PrivacyConfig,
+    CommitmentFrequency,
+    EncryptedKeyGrant,
+    PrivacyOperations,
+)
 
 __version__ = "0.2.0"
 
@@ -376,6 +382,11 @@ __all__ = [
     "BroadcastResult",
     "TransactionStatus",
     "ConsensusModuleError",
+    # Privacy
+    "PrivacyConfig",
+    "CommitmentFrequency",
+    "EncryptedKeyGrant",
+    "PrivacyOperations",
     # Test Account
     "DEVNET_TEST_ACCOUNT",
     # Computed Fields
