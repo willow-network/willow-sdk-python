@@ -162,19 +162,15 @@ class TestValidatorOperations:
                     "validator_did": "did:willow:validator1",
                     "name": "Validator 1",
                     "stake_amount": 100000,
-                    "commission_rate": 500,
                     "status": "active",
-                    "voting_power": 1000,
-                    "delegator_count": 10
+                    "voting_power": 1000
                 },
                 {
                     "validator_did": "did:willow:validator2",
                     "name": "Validator 2",
                     "stake_amount": 50000,
-                    "commission_rate": 300,
                     "status": "active",
-                    "voting_power": 500,
-                    "delegator_count": 5
+                    "voting_power": 500
                 }
             ]
         }
@@ -199,10 +195,8 @@ class TestValidatorOperations:
                 "validator_did": "did:willow:validator1",
                 "name": "Validator 1",
                 "stake_amount": 100000,
-                "commission_rate": 500,
                 "status": "active",
-                "voting_power": 1000,
-                "delegator_count": 10
+                "voting_power": 1000
             }
         }
         mock_http_client.request = AsyncMock(return_value=mock_response)

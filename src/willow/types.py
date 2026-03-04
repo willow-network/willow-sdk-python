@@ -482,10 +482,8 @@ class ValidatorInfo(BaseModel):
     validator_did: str = Field(alias="validator_did")
     name: Optional[str] = None
     stake_amount: int = Field(alias="stake_amount")
-    commission_rate: int = Field(alias="commission_rate")  # basis points
     status: ValidatorStatus
     voting_power: int = Field(alias="voting_power")
-    delegator_count: int = Field(0, alias="delegator_count")
     consensus_pubkey: Optional[str] = Field(None, alias="consensus_pubkey")
 
     model_config = {"populate_by_name": True}
@@ -495,7 +493,6 @@ class StakeRequest(BaseModel):
     """Stake request."""
     validator_did: str = Field(alias="validator_did")
     amount: int
-    commission_rate: int = Field(alias="commission_rate")
     consensus_pubkey: str = Field(alias="consensus_pubkey")
 
     model_config = {"populate_by_name": True}

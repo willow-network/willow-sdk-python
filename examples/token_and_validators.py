@@ -111,7 +111,7 @@ async def main():
                 print(f"Address: {validator.address}")
                 print(f"Status: {validator.status}")
                 print(f"Stake: {validator.stake}")
-                print(f"Commission: {validator.commission_rate}%")
+                print(f"Voting Power: {validator.voting_power}")
         except WillowError as e:
             print(f"Error: {e}")
 
