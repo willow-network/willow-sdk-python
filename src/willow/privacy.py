@@ -15,7 +15,6 @@ Typical workflow:
 
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from .errors import WillowError
@@ -32,15 +31,50 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
-class CommitmentFrequency(str, Enum):
-    """Frequency at which privacy commitments are posted on-chain.
+class CommitmentFrequency:
+    """How often the provider must publish state root commitments on-chain.
 
-    Controls the trade-off between privacy overhead and verification latency.
+    Produces JSON matching Rust serde serialization:
+    - ``CommitmentFrequency.every_update()`` → ``"EveryUpdate"``
+    - ``CommitmentFrequency.every_n_blocks(10)`` → ``{"EveryNBlocks": 10}``
+    - ``CommitmentFrequency.every_n_seconds(60)`` → ``{"EveryNSeconds": 60}``
+    - ``CommitmentFrequency.never()`` → ``"Never"``
     """
 
-    EVERY_BLOCK = "every_block"
-    EVERY_EPOCH = "every_epoch"
-    ON_DEMAND = "on_demand"
+    def __init__(self, value: Union[str, Dict[str, int]]):
+        self._value = value
+
+    @staticmethod
+    def every_update() -> "CommitmentFrequency":
+        """Commit after every write/block update (default, strongest freshness)."""
+        return CommitmentFrequency("EveryUpdate")
+
+    @staticmethod
+    def every_n_blocks(n: int) -> "CommitmentFrequency":
+        """Commit every ``n`` blocks processed."""
+        return CommitmentFrequency({"EveryNBlocks": n})
+
+    @staticmethod
+    def every_n_seconds(n: int) -> "CommitmentFrequency":
+        """Commit at least every ``n`` seconds."""
+        return CommitmentFrequency({"EveryNSeconds": n})
+
+    @staticmethod
+    def never() -> "CommitmentFrequency":
+        """No on-chain commitments."""
+        return CommitmentFrequency("Never")
+
+    def to_json(self) -> Union[str, Dict[str, int]]:
+        """Return the JSON-serializable representation."""
+        return self._value
+
+    def __repr__(self) -> str:
+        return f"CommitmentFrequency({self._value!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, CommitmentFrequency):
+            return self._value == other._value
+        return NotImplemented
 
 
 # ============================================================================
@@ -60,12 +94,14 @@ class PrivacyConfig:
     """
 
     allowed_indexers: Optional[List[str]] = None
-    commitment_frequency: CommitmentFrequency = CommitmentFrequency.EVERY_EPOCH
+    commitment_frequency: CommitmentFrequency = field(
+        default_factory=CommitmentFrequency.every_update
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         result: Dict[str, Any] = {
-            "commitment_frequency": self.commitment_frequency.value,
+            "commitment_frequency": self.commitment_frequency.to_json(),
         }
         if self.allowed_indexers is not None:
             result["allowed_indexers"] = self.allowed_indexers
