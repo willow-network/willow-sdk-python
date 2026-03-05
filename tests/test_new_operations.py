@@ -61,8 +61,10 @@ class TestTokenOperations:
                 "name": "Willow",
                 "symbol": "WILL",
                 "decimals": 18,
-                "total_supply": 1000000000,
-                "minted_supply": 500000000
+                "genesis_supply": 400000000,
+                "minted_supply": 100000000,
+                "max_supply": 1000000000,
+                "circulating_supply": 500000000
             }
         }
         mock_http_client.request = AsyncMock(return_value=mock_response)
@@ -74,7 +76,8 @@ class TestTokenOperations:
         assert result.name == "Willow"
         assert result.symbol == "WILL"
         assert result.decimals == 18
-        assert result.total_supply == 1000000000
+        assert result.genesis_supply == 400000000
+        assert result.max_supply == 1000000000
 
     @pytest.mark.asyncio
     async def test_get_balance(self, client, mock_http_client):

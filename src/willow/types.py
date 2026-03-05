@@ -435,8 +435,10 @@ class TokenInfo(BaseModel):
     name: str
     symbol: str
     decimals: int
-    total_supply: int = Field(alias="total_supply")
+    genesis_supply: int = Field(alias="genesis_supply")
     minted_supply: int = Field(alias="minted_supply")
+    max_supply: int = Field(alias="max_supply")
+    circulating_supply: int = Field(alias="circulating_supply")
 
     model_config = {"populate_by_name": True}
 

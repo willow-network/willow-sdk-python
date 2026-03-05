@@ -258,7 +258,7 @@ print(f"Write access: {permissions.write_access}")
 token_info = await client.token.get_info()
 print(f"Token: {token_info.name} ({token_info.symbol})")
 print(f"Decimals: {token_info.decimals}")
-print(f"Total supply: {token_info.total_supply}")
+print(f"Max supply: {token_info.max_supply}")
 
 # Get balance for a DID
 balance = await client.token.get_balance(did)

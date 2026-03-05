@@ -47,7 +47,8 @@ async def main():
             print(f"Name: {token_info.name}")
             print(f"Symbol: {token_info.symbol}")
             print(f"Decimals: {token_info.decimals}")
-            print(f"Total Supply: {token_info.total_supply}")
+            print(f"Max Supply: {token_info.max_supply}")
+            print(f"Circulating Supply: {token_info.circulating_supply}")
         except WillowError as e:
             print(f"Error: {e}")
 
