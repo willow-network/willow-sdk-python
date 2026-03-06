@@ -134,10 +134,15 @@ class TestTokenOperations:
         mock_response.json.return_value = {
             "success": True,
             "data": {
-                "storage_fee_per_byte_per_day": 100,
+                "did_registration": 100,
+                "app_registration": 200,
+                "subgrove_registration": 150,
+                "base_tx_cost": 50,
+                "cost_per_byte": 10,
                 "query_fee": 10,
-                "indexing_fee_per_block": 1000,
-                "minimum_app_balance": 10000
+                "transfer_fee_percentage": 25,
+                "max_tx_size_bytes": 1048576,
+                "max_data_payload_bytes": 524288
             }
         }
         mock_http_client.request = AsyncMock(return_value=mock_response)
@@ -146,7 +151,7 @@ class TestTokenOperations:
         result = await client.token.get_fee_schedule()
 
         assert isinstance(result, FeeSchedule)
-        assert result.storage_fee_per_byte_per_day == 100
+        assert result.did_registration == 100
         assert result.query_fee == 10
 
 

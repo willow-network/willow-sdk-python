@@ -466,11 +466,16 @@ class TransferRequest(BaseModel):
 # ============================================================================
 
 class FeeSchedule(BaseModel):
-    """Fee schedule for storage and operations."""
-    storage_fee_per_byte_per_day: int = Field(alias="storage_fee_per_byte_per_day")
+    """Fee schedule for operations."""
+    did_registration: int = Field(alias="did_registration")
+    app_registration: int = Field(alias="app_registration")
+    subgrove_registration: int = Field(alias="subgrove_registration")
+    base_tx_cost: int = Field(alias="base_tx_cost")
+    cost_per_byte: int = Field(alias="cost_per_byte")
     query_fee: int = Field(alias="query_fee")
-    indexing_fee_per_block: int = Field(alias="indexing_fee_per_block")
-    minimum_app_balance: int = Field(alias="minimum_app_balance")
+    transfer_fee_percentage: int = Field(alias="transfer_fee_percentage")
+    max_tx_size_bytes: int = Field(alias="max_tx_size_bytes")
+    max_data_payload_bytes: int = Field(alias="max_data_payload_bytes")
 
     model_config = {"populate_by_name": True}
 

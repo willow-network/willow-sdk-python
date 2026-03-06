@@ -80,9 +80,12 @@ async def main():
 
         try:
             fees = await client.token.get_fee_schedule()
-            print(f"Storage per byte: {fees.storage_per_byte}")
-            print(f"Query fee: {fees.query_fee}")
-            print(f"Transaction fee: {fees.transaction_fee}")
+            print(f"Base TX Cost: {fees.base_tx_cost} wei")
+            print(f"Cost Per Byte: {fees.cost_per_byte} wei")
+            print(f"Query Fee: {fees.query_fee} wei")
+            print(f"Transfer Fee: {fees.transfer_fee_percentage} bps")
+            print(f"Max TX Size: {fees.max_tx_size_bytes} bytes")
+            print(f"Max Data Payload: {fees.max_data_payload_bytes} bytes")
         except WillowError as e:
             print(f"Error: {e}")
 

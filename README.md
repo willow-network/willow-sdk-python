@@ -270,8 +270,9 @@ app_balance = await client.token.get_app_balance("my-app")
 
 # Get fee schedule
 fees = await client.token.get_fee_schedule()
-print(f"Storage fee: {fees.storage_fee_per_byte_per_day} per byte/day")
-print(f"Query fee: {fees.query_fee}")
+print(f"Base TX cost: {fees.base_tx_cost} wei")
+print(f"Cost per byte: {fees.cost_per_byte} wei")
+print(f"Query fee: {fees.query_fee} wei")
 ```
 
 ### Validator Operations
