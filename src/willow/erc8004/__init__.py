@@ -26,8 +26,6 @@ class AgentChainRegistration:
 
 @dataclass
 class AgentReputationSummary:
-    score: int
-    tier: str
     checkpoint_success_rate: float
     verification_accuracy: float
     active_days: int
@@ -50,8 +48,6 @@ class AgentRegistrationJson:
 @dataclass
 class ReputationAttestation:
     did: str
-    score: int
-    tier: str
     metrics: dict
     proof: str
     block_height: int
@@ -61,8 +57,6 @@ class ReputationAttestation:
 @dataclass
 class ReputationHistoryEvent:
     event_type: str
-    score_delta: int
-    new_score: int
     block_height: int
     timestamp: int
     reference: Optional[str] = None
@@ -154,20 +148,12 @@ class Erc8004ValidationSummary:
 
 
 @dataclass
-class AgentReputationBrief:
-    score: int
-    tier: str
-
-
-@dataclass
 class Erc8004AgentListItem:
     did: str
     agent_uri: str
     chain_id: int
     agent_id: int
-    reputation: AgentReputationBrief
     validation_count: int
-    average_validation_score: float
     registered_at: int
     eth_address: Optional[str] = None
 
@@ -190,8 +176,6 @@ class Erc8004Client:
         self,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        min_score: Optional[int] = None,
-        tier: Optional[str] = None,
     ) -> Erc8004AgentListResponse:
         """List/search ERC-8004 registered agents with optional filters."""
         params = {}
@@ -199,10 +183,6 @@ class Erc8004Client:
             params["limit"] = str(limit)
         if offset is not None:
             params["offset"] = str(offset)
-        if min_score is not None:
-            params["min_score"] = str(min_score)
-        if tier is not None:
-            params["tier"] = tier
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{self._api_url}/agents", params=params
@@ -219,12 +199,7 @@ class Erc8004Client:
                             agent_uri=a["agent_uri"],
                             chain_id=a["chain_id"],
                             agent_id=a["agent_id"],
-                            reputation=AgentReputationBrief(
-                                score=a["reputation"]["score"],
-                                tier=a["reputation"]["tier"],
-                            ),
                             validation_count=a["validation_count"],
-                            average_validation_score=a["average_validation_score"],
                             registered_at=a["registered_at"],
                         )
                         for a in data["agents"]
@@ -317,8 +292,6 @@ class Erc8004Client:
                 data = body["data"]
                 return ReputationAttestation(
                     did=data["did"],
-                    score=data["score"],
-                    tier=data["tier"],
                     metrics=data["metrics"],
                     proof=data["proof"],
                     block_height=data["block_height"],
@@ -346,8 +319,6 @@ class Erc8004Client:
                     events=[
                         ReputationHistoryEvent(
                             event_type=e["event_type"],
-                            score_delta=e["score_delta"],
-                            new_score=e["new_score"],
                             block_height=e["block_height"],
                             timestamp=e["timestamp"],
                             reference=e.get("reference"),
