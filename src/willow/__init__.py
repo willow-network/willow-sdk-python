@@ -87,6 +87,8 @@ from .types import (
     SchemaField,
     IndexDefinition,
     SchemaDefinition,
+    # Retention Types
+    RetentionWindow,
     # Registration Types
     RegisterAppRequest,
     RegisterDatasetRequest,
@@ -200,6 +202,7 @@ from .consensus import (
     RegisterDidTx,
     RegisterAppTx,
     RegisterSubgroveTx,
+    RetentionWindow as ConsensusRetentionWindow,
     TransferTx,
     BroadcastResult,
     TransactionStatus,
@@ -288,6 +291,8 @@ __all__ = [
     "SchemaField",
     "IndexDefinition",
     "SchemaDefinition",
+    # Retention Types
+    "RetentionWindow",
     # Registration Types
     "RegisterAppRequest",
     "RegisterDatasetRequest",

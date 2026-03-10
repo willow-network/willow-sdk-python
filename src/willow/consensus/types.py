@@ -131,12 +131,20 @@ class SubgroveDataStorage:
 
 
 @dataclass
+class RetentionWindow:
+    """How long real-time indexed data is retained on consensus nodes."""
+    type: str  # "Blocks", "Seconds", or "Indefinite"
+    value: Optional[int] = None
+
+
+@dataclass
 class SubgroveBlockchainIndexing:
     """BlockchainIndexing mode configuration for a subgrove."""
     manifest_content: Optional[List[int]] = None
     wasm_modules: Optional[List[Any]] = None
     execution_mode: Optional[Any] = None
     indexer_config: Optional[Any] = None
+    retention_window: Optional[RetentionWindow] = None
 
 
 # SubgroveMode is represented as a dict with a single key: "DataStorage" or "BlockchainIndexing"
@@ -151,6 +159,7 @@ class RegisterSubgroveTx:
     schema: str  # JSON schema as string
     owner_did: str
     mode: SubgroveMode = None  # None defaults to DataStorage
+    retention_window: Optional[RetentionWindow] = None
     signature: str = ""  # hex-encoded
     public_key_id: str = ""
     nonce: int = 0
@@ -168,6 +177,11 @@ class RegisterSubgroveTx:
         }
         if self.mode is not None:
             result["mode"] = self.mode
+        if self.retention_window is not None:
+            result["retention_window"] = {
+                "type": self.retention_window.type,
+                **({"value": self.retention_window.value} if self.retention_window.value is not None else {})
+            }
         return result
 
 

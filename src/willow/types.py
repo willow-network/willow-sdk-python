@@ -168,6 +168,16 @@ class SchemaDefinition(BaseModel):
 
 
 # ============================================================================
+# Retention Types
+# ============================================================================
+
+class RetentionWindow(BaseModel):
+    """How long real-time indexed data is retained on consensus nodes."""
+    type: str  # "Blocks", "Seconds", or "Indefinite"
+    value: Optional[int] = None
+
+
+# ============================================================================
 # Registration Types
 # ============================================================================
 
@@ -231,6 +241,7 @@ class SubgroveRegistration(BaseModel):
     owner_did: str = Field(alias="owner_did")
     writers: List[str] = Field(default_factory=list)
     readers: List[str] = Field(default_factory=list)
+    retention_window: Optional[RetentionWindow] = None
     created_at: int = Field(alias="created_at")
     updated_at: int = Field(alias="updated_at")
 

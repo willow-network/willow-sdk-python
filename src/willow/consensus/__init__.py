@@ -10,6 +10,7 @@ from .types import (
     RegisterDidTx,
     RegisterAppTx,
     RegisterSubgroveTx,
+    RetentionWindow,
     TransferTx,
     BroadcastResult,
     TransactionStatus,
@@ -21,8 +22,9 @@ from .config import ConsensusConfigBuilder
 __all__ = [
     "ConsensusClient",
     "RegisterDidTx",
-    "RegisterAppTx", 
+    "RegisterAppTx",
     "RegisterSubgroveTx",
+    "RetentionWindow",
     "TransferTx",
     "BroadcastResult",
     "TransactionStatus",
