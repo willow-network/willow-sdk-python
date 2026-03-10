@@ -133,7 +133,7 @@ class SubgroveDataStorage:
 @dataclass
 class RetentionWindow:
     """How long real-time indexed data is retained on consensus nodes."""
-    type: str  # "Blocks", "Seconds", or "Indefinite"
+    type: str  # "Blocks", "Seconds", "Indefinite", or "VerifyOnly"
     value: Optional[int] = None
 
 
