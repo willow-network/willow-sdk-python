@@ -58,6 +58,8 @@ asyncio.run(main())
 - **Token Operations**: Query balances, fees, and token info
 - **Validator Operations**: List validators, check staking info
 - **GraphQL Indexing**: Query blockchain data with proofs
+- **File Storage**: Upload, download, list, and delete files with chunk Merkle verification
+- **File Encryption**: XChaCha20-Poly1305 encryption/decryption for private files
 - **Type Safety**: Full type hints and Pydantic models
 - **Async/Await**: Modern async Python with httpx
 - **Builder Pattern**: Fluent API for client configuration

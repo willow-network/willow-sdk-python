@@ -235,8 +235,73 @@ class DataStoreTx:
         }
 
 
+@dataclass
+class StoreFileManifestTx:
+    """Store file manifest transaction."""
+    app_id: str
+    subgrove_id: str
+    file_key: str
+    filename: str
+    content_type: str
+    total_size: int
+    content_hash: str
+    chunk_count: int
+    chunk_size: int
+    chunk_merkle_root: str
+    owner_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "app_id": self.app_id,
+            "subgrove_id": self.subgrove_id,
+            "file_key": self.file_key,
+            "filename": self.filename,
+            "content_type": self.content_type,
+            "total_size": self.total_size,
+            "content_hash": self.content_hash,
+            "chunk_count": self.chunk_count,
+            "chunk_size": self.chunk_size,
+            "chunk_merkle_root": self.chunk_merkle_root,
+            "owner_did": self.owner_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
+@dataclass
+class DeleteFileManifestTx:
+    """Delete file manifest transaction."""
+    app_id: str
+    subgrove_id: str
+    file_key: str
+    owner_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "app_id": self.app_id,
+            "subgrove_id": self.subgrove_id,
+            "file_key": self.file_key,
+            "owner_did": self.owner_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
 # Transaction type union
-Transaction = Union[RegisterDidTx, RegisterAppTx, RegisterSubgroveTx, TransferTx, DataStoreTx]
+Transaction = Union[
+    RegisterDidTx, RegisterAppTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
+    StoreFileManifestTx, DeleteFileManifestTx,
+]
 
 
 def create_transaction_wrapper(tx_type: str, transaction: Transaction) -> Dict[str, Any]:
@@ -317,6 +382,14 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
             f"Owner: {tx.owner_did}\n"
             f"Nonce: {tx.nonce}"
         )
-    
+
+    elif tx_type == "StoreFileManifest":
+        tx = transaction
+        return f"store_file:{tx.app_id}:{tx.subgrove_id}:{tx.file_key}:{tx.content_hash}:{tx.total_size}"
+
+    elif tx_type == "DeleteFileManifest":
+        tx = transaction
+        return f"delete_file:{tx.app_id}:{tx.subgrove_id}:{tx.file_key}"
+
     else:
         raise ValueError(f"Unknown transaction type: {tx_type}")

@@ -204,6 +204,8 @@ from .consensus import (
     RegisterSubgroveTx,
     RetentionWindow as ConsensusRetentionWindow,
     TransferTx,
+    StoreFileManifestTx,
+    DeleteFileManifestTx,
     BroadcastResult,
     TransactionStatus,
     ConsensusError as ConsensusModuleError,
@@ -213,6 +215,12 @@ from .privacy import (
     CommitmentFrequency,
     EncryptedKeyGrant,
     PrivacyOperations,
+)
+from .files import (
+    FileManifest,
+    FileOperations as FileOperations,
+    encrypt_file,
+    decrypt_file,
 )
 
 __version__ = "0.2.0"
@@ -384,6 +392,8 @@ __all__ = [
     "RegisterAppTx",
     "RegisterSubgroveTx",
     "TransferTx",
+    "StoreFileManifestTx",
+    "DeleteFileManifestTx",
     "BroadcastResult",
     "TransactionStatus",
     "ConsensusModuleError",
@@ -392,6 +402,11 @@ __all__ = [
     "CommitmentFrequency",
     "EncryptedKeyGrant",
     "PrivacyOperations",
+    # File Storage
+    "FileManifest",
+    "FileOperations",
+    "encrypt_file",
+    "decrypt_file",
     # Test Account
     "DEVNET_TEST_ACCOUNT",
     # Computed Fields

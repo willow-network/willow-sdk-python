@@ -15,6 +15,7 @@ import logging
 from ..auth import sign_message, detect_algorithm_from_did
 from .types import (
     RegisterDidTx, RegisterAppTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
+    StoreFileManifestTx, DeleteFileManifestTx,
     BroadcastResult, TransactionStatus, ConsensusConfig, ConsensusError,
     create_transaction_wrapper, create_sign_message, Transaction
 )
@@ -238,7 +239,98 @@ class ConsensusClient:
         )
         
         return await self._sign_and_broadcast("DataStore", tx, private_key)
-    
+
+    async def store_file_manifest(
+        self,
+        app_id: str,
+        subgrove_id: str,
+        file_key: str,
+        filename: str,
+        content_type: str,
+        total_size: int,
+        content_hash: str,
+        chunk_count: int,
+        chunk_size: int,
+        chunk_merkle_root: str,
+        owner_did: str,
+        private_key: str,
+        public_key_id: str,
+    ) -> BroadcastResult:
+        """
+        Store a file manifest on the blockchain.
+
+        Args:
+            app_id: Application ID
+            subgrove_id: Subgrove ID
+            file_key: Unique key for the file
+            filename: Original filename
+            content_type: MIME content type
+            total_size: Total file size in bytes
+            content_hash: SHA-256 hash of the file content
+            chunk_count: Number of chunks
+            chunk_size: Size of each chunk in bytes
+            chunk_merkle_root: Merkle root of chunk hashes
+            owner_did: DID of the file owner
+            private_key: Private key for signing (hex-encoded)
+            public_key_id: Public key identifier in the DID document
+
+        Returns:
+            BroadcastResult with transaction status
+        """
+        tx = StoreFileManifestTx(
+            app_id=app_id,
+            subgrove_id=subgrove_id,
+            file_key=file_key,
+            filename=filename,
+            content_type=content_type,
+            total_size=total_size,
+            content_hash=content_hash,
+            chunk_count=chunk_count,
+            chunk_size=chunk_size,
+            chunk_merkle_root=chunk_merkle_root,
+            owner_did=owner_did,
+            signature="",
+            public_key_id=public_key_id,
+            nonce=await self._get_next_nonce(owner_did),
+        )
+
+        return await self._sign_and_broadcast("StoreFileManifest", tx, private_key)
+
+    async def delete_file_manifest(
+        self,
+        app_id: str,
+        subgrove_id: str,
+        file_key: str,
+        owner_did: str,
+        private_key: str,
+        public_key_id: str,
+    ) -> BroadcastResult:
+        """
+        Delete a file manifest from the blockchain.
+
+        Args:
+            app_id: Application ID
+            subgrove_id: Subgrove ID
+            file_key: Key of the file to delete
+            owner_did: DID of the file owner
+            private_key: Private key for signing (hex-encoded)
+            public_key_id: Public key identifier in the DID document
+
+        Returns:
+            BroadcastResult with transaction status
+        """
+        tx = DeleteFileManifestTx(
+            app_id=app_id,
+            subgrove_id=subgrove_id,
+            file_key=file_key,
+            owner_did=owner_did,
+            signature="",
+            public_key_id=public_key_id,
+            nonce=await self._get_next_nonce(owner_did),
+        )
+
+        return await self._sign_and_broadcast("DeleteFileManifest", tx, private_key)
+
     async def get_transaction_status(self, tx_hash: str) -> TransactionStatus:
         """
         Get the status of a transaction.
