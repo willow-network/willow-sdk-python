@@ -14,7 +14,7 @@ All operations include automatic proof verification by default.
 Prerequisites:
 - pip install willow-sdk
 - Run a local Willow node
-- Register and fund an app
+- Register and fund a subgrove
 """
 
 import asyncio
@@ -41,7 +41,7 @@ async def main():
             public_key_id=did_info["public_key_id"]
         )
 
-        app_id = "data-demo-app"
+
         collection = "products"
 
         # 1. Store single item
@@ -50,7 +50,7 @@ async def main():
 
         try:
             await client.data.store(
-                app_id=app_id,
+
                 collection=collection,
                 data={
                     "id": "prod-001",
@@ -102,7 +102,7 @@ async def main():
         ]
 
         try:
-            await client.data.batch_store(app_id, collection, products)
+await client.data.batch_store(collection, products)
             print(f"Batch stored {len(products)} products")
         except WillowError as e:
             print(f"Error: {e}")
@@ -112,7 +112,7 @@ async def main():
         print("-" * 40)
 
         try:
-            item = await client.data.get(app_id, collection, "prod-001")
+item = await client.data.get(collection, "prod-001")
             print(f"Retrieved: {item}")
             print("Proof verified automatically")
         except WillowError as e:
@@ -123,7 +123,7 @@ async def main():
         print("-" * 40)
 
         try:
-            item = await client.data.get_unverified(app_id, collection, "prod-001")
+item = await client.data.get_unverified(collection, "prod-001")
             print(f"Retrieved (unverified): {item}")
         except WillowError as e:
             print(f"Error: {e}")
@@ -135,7 +135,7 @@ async def main():
         try:
             # Filter by category
             result = await client.data.query(
-                app_id=app_id,
+
                 collection=collection,
                 query={
                     "filters": {
@@ -155,7 +155,7 @@ async def main():
 
         try:
             result = await client.data.query(
-                app_id=app_id,
+
                 collection=collection,
                 query={
                     "filters": {
@@ -178,7 +178,7 @@ async def main():
 
         try:
             result = await client.data.query(
-                app_id=app_id,
+
                 collection=collection,
                 query={
                     "sort": {
@@ -201,7 +201,7 @@ async def main():
 
         try:
             await client.data.update(
-                app_id=app_id,
+
                 collection=collection,
                 key="prod-001",
                 data={
@@ -222,7 +222,7 @@ async def main():
         print("-" * 40)
 
         try:
-            await client.data.delete(app_id, collection, "prod-004")
+await client.data.delete(collection, "prod-004")
             print("Deleted prod-004")
         except WillowError as e:
             print(f"Error: {e}")

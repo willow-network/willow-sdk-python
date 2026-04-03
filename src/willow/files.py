@@ -43,7 +43,6 @@ class FileOperations:
 
     async def upload(
         self,
-        app_id: str,
         subgrove_id: str,
         file_key: str,
         filename: str,
@@ -54,7 +53,6 @@ class FileOperations:
         """Upload a file to a FileStorage subgrove.
 
         Args:
-            app_id: Application ID.
             subgrove_id: Subgrove ID.
             file_key: Unique key for the file.
             filename: Original filename.
@@ -82,13 +80,12 @@ class FileOperations:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
             nonce = signing.get("nonce", 0)
-            message = f"store_file:{app_id}:{subgrove_id}:{file_key}:{content_hash}:{len(data)}"
+            message = f"store_file:{subgrove_id}:{file_key}:{content_hash}:{len(data)}"
             signature = signing["sign_function"](message, signing["private_key"])
 
         # Submit StoreFileManifestTx to consensus
         manifest_tx = {
             "StoreFileManifest": {
-                "app_id": app_id,
                 "subgrove_id": subgrove_id,
                 "file_key": file_key,
                 "filename": filename,
@@ -116,7 +113,7 @@ class FileOperations:
         async with httpx.AsyncClient() as client:
             for i, chunk in enumerate(chunks):
                 url = (
-                    f"{storage_node_endpoint}/upload/{app_id}/{subgrove_id}/{file_key}"
+                    f"{storage_node_endpoint}/upload/{subgrove_id}/{file_key}"
                     f"?chunk_index={i}&chunk_count={chunk_count}&content_hash={content_hash}"
                 )
                 await client.post(url, content=chunk)
@@ -136,19 +133,18 @@ class FileOperations:
 
     async def download(
         self,
-        app_id: str,
         subgrove_id: str,
         file_key: str,
         storage_node_endpoint: str,
     ) -> bytes:
         """Download a file from a FileStorage subgrove."""
-        manifest = await self.metadata(app_id, subgrove_id, file_key)
+        manifest = await self.metadata(subgrove_id, file_key)
 
         chunks = []
         async with httpx.AsyncClient() as client:
             for i in range(manifest.chunk_count):
                 url = (
-                    f"{storage_node_endpoint}/chunk/{app_id}/{subgrove_id}/{file_key}/{i}"
+                    f"{storage_node_endpoint}/chunk/{subgrove_id}/{file_key}/{i}"
                     f"?content_hash={manifest.content_hash}"
                 )
                 resp = await client.get(url)
@@ -171,23 +167,23 @@ class FileOperations:
         return file_data
 
     async def metadata(
-        self, app_id: str, subgrove_id: str, file_key: str
+        self, subgrove_id: str, file_key: str
     ) -> FileManifest:
         """Get file manifest metadata."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._api_url}/files/{app_id}/{subgrove_id}/{file_key}",
+                f"{self._api_url}/files/{subgrove_id}/{file_key}",
                 headers=self._get_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
             return FileManifest(**data)
 
-    async def list(self, app_id: str, subgrove_id: str) -> List[FileManifest]:
+    async def list(self, subgrove_id: str) -> List[FileManifest]:
         """List all files in a subgrove."""
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{self._api_url}/files/{app_id}/{subgrove_id}",
+                f"{self._api_url}/files/{subgrove_id}",
                 headers=self._get_headers(),
             )
             resp.raise_for_status()
@@ -196,7 +192,6 @@ class FileOperations:
 
     async def delete(
         self,
-        app_id: str,
         subgrove_id: str,
         file_key: str,
         signing: Optional[Dict[str, Any]] = None,
@@ -204,7 +199,6 @@ class FileOperations:
         """Delete a file (submits DeleteFileManifestTx to consensus).
 
         Args:
-            app_id: Application ID.
             subgrove_id: Subgrove ID.
             file_key: Key of the file to delete.
             signing: Optional signing parameters dict with keys:
@@ -220,12 +214,11 @@ class FileOperations:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
             nonce = signing.get("nonce", 0)
-            message = f"delete_file:{app_id}:{subgrove_id}:{file_key}"
+            message = f"delete_file:{subgrove_id}:{file_key}"
             signature = signing["sign_function"](message, signing["private_key"])
 
         delete_tx = {
             "DeleteFileManifest": {
-                "app_id": app_id,
                 "subgrove_id": subgrove_id,
                 "file_key": file_key,
                 "owner_did": owner_did,

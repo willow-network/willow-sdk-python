@@ -21,10 +21,10 @@ Example usage:
             )
 
             # Store data with automatic proof verification
-            await client.data.store("my-app", "my-data", {"key": "value"})
+            await client.data.store("my-data", {"key": "value"})
 
             # Query with automatic proof verification
-            result = await client.data.query("my-app", "my-data", {
+            result = await client.data.query("my-data", {
                 "filters": {"key": {"$eq": "value"}}
             })
     ```
@@ -90,11 +90,9 @@ from .types import (
     # Retention Types
     RetentionWindow,
     # Registration Types
-    RegisterAppRequest,
-    RegisterDatasetRequest,
+        RegisterDatasetRequest,
     RegisterSubgroveRequest,
-    AppRegistration,
-    SubgroveRegistration,
+        SubgroveRegistration,
     DatasetRegistration,
     # API Response Types
     ApiResponse,
@@ -111,7 +109,7 @@ from .types import (
     CheckpointInfo,
     # Data Operation Types
     StoreDataRequest,
-    FundAppRequest,
+    FundSubgroveRequest,
     # Token Types
     TokenInfo,
     BalanceInfo,
@@ -200,8 +198,7 @@ from .consensus import (
     ConsensusConfig,
     ConsensusConfigBuilder,
     RegisterDidTx,
-    RegisterAppTx,
-    RegisterSubgroveTx,
+        RegisterSubgroveTx,
     RetentionWindow as ConsensusRetentionWindow,
     TransferTx,
     StoreFileManifestTx,
@@ -302,11 +299,9 @@ __all__ = [
     # Retention Types
     "RetentionWindow",
     # Registration Types
-    "RegisterAppRequest",
-    "RegisterDatasetRequest",
+        "RegisterDatasetRequest",
     "RegisterSubgroveRequest",
-    "AppRegistration",
-    "SubgroveRegistration",
+        "SubgroveRegistration",
     "DatasetRegistration",
     # API Response Types
     "ApiResponse",
@@ -319,7 +314,7 @@ __all__ = [
     "QueryResponse",
     # Data Operation Types
     "StoreDataRequest",
-    "FundAppRequest",
+    "FundSubgroveRequest",
     # Token Types
     "TokenInfo",
     "BalanceInfo",
@@ -389,8 +384,7 @@ __all__ = [
     "ConsensusConfig",
     "ConsensusConfigBuilder",
     "RegisterDidTx",
-    "RegisterAppTx",
-    "RegisterSubgroveTx",
+        "RegisterSubgroveTx",
     "TransferTx",
     "StoreFileManifestTx",
     "DeleteFileManifestTx",

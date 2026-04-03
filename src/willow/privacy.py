@@ -185,7 +185,7 @@ class PrivacyOperations:
 
     @require_auth
     async def get_my_key_grant(
-        self, app_id: str, subgrove_id: str
+        self, subgrove_id: str
     ) -> EncryptedKeyGrant:
         """Get the current user's key grant for a subgrove.
 
@@ -193,7 +193,6 @@ class PrivacyOperations:
         for the specified subgrove.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
 
         Returns:
@@ -206,14 +205,14 @@ class PrivacyOperations:
         did = self.client._did
         response = await self.client._request(
             "GET",
-            f"/key-grants/{app_id}/{subgrove_id}/{did}",
+            f"/key-grants/{subgrove_id}/{did}",
             authenticated=True,
         )
         return EncryptedKeyGrant.from_dict(response["data"])
 
     @require_auth
     async def list_key_grantees(
-        self, app_id: str, subgrove_id: str
+        self, subgrove_id: str
     ) -> List[EncryptedKeyGrant]:
         """List all key grants for a subgrove.
 
@@ -222,7 +221,6 @@ class PrivacyOperations:
         can list all grantees.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
 
         Returns:
@@ -234,14 +232,14 @@ class PrivacyOperations:
         """
         response = await self.client._request(
             "GET",
-            f"/key-grants/{app_id}/{subgrove_id}",
+            f"/key-grants/{subgrove_id}",
             authenticated=True,
         )
         grants_data = response.get("data", [])
         return [EncryptedKeyGrant.from_dict(g) for g in grants_data]
 
     async def get_key_grant_proof(
-        self, app_id: str, subgrove_id: str, did: str
+        self, subgrove_id: str, did: str
     ) -> Dict[str, Any]:
         """Get a Merkle proof for a key grant.
 
@@ -250,7 +248,6 @@ class PrivacyOperations:
         trustless verification of grant status.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
             did: The DID to get the key grant proof for.
 
@@ -259,14 +256,13 @@ class PrivacyOperations:
         """
         response = await self.client._request(
             "GET",
-            f"/proof/key-grant/{app_id}/{subgrove_id}/{did}",
+            f"/proof/key-grant/{subgrove_id}/{did}",
         )
         return response["data"]
 
     @require_auth
     async def grant_subgrove_key(
         self,
-        app_id: str,
         subgrove_id: str,
         grant: EncryptedKeyGrant,
     ) -> Dict[str, Any]:
@@ -276,7 +272,6 @@ class PrivacyOperations:
         recording the encrypted key grant on-chain.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
             grant: The EncryptedKeyGrant to issue.
 
@@ -288,7 +283,6 @@ class PrivacyOperations:
             PermissionDeniedError: If the caller is not the subgrove owner.
         """
         payload = {
-            "app_id": app_id,
             "subgrove_id": subgrove_id,
             "grant": grant.to_dict(),
         }
@@ -303,7 +297,6 @@ class PrivacyOperations:
     @require_auth
     async def revoke_subgrove_key(
         self,
-        app_id: str,
         subgrove_id: str,
         revokee_did: str,
     ) -> Dict[str, Any]:
@@ -313,7 +306,6 @@ class PrivacyOperations:
         removing the specified DID's key grant.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
             revokee_did: The DID whose key grant should be revoked.
 
@@ -325,7 +317,6 @@ class PrivacyOperations:
             PermissionDeniedError: If the caller is not the subgrove owner.
         """
         payload = {
-            "app_id": app_id,
             "subgrove_id": subgrove_id,
             "revokee_did": revokee_did,
         }
@@ -340,7 +331,6 @@ class PrivacyOperations:
     @require_auth
     async def rotate_subgrove_key(
         self,
-        app_id: str,
         subgrove_id: str,
         new_epoch: int,
         new_grants: List[EncryptedKeyGrant],
@@ -352,7 +342,6 @@ class PrivacyOperations:
         epoch keys become invalid for new data.
 
         Args:
-            app_id: Application identifier.
             subgrove_id: Subgrove identifier.
             new_epoch: The new key epoch number (must be greater than current).
             new_grants: List of EncryptedKeyGrant instances for the new epoch,
@@ -367,7 +356,6 @@ class PrivacyOperations:
             ValidationError: If new_epoch is not greater than the current epoch.
         """
         payload = {
-            "app_id": app_id,
             "subgrove_id": subgrove_id,
             "new_epoch": new_epoch,
             "new_grants": [g.to_dict() for g in new_grants],

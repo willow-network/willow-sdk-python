@@ -1,8 +1,8 @@
 """
-Willow Python SDK - App and Subgrove Registration Example
+Willow Python SDK - Subgrove Registration Example
 
 This example demonstrates how to:
-1. Register an application
+1. Register a subgrove
 2. Define schemas with indexes
 3. Create subgroves for data organization
 4. Manage permissions
@@ -18,7 +18,7 @@ from willow import (
     WillowClient,
     generate_did,
     WillowError,
-    RegisterAppRequest,
+
     RegisterSubgroveRequest,
     SchemaDefinition,
     FieldType,
@@ -27,7 +27,7 @@ from willow import (
 
 
 async def main():
-    print("Willow App Registration Demo")
+    print("Willow Subgrove Registration Demo")
     print("=" * 50)
 
     did_info = generate_did()
@@ -41,24 +41,13 @@ async def main():
             public_key_id=did_info["public_key_id"]
         )
 
-        # 1. Register an Application
-        print("\n1. Register Application")
+        # 1. Register a Subgrove
+        print("\n1. Register Subgrove")
         print("-" * 40)
 
-        app_id = "my-ecommerce-app"
+
 
         try:
-            app_request = RegisterAppRequest(
-                app_id=app_id,
-                name="My E-commerce App",
-                description="A demo e-commerce application",
-                owner_did=did_info["did"],
-                metadata={"version": "1.0.0"}
-            )
-            await client.registration.register_app(app_request)
-            print(f"Registered app: {app_id}")
-        except WillowError as e:
-            print(f"Error (may already exist): {e}")
 
         # 2. Define a Schema with Indexes
         print("\n2. Define Schema with Indexes")
@@ -130,7 +119,7 @@ async def main():
         try:
             subgrove_request = RegisterSubgroveRequest(
                 subgrove_id="products",
-                app_id=app_id,
+
                 name="Product Catalog",
                 description="All product data",
                 schema=product_schema.model_dump(),
@@ -140,31 +129,31 @@ async def main():
                 reward_rate=1000,  # Indexer reward rate
             )
             await client.registration.register_subgrove(subgrove_request)
-            print(f"Created subgrove: {app_id}/products")
+            print("Created subgrove: products")
         except WillowError as e:
             print(f"Error (may already exist): {e}")
 
-        # 4. List Apps
-        print("\n4. List Registered Apps")
+        # 4. List Subgroves
+        print("\n4. List Registered Subgroves")
         print("-" * 40)
 
         try:
-            apps = await client.registration.list_apps()
-            print(f"Found {len(apps)} apps:")
-            for app in apps[:5]:
-                print(f"  - {app.app_id}: {app.name}")
+            subgroves = await client.registration.list_subgroves()
+            print(f"Found {len(subgroves)} subgroves:")
+            for sg in subgroves[:5]:
+                print(f"  - {sg.subgrove_id}: {sg.name}")
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 5. Get App Details
-        print("\n5. Get App Details")
+        # 5. Get Subgrove Details
+        print("\n5. Get Subgrove Details")
         print("-" * 40)
 
         try:
-            app = await client.registration.get_app(app_id)
-            print(f"App ID: {app.app_id}")
-            print(f"Name: {app.name}")
-            print(f"Owner: {app.owner_did}")
+subgrove = await client.registration.get_subgrove("products")
+            print(f"Subgrove: {subgrove.subgrove_id}")
+            print(f"Name: {subgrove.name}")
+            print(f"Owner: {subgrove.owner_did}")
         except WillowError as e:
             print(f"Error: {e}")
 
@@ -173,7 +162,7 @@ async def main():
         print("-" * 40)
 
         try:
-            subgroves = await client.registration.list_subgroves(app_id)
+subgroves = await client.registration.list_subgroves()
             print(f"Found {len(subgroves)} subgroves:")
             for sg in subgroves:
                 print(f"  - {sg.subgrove_id}: {sg.name}")
@@ -185,7 +174,7 @@ async def main():
         print("-" * 40)
 
         try:
-            subgrove = await client.registration.get_subgrove(app_id, "products")
+subgrove = await client.registration.get_subgrove("products")
             print(f"Subgrove: {subgrove.subgrove_id}")
             print(f"Reward Rate: {subgrove.reward_rate}")
         except WillowError as e:
@@ -197,7 +186,7 @@ async def main():
 
         try:
             permissions = await client.registration.get_permissions(
-                app_id=app_id,
+
                 subgrove_id="products",
                 did=did_info["did"]
             )
@@ -210,10 +199,10 @@ async def main():
     print("\n" + "=" * 50)
     print("Registration Complete!")
     print("\nData Organization:")
-    print("  App (my-ecommerce-app)")
-    print("    -> Subgrove (products)")
-    print("         -> Items (with schema validation)")
-    print("         -> Indexes (for fast queries)")
+    print("  Subgrove (products)")
+    print("    -> Items (with schema validation)")
+    print("    -> Indexes (for fast queries)")
+
 
 
 if __name__ == "__main__":

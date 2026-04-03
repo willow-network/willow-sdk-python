@@ -38,12 +38,12 @@ async def main():
         )
 
         # Store data (automatically verified on read)
-        await client.data.store("my-app", "users", {
+        await client.data.store("users", {
             "user_1": {"name": "Alice", "email": "alice@example.com"}
         })
 
         # Retrieve data with automatic proof verification
-        user = await client.data.get("my-app", "users", "user_1")
+        user = await client.data.get("users", "user_1")
         print(f"User: {user}")
 
 asyncio.run(main())
@@ -139,28 +139,28 @@ client.clear_session()
 
 ```python
 # Store data
-await client.data.store("app_id", "subgrove_id", {
+await client.data.store("subgrove_id", {
     "key1": {"field": "value"},
     "key2": {"field": "value2"}
 })
 
 # Store single item
-await client.data.store_item("app_id", "subgrove_id", "key1", {"field": "value"})
+await client.data.store_item("subgrove_id", "key1", {"field": "value"})
 
 # Get single item (with automatic proof verification)
-item = await client.data.get("app_id", "subgrove_id", "key1")
+item = await client.data.get("subgrove_id", "key1")
 
 # Get without verification (for performance-critical scenarios)
-item = await client.data.get_unverified("app_id", "subgrove_id", "key1")
+item = await client.data.get_unverified("subgrove_id", "key1")
 
 # Update item
-await client.data.update("app_id", "subgrove_id", "key1", {"field": "updated"})
+await client.data.update("subgrove_id", "key1", {"field": "updated"})
 
 # Delete item
-await client.data.delete("app_id", "subgrove_id", "key1")
+await client.data.delete("subgrove_id", "key1")
 
 # Batch store
-await client.data.batch_store("app_id", "subgrove_id", [
+await client.data.batch_store("subgrove_id", [
     {"key": "key1", "value": {"field": "value1"}},
     {"key": "key2", "value": {"field": "value2"}},
 ])
@@ -170,7 +170,7 @@ await client.data.batch_store("app_id", "subgrove_id", [
 
 ```python
 # Query with filters (automatically verified)
-result = await client.data.query("app_id", "subgrove_id", {
+result = await client.data.query("subgrove_id", {
     "filters": {
         "status": {"$eq": "active"},
         "age": {"$gte": 18}
@@ -192,7 +192,7 @@ result = await client.data.query("app_id", "subgrove_id", {
 # $startsWith - String prefix matching
 
 # Query without verification (for performance)
-result = await client.data.query_unverified("app_id", "subgrove_id", {...})
+result = await client.data.query_unverified("subgrove_id", {...})
 
 # Access results
 for doc in result.documents:
@@ -203,20 +203,11 @@ print(f"Total: {result.total}")
 ### Registration Operations
 
 ```python
-# Register app
-await client.registration.register_app({
-    "app_id": "my-app",
-    "name": "My App",
-    "description": "Description",
-    "app_type": "application",
-    "owner_did": did,
-    "admins": [],
-})
 
 # Register subgrove/dataset
 await client.registration.register_subgrove({
     "subgrove_id": "my-data",
-    "app_id": "my-app",
+
     "name": "My Data",
     "schema": {
         "version": 1,
@@ -235,21 +226,15 @@ await client.registration.register_subgrove({
     "readers": []
 })
 
-# List apps
-apps = await client.registration.list_apps()
-
-# Get specific app
-app = await client.registration.get_app("my-app")
-
-# List subgroves for an app
-subgroves = await client.registration.list_subgroves("my-app")
+# List subgroves
+subgroves = await client.registration.list_subgroves()
 
 # Get specific subgrove
-subgrove = await client.registration.get_subgrove("my-app", "my-data")
+subgrove = await client.registration.get_subgrove("my-data")
 
 # Get DID permissions
 permissions = await client.registration.get_permissions(did)
-print(f"Owned apps: {permissions.owned_apps}")
+print(f"Owned subgroves: {permissions.owned_subgroves}")
 print(f"Write access: {permissions.write_access}")
 ```
 
@@ -267,8 +252,7 @@ balance = await client.token.get_balance(did)
 print(f"Balance: {balance.balance}")
 print(f"Staked: {balance.staked}")
 
-# Get app balance
-app_balance = await client.token.get_app_balance("my-app")
+# Get subgrove balance
 
 # Get fee schedule
 fees = await client.token.get_fee_schedule()
@@ -345,7 +329,7 @@ print(f"Verification rate: {stats.verification_rate * 100}%")
 
 ```python
 # Get Merkle proof (no auth required)
-proof_data = await client.proof.get("app_id", "subgrove_id", "key1")
+proof_data = await client.proof.get("subgrove_id", "key1")
 proof_hex = proof_data["proof"]
 value = proof_data["value"]
 
@@ -401,7 +385,7 @@ from willow import (
 )
 
 try:
-    data = await client.data.get("app", "subgrove", "key")
+    data = await client.data.get("subgrove", "dataset", "key")
 except NotAuthenticatedError:
     print("Please authenticate first")
 except SessionExpiredError:
@@ -491,13 +475,13 @@ willow-cli did generate
 willow-cli auth login --did <your-did> --key <private-key>
 
 # Store data
-willow-cli data store my-app users '{"user1": {"name": "Alice"}}'
+willow-cli data store my-subgrove users '{"user1": {"name": "Alice"}}'
 
 # Get data
-willow-cli data get my-app users user1
+willow-cli data get my-subgrove users user1
 
 # Get proof
-willow-cli proof get my-app users user1
+willow-cli proof get my-subgrove users user1
 ```
 
 ## License

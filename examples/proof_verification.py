@@ -38,7 +38,7 @@ async def main():
         # All data operations verify proofs by default
         try:
             result = await client.data.query(
-                app_id="demo-app",
+
                 collection="items",
                 query={"filters": {"status": "active"}}
             )
@@ -114,7 +114,7 @@ async def main():
         try:
             # Skip verification for maximum performance
             result = await client.data.query_unverified(
-                app_id="demo-app",
+
                 collection="items",
                 query={"filters": {"status": "active"}}
             )

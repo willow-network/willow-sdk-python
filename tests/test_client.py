@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from willow import WillowClient, generate_did
 from willow.types import (
     DidDocument,
-    RegisterAppRequest,
+
     RegisterDatasetRequest,
     SchemaDefinition,
     FieldType
@@ -200,12 +200,12 @@ class TestDataOperations:
         client._http = mock_http_client
 
         # Store data
-        await client.data.store("app1", "dataset1", {"key1": {"value": "test"}})
+        await client.data.store("dataset1", {"key1": {"value": "test"}})
 
         mock_http_client.request.assert_called_once()
         call_args = mock_http_client.request.call_args
         assert call_args[0][0] == "POST"
-        assert "data/app1/dataset1" in call_args[0][1]
+        assert "data/dataset1" in call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_get_data(self, client, mock_http_client):
@@ -224,10 +224,10 @@ class TestDataOperations:
         client._http = mock_http_client
 
         # Get data
-        result = await client.data.get("app1", "dataset1", "key1")
+        result = await client.data.get("dataset1", "key1")
 
         assert result == {"value": "test"}
-        assert "data/app1/dataset1/key1" in mock_http_client.request.call_args[0][1]
+        assert "data/dataset1/key1" in mock_http_client.request.call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_update_data(self, client, mock_http_client):
@@ -242,11 +242,11 @@ class TestDataOperations:
         client._http = mock_http_client
 
         # Update data
-        await client.data.update("app1", "dataset1", "key1", {"value": "updated"})
+        await client.data.update("dataset1", "key1", {"value": "updated"})
 
         call_args = mock_http_client.request.call_args
         assert call_args[0][0] == "PUT"
-        assert "data/app1/dataset1/key1" in call_args[0][1]
+        assert "data/dataset1/key1" in call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_delete_data(self, client, mock_http_client):
@@ -261,51 +261,28 @@ class TestDataOperations:
         client._http = mock_http_client
 
         # Delete data
-        await client.data.delete("app1", "dataset1", "key1")
+        await client.data.delete("dataset1", "key1")
 
         call_args = mock_http_client.request.call_args
         assert call_args[0][0] == "DELETE"
-        assert "data/app1/dataset1/key1" in call_args[0][1]
+        assert "data/dataset1/key1" in call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_require_auth_decorator(self, client):
         """Test authentication requirement."""
         # No identity set
         with pytest.raises(WillowError, match="Not authenticated"):
-            await client.data.get("app1", "dataset1", "key1")
+            await client.data.get("dataset1", "key1")
 
 
 class TestRegistrationOperations:
     """Test registration operations."""
 
     @pytest.mark.asyncio
-    async def test_register_app(self, client, mock_http_client):
-        """Test app registration."""
+    async def test_register_subgrove(self, client, mock_http_client):
+        """Test subgrove registration."""
         _set_test_identity(client)
 
-        app_request = {
-            "app_id": "test-app",
-            "name": "Test App",
-            "description": "Test",
-            "app_type": "test",
-            "owner_did": "did:test",
-            "admins": []
-        }
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "success": True,
-            "data": app_request
-        }
-
-        mock_http_client.request = AsyncMock(return_value=mock_response)
-        client._http = mock_http_client
-
-        result = await client.registration.register_app(app_request)
-
-        assert result == app_request
-        assert "register/app" in mock_http_client.request.call_args[0][1]
 
     @pytest.mark.asyncio
     async def test_register_dataset(self, client, mock_http_client):
@@ -314,7 +291,7 @@ class TestRegistrationOperations:
 
         dataset_request = {
             "dataset_id": "test-dataset",
-            "app_id": "test-app",
+            
             "name": "Test Dataset",
             "dataset_path": ["collections"],
             "schema": {
@@ -366,8 +343,8 @@ class TestProofOperations:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.proof.get("app1", "dataset1", "key1")
+        result = await client.proof.get("dataset1", "key1")
 
         assert result["proof"] == proof_data["proof"]
         assert result["value"] == proof_data["value"]
-        assert "proof/app1/dataset1/key1" in mock_http_client.request.call_args[0][1]
+        assert "proof/dataset1/key1" in mock_http_client.request.call_args[0][1]

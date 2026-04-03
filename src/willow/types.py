@@ -181,25 +181,9 @@ class RetentionWindow(BaseModel):
 # Registration Types
 # ============================================================================
 
-class RegisterAppRequest(BaseModel):
-    """App registration request."""
-    app_id: str = Field(alias="app_id")
-    name: str
-    description: str
-    app_type: str = Field(alias="app_type")
-    owner_did: str = Field(alias="owner_did")
-    admins: List[str] = Field(default_factory=list)
-    signature: Optional[bytes] = None
-    public_key_id: Optional[str] = None
-    nonce: Optional[int] = None
-
-    model_config = {"populate_by_name": True}
-
-
 class RegisterDatasetRequest(BaseModel):
     """Dataset/subgrove registration request."""
     dataset_id: str = Field(alias="dataset_id")
-    app_id: str = Field(alias="app_id")
     name: str
     dataset_path: List[str] = Field(default_factory=list, alias="dataset_path")
     schema: Optional[SchemaDefinition] = None
@@ -217,24 +201,9 @@ class RegisterDatasetRequest(BaseModel):
 RegisterSubgroveRequest = RegisterDatasetRequest
 
 
-class AppRegistration(BaseModel):
-    """App registration info."""
-    app_id: str = Field(alias="app_id")
-    name: str
-    description: str
-    app_type: str = Field(alias="app_type")
-    owner_did: str = Field(alias="owner_did")
-    admins: List[str] = Field(default_factory=list)
-    created_at: int = Field(alias="created_at")
-    updated_at: int = Field(alias="updated_at")
-
-    model_config = {"populate_by_name": True}
-
-
 class SubgroveRegistration(BaseModel):
     """Subgrove/dataset registration info."""
     subgrove_id: str = Field(alias="subgrove_id")
-    app_id: str = Field(alias="app_id")
     name: str
     subgrove_path: List[str] = Field(default_factory=list, alias="subgrove_path")
     schema: Optional[SchemaDefinition] = None
@@ -413,7 +382,6 @@ class CheckpointInfo(BaseModel):
 
 class StoreDataRequest(BaseModel):
     """Store data request."""
-    app_id: str = Field(alias="app_id")
     subgrove_id: str = Field(alias="subgrove_id")
     key: str
     data: Any
@@ -425,9 +393,9 @@ class StoreDataRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-class FundAppRequest(BaseModel):
-    """Fund app request."""
-    app_id: str = Field(alias="app_id")
+class FundSubgroveRequest(BaseModel):
+    """Fund subgrove request."""
+    subgrove_id: str = Field(alias="subgrove_id")
     amount: int
     from_did: str = Field(alias="from_did")
     signature: bytes
@@ -479,7 +447,6 @@ class TransferRequest(BaseModel):
 class FeeSchedule(BaseModel):
     """Fee schedule for operations."""
     did_registration: int = Field(alias="did_registration")
-    app_registration: int = Field(alias="app_registration")
     subgrove_registration: int = Field(alias="subgrove_registration")
     base_tx_cost: int = Field(alias="base_tx_cost")
     cost_per_byte: int = Field(alias="cost_per_byte")
@@ -690,8 +657,8 @@ class VerifyProofResponse(BaseModel):
 class DidPermissions(BaseModel):
     """DID permissions response."""
     did: str
-    owned_apps: List[str] = Field(default_factory=list, alias="owned_apps")
-    admin_apps: List[str] = Field(default_factory=list, alias="admin_apps")
+    owned_subgroves: List[str] = Field(default_factory=list, alias="owned_subgroves")
+    admin_subgroves: List[str] = Field(default_factory=list, alias="admin_subgroves")
     write_access: List[str] = Field(default_factory=list, alias="write_access")
     read_access: List[str] = Field(default_factory=list, alias="read_access")
 

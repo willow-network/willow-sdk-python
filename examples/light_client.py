@@ -100,7 +100,7 @@ async def main():
             try:
                 result = await light_client.verify_inclusion_proof(
                     proof_hex=sample_proof,
-                    path=["apps", "my-app", "users"],
+                    path=["subgroves", "users"],
                     key="user-123"
                 )
                 print(f"Proof valid: {result.valid}")

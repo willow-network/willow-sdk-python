@@ -11,13 +11,13 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from .types import (
     DidDocument,
-    RegisterAppRequest,
+    
     RegisterDatasetRequest,
     ApiResponse,
     ProofData,
     QueryRequest,
     QueryResponse,
-    AppRegistration,
+    
     SubgroveRegistration,
     DidPermissions,
     TokenInfo,
@@ -70,17 +70,17 @@ class DataOperations:
         self.client = client
 
     @require_auth
-    async def store(self, app_id: str, subgrove_id: str, data: Dict[str, Any]) -> None:
+    async def store(self, subgrove_id: str, data: Dict[str, Any]) -> None:
         """Store data in a subgrove.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             data: Data to store (key-value pairs)
         """
         await self.client._request(
             "POST",
-            f"/data/{app_id}/{subgrove_id}",
+            f"/data/{subgrove_id}",
             json=data,
             authenticated=True
         )
@@ -88,7 +88,6 @@ class DataOperations:
     @require_auth
     async def store_item(
         self,
-        app_id: str,
         subgrove_id: str,
         key: str,
         value: Any
@@ -96,22 +95,22 @@ class DataOperations:
         """Store a single item in a subgrove.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             key: Item key
             value: Item value
         """
-        await self.store(app_id, subgrove_id, {key: value})
+        await self.store(subgrove_id, {key: value})
 
     @require_auth
-    async def get(self, app_id: str, subgrove_id: str, key: str) -> Dict[str, Any]:
+    async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
         """Get a single item from a subgrove with automatic proof verification.
 
         This method fetches data and automatically verifies the cryptographic
         proof against the consensus root hash for security.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             key: Item key
 
@@ -124,7 +123,7 @@ class DataOperations:
         # First get the data
         data_response = await self.client._request(
             "GET",
-            f"/data/{app_id}/{subgrove_id}/{key}",
+            f"/data/{subgrove_id}/{key}",
             authenticated=True
         )
         data = data_response["data"]
@@ -133,7 +132,7 @@ class DataOperations:
         try:
             proof_response = await self.client._request(
                 "GET",
-                f"/proof/{app_id}/{subgrove_id}/{key}",
+                f"/proof/{subgrove_id}/{key}",
                 authenticated=True
             )
 
@@ -167,14 +166,14 @@ class DataOperations:
         return data
 
     @require_auth
-    async def get_unverified(self, app_id: str, subgrove_id: str, key: str) -> Dict[str, Any]:
+    async def get_unverified(self, subgrove_id: str, key: str) -> Dict[str, Any]:
         """Get a single item from a subgrove without proof verification.
 
         Use this method when performance is more important than cryptographic
         verification, such as in trusted environments.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             key: Item key
 
@@ -183,49 +182,49 @@ class DataOperations:
         """
         response = await self.client._request(
             "GET",
-            f"/data/{app_id}/{subgrove_id}/{key}",
+            f"/data/{subgrove_id}/{key}",
             authenticated=True
         )
         return response["data"]
 
     @require_auth
-    async def update(self, app_id: str, subgrove_id: str, key: str, data: Dict[str, Any]) -> None:
+    async def update(self, subgrove_id: str, key: str, data: Dict[str, Any]) -> None:
         """Update an item in a subgrove.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             key: Item key
             data: New data
         """
         await self.client._request(
             "PUT",
-            f"/data/{app_id}/{subgrove_id}/{key}",
+            f"/data/{subgrove_id}/{key}",
             json=data,
             authenticated=True
         )
 
     @require_auth
-    async def delete(self, app_id: str, subgrove_id: str, key: str) -> None:
+    async def delete(self, subgrove_id: str, key: str) -> None:
         """Delete an item from a subgrove.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             key: Item key
         """
         await self.client._request(
             "DELETE",
-            f"/data/{app_id}/{subgrove_id}/{key}",
+            f"/data/{subgrove_id}/{key}",
             authenticated=True
         )
 
     @require_auth
-    async def query(self, app_id: str, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
+    async def query(self, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
         """Query indexed data with automatic proof verification.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             query: Query parameters (filters, search, sort, limit, offset)
 
@@ -244,7 +243,7 @@ class DataOperations:
 
         response = await self.client._request(
             "POST",
-            f"/query/{app_id}/{subgrove_id}",
+            f"/query/{subgrove_id}",
             json=query_dict,
             authenticated=True
         )
@@ -270,21 +269,21 @@ class DataOperations:
                 logger.warning(f"Could not fetch consensus root hash for verification: {e}")
 
         # Apply computed fields if registered for this app/dataset
-        computed_fields = self.client._computed_fields.get(app_id, subgrove_id)
+        computed_fields = self.client._computed_fields.get(subgrove_id, subgrove_id)
         if computed_fields:
             query_response = apply_computed_fields_to_response(query_response, computed_fields)
 
         return query_response
 
     @require_auth
-    async def query_unverified(self, app_id: str, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
+    async def query_unverified(self, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
         """Query indexed data without proof verification.
 
         Use this method when performance is more important than cryptographic
         verification.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             query: Query parameters
 
@@ -300,31 +299,31 @@ class DataOperations:
 
         response = await self.client._request(
             "POST",
-            f"/query/{app_id}/{subgrove_id}",
+            f"/query/{subgrove_id}",
             json=query_dict,
             authenticated=True
         )
         query_response = QueryResponse(**response["data"])
 
         # Apply computed fields if registered for this app/dataset
-        computed_fields = self.client._computed_fields.get(app_id, subgrove_id)
+        computed_fields = self.client._computed_fields.get(subgrove_id, subgrove_id)
         if computed_fields:
             query_response = apply_computed_fields_to_response(query_response, computed_fields)
 
         return query_response
 
     @require_auth
-    async def batch_store(self, app_id: str, subgrove_id: str, items: List[Dict[str, Any]]) -> None:
+    async def batch_store(self, subgrove_id: str, items: List[Dict[str, Any]]) -> None:
         """Store multiple items in a subgrove.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove/dataset identifier
             items: List of items with "key" and "value" fields
         """
         # Convert list of {key, value} to dict
         data = {item["key"]: item["value"] for item in items}
-        await self.store(app_id, subgrove_id, data)
+        await self.store(subgrove_id, data)
 
     async def get_checkpoint_state_root(self, subgrove_id: str, checkpoint_id: str) -> "CheckpointInfo":
         """Get checkpoint information including state root.
@@ -420,25 +419,6 @@ class RegistrationOperations:
         self.client = client
 
     @require_auth
-    async def register_app(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Register a new app.
-
-        Args:
-            request: App registration request data
-
-        Returns:
-            Registration result
-        """
-        app_request = RegisterAppRequest(**request)
-        response = await self.client._request(
-            "POST",
-            "/register/app",
-            json=app_request.model_dump(by_alias=True, exclude_none=True),
-            authenticated=True
-        )
-        return response["data"]
-
-    @require_auth
     async def register_subgrove(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Register a new subgrove/dataset.
 
@@ -464,53 +444,29 @@ class RegistrationOperations:
     # Alias for compatibility
     register_dataset = register_subgrove
 
-    async def list_apps(self) -> List[AppRegistration]:
-        """List all registered apps.
-
-        Returns:
-            List of app registrations
-        """
-        response = await self.client._request("GET", "/apps")
-        return [AppRegistration(**app) for app in response.get("data", [])]
-
-    async def get_app(self, app_id: str) -> AppRegistration:
-        """Get app registration details.
-
-        Args:
-            app_id: Application identifier
-
-        Returns:
-            App registration details
-        """
-        response = await self.client._request("GET", f"/apps/{app_id}")
-        return AppRegistration(**response["data"])
-
-    async def list_subgroves(self, app_id: str) -> List[SubgroveRegistration]:
-        """List all subgroves for an app.
-
-        Args:
-            app_id: Application identifier
+    async def list_subgroves(self) -> List[SubgroveRegistration]:
+        """List all subgroves.
 
         Returns:
             List of subgrove registrations
         """
-        response = await self.client._request("GET", f"/apps/{app_id}/subgroves")
+        response = await self.client._request("GET", "/subgroves")
         return [SubgroveRegistration(**sg) for sg in response.get("data", [])]
 
     # Alias for compatibility
     list_datasets = list_subgroves
 
-    async def get_subgrove(self, app_id: str, subgrove_id: str) -> SubgroveRegistration:
+    async def get_subgrove(self, subgrove_id: str) -> SubgroveRegistration:
         """Get subgrove registration details.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove identifier
 
         Returns:
             Subgrove registration details
         """
-        response = await self.client._request("GET", f"/apps/{app_id}/subgroves/{subgrove_id}")
+        response = await self.client._request("GET", f"/subgroves/{subgrove_id}")
         return SubgroveRegistration(**response["data"])
 
     # Alias for compatibility
@@ -538,11 +494,11 @@ class ProofOperations:
     def __init__(self, client: "WillowClient"):
         self.client = client
 
-    async def get(self, app_id: str, subgrove_id: str, key: str) -> Dict[str, Any]:
+    async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
         """Get Merkle proof for a data item.
 
         Args:
-            app_id: Application identifier
+
             subgrove_id: Subgrove identifier
             key: Item key
 
@@ -551,7 +507,7 @@ class ProofOperations:
         """
         response = await self.client._request(
             "GET",
-            f"/proof/{app_id}/{subgrove_id}/{key}"
+            f"/proof/{subgrove_id}/{key}"
         )
         return ProofData(**response["data"]).model_dump()
 
@@ -586,16 +542,16 @@ class TokenOperations:
         response = await self.client._request("GET", f"/token/balance/{did}")
         return BalanceInfo(**response["data"])
 
-    async def get_app_balance(self, app_id: str) -> BalanceInfo:
-        """Get balance for an app.
+    async def get_subgrove_balance(self, subgrove_id: str) -> BalanceInfo:
+        """Get balance for a subgrove.
 
         Args:
-            app_id: Application identifier
+            subgrove_id: Subgrove identifier
 
         Returns:
             Balance information
         """
-        response = await self.client._request("GET", f"/token/balance/app/{app_id}")
+        response = await self.client._request("GET", f"/token/balance/subgrove/{subgrove_id}")
         return BalanceInfo(**response["data"])
 
     async def get_fee_schedule(self) -> FeeSchedule:
@@ -695,7 +651,6 @@ class IndexingOperations:
 
     async def sql_query(
         self,
-        app_id: str,
         subgrove_id: str,
         query: str,
         include_proof: bool = True,
@@ -703,7 +658,6 @@ class IndexingOperations:
         """Execute a SQL query against a subgrove.
 
         Args:
-            app_id: The application ID
             subgrove_id: The subgrove to query
             query: SQL SELECT query string
             include_proof: Whether to include Merkle proof
@@ -714,7 +668,7 @@ class IndexingOperations:
         request = SqlRequest(query=query, include_proof=include_proof)
         response = await self.client._request(
             "POST",
-            f"/sql/{app_id}/{subgrove_id}",
+            f"/sql/{subgrove_id}",
             json=request.model_dump(exclude_none=True),
         )
         return SqlResponse(**response)
@@ -844,7 +798,7 @@ class WillowClient:
             )
 
             # Store data
-            await client.data.store("my-app", "my-data", {"key": "value"})
+            await client.data.store("my-data", {"key": "value"})
         ```
     """
 
@@ -975,49 +929,45 @@ class WillowClient:
 
     def register_computed_fields(
         self,
-        app_id: str,
         dataset_id: str,
         fields: ComputedFieldSet
     ) -> None:
-        """Register computed fields for a specific app/dataset combination.
+        """Register computed fields for a specific dataset.
 
         Computed fields are derived values calculated client-side from proven data.
         For example, token prices computed from proven reserves.
 
         Args:
-            app_id: The application ID
             dataset_id: The dataset ID
             fields: The computed field definitions to apply
 
         Example:
             >>> from willow.computed_fields import UNISWAP_V2_PAIR_FIELDS
-            >>> client.register_computed_fields('uniswap-v2', 'pairs', UNISWAP_V2_PAIR_FIELDS)
+            >>> client.register_computed_fields('pairs', UNISWAP_V2_PAIR_FIELDS)
         """
-        self._computed_fields.register(app_id, dataset_id, fields)
+        self._computed_fields.register(dataset_id, dataset_id, fields)
 
-    def unregister_computed_fields(self, app_id: str, dataset_id: str) -> bool:
-        """Remove computed fields for an app/dataset.
+    def unregister_computed_fields(self, dataset_id: str) -> bool:
+        """Remove computed fields for a dataset.
 
         Args:
-            app_id: The application ID
             dataset_id: The dataset ID
 
         Returns:
             True if fields were removed, False if they weren't registered.
         """
-        return self._computed_fields.unregister(app_id, dataset_id)
+        return self._computed_fields.unregister(dataset_id, dataset_id)
 
-    def has_computed_fields(self, app_id: str, dataset_id: str) -> bool:
-        """Check if computed fields are registered for an app/dataset.
+    def has_computed_fields(self, dataset_id: str) -> bool:
+        """Check if computed fields are registered for a dataset.
 
         Args:
-            app_id: The application ID
             dataset_id: The dataset ID
 
         Returns:
             True if fields are registered, False otherwise.
         """
-        return self._computed_fields.has(app_id, dataset_id)
+        return self._computed_fields.has(dataset_id, dataset_id)
 
     async def _get_or_create_light_client(self) -> "LightClient":
         """Get or create a light client for trustless verification.

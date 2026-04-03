@@ -16,10 +16,10 @@ Example:
     >>>
     >>> async with WillowClient("http://localhost:3031") as client:
     ...     # Register Uniswap V2 computed fields
-    ...     client.register_computed_fields('uniswap-v2', 'pairs', UNISWAP_V2_PAIR_FIELDS)
+    ...     client.register_computed_fields('pairs', UNISWAP_V2_PAIR_FIELDS)
     ...
     ...     # Query returns computed prices alongside proven reserves
-    ...     result = await client.data.query('uniswap-v2', 'pairs', {'filters': {'id': '0x...'}})
+    ...     result = await client.data.query('pairs', {'filters': {'id': '0x...'}})
     ...     # result.documents[0] contains:
     ...     # - reserve0, reserve1 (proven by GKR circuit)
     ...     # - token0Price, token1Price (computed from proven reserves)
@@ -78,62 +78,58 @@ class ComputedFieldRegistry:
 
     Example:
         >>> registry = ComputedFieldRegistry()
-        >>> registry.register('uniswap-v2', 'pairs', UNISWAP_V2_PAIR_FIELDS)
-        >>> fields = registry.get('uniswap-v2', 'pairs')
+        >>> registry.register('pairs', UNISWAP_V2_PAIR_FIELDS)
+        >>> fields = registry.get('pairs')
     """
 
     def __init__(self):
         """Initialize an empty registry."""
         self._registry: Dict[str, ComputedFieldSet] = {}
 
-    def register(self, app_id: str, dataset_id: str, fields: ComputedFieldSet) -> None:
-        """Register computed fields for a specific app/dataset combination.
+    def register(self, dataset_id: str, fields: ComputedFieldSet) -> None:
+        """Register computed fields for a specific dataset.
 
         Args:
-            app_id: The application ID.
             dataset_id: The dataset ID.
             fields: The computed field definitions.
         """
-        key = f"{app_id}:{dataset_id}"
+        key = dataset_id
         self._registry[key] = fields
 
-    def get(self, app_id: str, dataset_id: str) -> Optional[ComputedFieldSet]:
+    def get(self, dataset_id: str) -> Optional[ComputedFieldSet]:
         """Get computed fields for a specific app/dataset.
 
         Args:
-            app_id: The application ID.
             dataset_id: The dataset ID.
 
         Returns:
             The computed field set or None if not registered.
         """
-        key = f"{app_id}:{dataset_id}"
+        key = dataset_id
         return self._registry.get(key)
 
-    def has(self, app_id: str, dataset_id: str) -> bool:
+    def has(self, dataset_id: str) -> bool:
         """Check if computed fields are registered for an app/dataset.
 
         Args:
-            app_id: The application ID.
             dataset_id: The dataset ID.
 
         Returns:
             True if fields are registered, False otherwise.
         """
-        key = f"{app_id}:{dataset_id}"
+        key = dataset_id
         return key in self._registry
 
-    def unregister(self, app_id: str, dataset_id: str) -> bool:
+    def unregister(self, dataset_id: str) -> bool:
         """Remove computed fields for an app/dataset.
 
         Args:
-            app_id: The application ID.
             dataset_id: The dataset ID.
 
         Returns:
             True if fields were removed, False if they weren't registered.
         """
-        key = f"{app_id}:{dataset_id}"
+        key = dataset_id
         if key in self._registry:
             del self._registry[key]
             return True

@@ -90,38 +90,6 @@ class RegisterDidTx:
 
 
 @dataclass
-class RegisterAppTx:
-    """App registration transaction."""
-    app_id: str
-    name: str
-    description: str
-    app_type: str
-    owner_did: str
-    admins: List[str] = field(default_factory=list)
-    initial_funding: Optional[int] = None
-    signature: str = ""  # hex-encoded
-    public_key_id: str = ""
-    nonce: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        result = {
-            "app_id": self.app_id,
-            "name": self.name,
-            "description": self.description,
-            "app_type": self.app_type,
-            "owner_did": self.owner_did,
-            "admins": self.admins,
-            "signature": self.signature,
-            "public_key_id": self.public_key_id,
-            "nonce": self.nonce
-        }
-        if self.initial_funding is not None:
-            result["initial_funding"] = self.initial_funding
-        return result
-
-
-@dataclass
 class SubgroveDataStorage:
     """DataStorage mode configuration for a subgrove."""
     name: str = ""
@@ -155,7 +123,6 @@ SubgroveMode = Union[Dict[str, Any], None]
 class RegisterSubgroveTx:
     """Subgrove registration transaction."""
     subgrove_id: str
-    app_id: str
     schema: str  # JSON schema as string
     owner_did: str
     mode: SubgroveMode = None  # None defaults to DataStorage
@@ -168,7 +135,6 @@ class RegisterSubgroveTx:
         """Convert to dictionary for serialization."""
         result = {
             "subgrove_id": self.subgrove_id,
-            "app_id": self.app_id,
             "schema": self.schema,
             "owner_did": self.owner_did,
             "signature": self.signature,
@@ -212,7 +178,6 @@ class TransferTx:
 @dataclass
 class DataStoreTx:
     """Data storage transaction."""
-    app_id: str
     subgrove_id: str
     key: str
     data: str  # JSON data as string
@@ -224,7 +189,6 @@ class DataStoreTx:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "app_id": self.app_id,
             "subgrove_id": self.subgrove_id,
             "key": self.key,
             "data": self.data,
@@ -238,7 +202,6 @@ class DataStoreTx:
 @dataclass
 class StoreFileManifestTx:
     """Store file manifest transaction."""
-    app_id: str
     subgrove_id: str
     file_key: str
     filename: str
@@ -256,7 +219,6 @@ class StoreFileManifestTx:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "app_id": self.app_id,
             "subgrove_id": self.subgrove_id,
             "file_key": self.file_key,
             "filename": self.filename,
@@ -276,7 +238,6 @@ class StoreFileManifestTx:
 @dataclass
 class DeleteFileManifestTx:
     """Delete file manifest transaction."""
-    app_id: str
     subgrove_id: str
     file_key: str
     owner_did: str
@@ -287,7 +248,6 @@ class DeleteFileManifestTx:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "app_id": self.app_id,
             "subgrove_id": self.subgrove_id,
             "file_key": self.file_key,
             "owner_did": self.owner_did,
@@ -299,7 +259,7 @@ class DeleteFileManifestTx:
 
 # Transaction type union
 Transaction = Union[
-    RegisterDidTx, RegisterAppTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
+    RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx,
 ]
 
@@ -315,22 +275,6 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
         # For DID registration, sign the DID document directly
         return json.dumps(transaction.did_document, separators=(',', ':'), sort_keys=True)
     
-    elif tx_type == "RegisterApp":
-        tx = transaction
-        msg = (
-            f"RegisterApp\n"
-            f"App ID: {tx.app_id}\n"
-            f"Name: {tx.name}\n"
-            f"Description: {tx.description}\n"
-            f"Type: {tx.app_type}\n"
-            f"Owner: {tx.owner_did}\n"
-            f"Admins: {','.join(tx.admins)}\n"
-            f"Nonce: {tx.nonce}"
-        )
-        if tx.initial_funding is not None and tx.initial_funding > 0:
-            msg += f"\nFunding: {tx.initial_funding}"
-        return msg
-    
     elif tx_type == "RegisterSubgrove":
         tx = transaction
         mode = tx.mode
@@ -339,7 +283,7 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
             return (
                 f"RegisterSubgrove\n"
                 f"Subgrove ID: {tx.subgrove_id}\n"
-                f"App ID: {tx.app_id}\n"
+                
                 f"Mode: BlockchainIndexing\n"
                 f"Schema: {tx.schema}\n"
                 f"Owner: {tx.owner_did}\n"
@@ -350,7 +294,7 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
         return (
             f"RegisterSubgrove\n"
             f"Subgrove ID: {tx.subgrove_id}\n"
-            f"App ID: {tx.app_id}\n"
+            
             f"Name: {ds.get('name', '')}\n"
             f"Schema: {tx.schema}\n"
             f"Owner: {tx.owner_did}\n"
@@ -375,7 +319,7 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
         tx = transaction
         return (
             f"DataStore\n"
-            f"App ID: {tx.app_id}\n"
+            
             f"Subgrove ID: {tx.subgrove_id}\n"
             f"Key: {tx.key}\n"
             f"Data: {tx.data}\n"
@@ -385,11 +329,11 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
 
     elif tx_type == "StoreFileManifest":
         tx = transaction
-        return f"store_file:{tx.app_id}:{tx.subgrove_id}:{tx.file_key}:{tx.content_hash}:{tx.total_size}"
+        return f"store_file:{tx.subgrove_id}:{tx.file_key}:{tx.content_hash}:{tx.total_size}"
 
     elif tx_type == "DeleteFileManifest":
         tx = transaction
-        return f"delete_file:{tx.app_id}:{tx.subgrove_id}:{tx.file_key}"
+        return f"delete_file:{tx.subgrove_id}:{tx.file_key}"
 
     else:
         raise ValueError(f"Unknown transaction type: {tx_type}")

@@ -17,7 +17,7 @@ from willow.types import (
     IndexerStatus,
     VerificationStats,
     HealthStatus,
-    AppRegistration,
+
     SubgroveRegistration,
     DidPermissions,
 )
@@ -104,14 +104,14 @@ class TestTokenOperations:
         assert result.staked == 500
 
     @pytest.mark.asyncio
-    async def test_get_app_balance(self, client, mock_http_client):
+    async def test_get_subgrove_balance(self, client, mock_http_client):
         """Test get balance for app."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "success": True,
             "data": {
-                "account": "my-app",
+                "account": "my-subgrove",
                 "balance": 5000,
                 "staked": 0,
                 "unbonding": 0
@@ -120,10 +120,9 @@ class TestTokenOperations:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.token.get_app_balance("my-app")
 
         assert isinstance(result, BalanceInfo)
-        assert result.account == "my-app"
+        assert result.account == "my-subgrove"
         assert result.balance == 5000
 
     @pytest.mark.asyncio
@@ -135,7 +134,7 @@ class TestTokenOperations:
             "success": True,
             "data": {
                 "did_registration": 100,
-                "app_registration": 200,
+
                 "subgrove_registration": 150,
                 "base_tx_cost": 50,
                 "cost_per_byte": 10,
@@ -443,18 +442,16 @@ class TestRegistrationOperationsExtended:
     """Test extended registration operations."""
 
     @pytest.mark.asyncio
-    async def test_list_apps(self, client, mock_http_client):
-        """Test list apps."""
+    async def test_list_subgroves(self, client, mock_http_client):
+        """Test list subgroves."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "success": True,
             "data": [
                 {
-                    "app_id": "app-1",
                     "name": "App 1",
                     "description": "Test app",
-                    "app_type": "application",
                     "owner_did": "did:willow:test",
                     "admins": [],
                     "created_at": 1234567890,
@@ -465,24 +462,22 @@ class TestRegistrationOperationsExtended:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.registration.list_apps()
+        result = await client.registration.list_subgroves()
 
         assert len(result) == 1
-        assert isinstance(result[0], AppRegistration)
-        assert result[0].app_id == "app-1"
+        assert isinstance(result[0], SubgroveRegistration)
+        assert result[0].subgrove_id == "subgrove-1"
 
     @pytest.mark.asyncio
-    async def test_get_app(self, client, mock_http_client):
-        """Test get app."""
+    async def test_get_subgrove(self, client, mock_http_client):
+        """Test get subgrove."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "success": True,
             "data": {
-                "app_id": "app-1",
                 "name": "App 1",
                 "description": "Test app",
-                "app_type": "application",
                 "owner_did": "did:willow:test",
                 "admins": [],
                 "created_at": 1234567890,
@@ -492,10 +487,10 @@ class TestRegistrationOperationsExtended:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.registration.get_app("app-1")
+        result = await client.registration.get_subgrove("subgrove-1")
 
-        assert isinstance(result, AppRegistration)
-        assert result.name == "App 1"
+        assert isinstance(result, SubgroveRegistration)
+        assert result.name == "Subgrove 1"
 
     @pytest.mark.asyncio
     async def test_list_subgroves(self, client, mock_http_client):
@@ -507,7 +502,6 @@ class TestRegistrationOperationsExtended:
             "data": [
                 {
                     "subgrove_id": "subgrove-1",
-                    "app_id": "app-1",
                     "name": "Subgrove 1",
                     "subgrove_path": ["data"],
                     "owner_did": "did:willow:test",
@@ -521,7 +515,7 @@ class TestRegistrationOperationsExtended:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        result = await client.registration.list_subgroves("app-1")
+        result = await client.registration.list_subgroves()
 
         assert len(result) == 1
         assert isinstance(result[0], SubgroveRegistration)
@@ -535,10 +529,10 @@ class TestRegistrationOperationsExtended:
             "success": True,
             "data": {
                 "did": "did:willow:test",
-                "owned_apps": ["app-1"],
-                "admin_apps": ["app-2"],
-                "write_access": ["app-1/subgrove-1"],
-                "read_access": ["app-3/subgrove-1"]
+                "owned_subgroves": ["subgrove-1"],
+                "admin_subgroves": ["subgrove-2"],
+                "write_access": ["subgrove-1"],
+                "read_access": ["subgrove-3"]
             }
         }
         mock_http_client.request = AsyncMock(return_value=mock_response)
@@ -547,8 +541,8 @@ class TestRegistrationOperationsExtended:
         result = await client.registration.get_permissions("did:willow:test")
 
         assert isinstance(result, DidPermissions)
-        assert "app-1" in result.owned_apps
-        assert "app-2" in result.admin_apps
+        assert "subgrove-1" in result.owned_subgroves
+        assert "subgrove-2" in result.admin_subgroves
 
 
 class TestClientBuilder:

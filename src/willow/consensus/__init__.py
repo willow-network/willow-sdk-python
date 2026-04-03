@@ -8,7 +8,6 @@ enabling full-featured blockchain interactions without relying on data nodes.
 from .client import ConsensusClient
 from .types import (
     RegisterDidTx,
-    RegisterAppTx,
     RegisterSubgroveTx,
     RetentionWindow,
     TransferTx,
@@ -24,7 +23,6 @@ from .config import ConsensusConfigBuilder
 __all__ = [
     "ConsensusClient",
     "RegisterDidTx",
-    "RegisterAppTx",
     "RegisterSubgroveTx",
     "RetentionWindow",
     "TransferTx",

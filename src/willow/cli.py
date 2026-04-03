@@ -169,11 +169,10 @@ def get_session_from_config():
 
 
 @data.command()
-@click.argument("app_id")
 @click.argument("dataset_id")
 @click.argument("data", type=click.File("r"))
 @click.pass_context
-def store(ctx, app_id, dataset_id, data):
+def store(ctx, dataset_id, data):
     """Store data in a dataset. Data should be JSON file or - for stdin."""
     async def _store():
         session = get_session_from_config()
@@ -183,18 +182,17 @@ def store(ctx, app_id, dataset_id, data):
             # Restore session
             client.session = type("Session", (), session)()
             
-            await client.data.store(app_id, dataset_id, data_dict)
+            await client.data.store(dataset_id, data_dict)
             click.echo(f"Stored {len(data_dict)} items")
     
     asyncio.run(_store())
 
 
 @data.command()
-@click.argument("app_id")
 @click.argument("dataset_id")
 @click.argument("key")
 @click.pass_context
-def get(ctx, app_id, dataset_id, key):
+def get(ctx, dataset_id, key):
     """Get data from a dataset."""
     async def _get():
         session = get_session_from_config()
@@ -203,19 +201,18 @@ def get(ctx, app_id, dataset_id, key):
             # Restore session
             client.session = type("Session", (), session)()
             
-            result = await client.data.get(app_id, dataset_id, key)
+            result = await client.data.get(dataset_id, key)
             click.echo(json.dumps(result, indent=2))
     
     asyncio.run(_get())
 
 
 @data.command()
-@click.argument("app_id")
 @click.argument("dataset_id")
 @click.argument("key")
 @click.argument("data", type=click.File("r"))
 @click.pass_context
-def update(ctx, app_id, dataset_id, key, data):
+def update(ctx, dataset_id, key, data):
     """Update data in a dataset."""
     async def _update():
         session = get_session_from_config()
@@ -225,18 +222,17 @@ def update(ctx, app_id, dataset_id, key, data):
             # Restore session
             client.session = type("Session", (), session)()
             
-            await client.data.update(app_id, dataset_id, key, data_dict)
+            await client.data.update(dataset_id, key, data_dict)
             click.echo(f"Updated {key}")
     
     asyncio.run(_update())
 
 
 @data.command()
-@click.argument("app_id")
 @click.argument("dataset_id")
 @click.argument("key")
 @click.pass_context
-def delete(ctx, app_id, dataset_id, key):
+def delete(ctx, dataset_id, key):
     """Delete data from a dataset."""
     async def _delete():
         session = get_session_from_config()
@@ -245,7 +241,7 @@ def delete(ctx, app_id, dataset_id, key):
             # Restore session
             client.session = type("Session", (), session)()
             
-            await client.data.delete(app_id, dataset_id, key)
+            await client.data.delete(dataset_id, key)
             click.echo(f"Deleted {key}")
     
     asyncio.run(_delete())
@@ -258,15 +254,14 @@ def proof():
 
 
 @proof.command()
-@click.argument("app_id")
 @click.argument("dataset_id")
 @click.argument("key")
 @click.pass_context
-def get(ctx, app_id, dataset_id, key):
+def get(ctx, dataset_id, key):
     """Get Merkle proof for data."""
     async def _get_proof():
         async with WillowClient(ctx.obj["api_url"]) as client:
-            result = await client.proof.get(app_id, dataset_id, key)
+            result = await client.proof.get(dataset_id, key)
             click.echo(json.dumps(result, indent=2))
     
     asyncio.run(_get_proof())

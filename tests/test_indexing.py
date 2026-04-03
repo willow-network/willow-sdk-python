@@ -32,11 +32,11 @@ PUBLIC_KEY_ID = "#key1"
 # Helper to get funded DID
 def get_funded_did() -> str:
     """Read the funded DID from the file created by the script."""
-    did_path = Path(__file__).parent.parent.parent.parent / "tests" / "execution" / "app_owner_did.txt"
+    did_path = Path(__file__).parent.parent.parent.parent / "devnet" / "test_owner_did.txt"
     try:
         return did_path.read_text().strip()
     except FileNotFoundError:
-        raise Exception("Funded DID file not found - ensure network is running with funding")
+        raise Exception("Test DID file not found - ensure network is running with funding")
 
 
 # Test fixtures
@@ -71,16 +71,16 @@ def funded_did():
 
 
 @pytest.fixture
-def app_id():
+def dataset_prefix():
     """App ID for tests."""
-    return "indexing-test-app"
+    return "blog_posts"
 
 
 class TestSchemaAndIndexRegistration:
     """Test schema and index registration."""
     
     @pytest.mark.asyncio
-    async def test_register_dataset_with_indexes(self, client1, funded_did, app_id):
+    async def test_register_dataset_with_indexes(self, client1, funded_did, dataset_prefix):
         """Test registering a dataset with multiple index types."""
         # Authenticate
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
@@ -128,7 +128,7 @@ class TestSchemaAndIndexRegistration:
         # Register dataset
         dataset_request = {
             "dataset_id": "blog_posts",
-            "app_id": app_id,
+
             "name": "Blog Posts with Indexes",
             "dataset_path": [],
             "schema": schema.model_dump(),
@@ -149,7 +149,7 @@ class TestIndexedDataStorage:
     """Test storing and retrieving indexed data."""
     
     @pytest.mark.asyncio
-    async def test_store_indexed_documents(self, client1, client2, funded_did, app_id):
+    async def test_store_indexed_documents(self, client1, client2, funded_did, dataset_prefix):
         """Test storing documents that will be indexed."""
         # Authenticate both clients
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
@@ -196,13 +196,13 @@ class TestIndexedDataStorage:
         ]
         
         # Store documents
-        await client1.data.batch_store(app_id, "blog_posts", test_posts)
+        await client1.data.batch_store( "blog_posts", test_posts)
         
         # Wait for indexing
         await asyncio.sleep(5)
         
         # Verify data was stored
-        retrieved = await client2.data.get(app_id, "blog_posts", "post_1")
+        retrieved = await client2.data.get( "blog_posts", "post_1")
         assert retrieved["title"] == "Introduction to Python SDK"
         assert retrieved["author"] == "alice"
 
@@ -211,7 +211,7 @@ class TestQueryOperations:
     """Test various query operations."""
     
     @pytest.mark.asyncio
-    async def test_query_by_indexed_field(self, client2, funded_did, app_id):
+    async def test_query_by_indexed_field(self, client2, funded_did, dataset_prefix):
         """Test querying by indexed field (author)."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -221,12 +221,12 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query(app_id, "blog_posts", query)
+        results = await client2.data.query( "blog_posts", query)
         assert len(results.documents) == 2
         assert all(doc["author"] == "alice" for doc in results.documents)
     
     @pytest.mark.asyncio
-    async def test_range_queries(self, client2, funded_did, app_id):
+    async def test_range_queries(self, client2, funded_did, dataset_prefix):
         """Test range queries on numeric fields."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -239,12 +239,12 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query(app_id, "blog_posts", query)
+        results = await client2.data.query( "blog_posts", query)
         assert len(results.documents) == 2
         assert all(1000 <= doc["timestamp"] <= 1500 for doc in results.documents)
     
     @pytest.mark.asyncio
-    async def test_fulltext_search(self, client2, funded_did, app_id):
+    async def test_fulltext_search(self, client2, funded_did, dataset_prefix):
         """Test fulltext search functionality."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -255,12 +255,12 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query(app_id, "blog_posts", query)
+        results = await client2.data.query( "blog_posts", query)
         assert len(results.documents) >= 2
         assert any("indexing" in doc["content"].lower() for doc in results.documents)
     
     @pytest.mark.asyncio
-    async def test_sorting(self, client2, funded_did, app_id):
+    async def test_sorting(self, client2, funded_did, dataset_prefix):
         """Test sorting query results."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -271,7 +271,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query(app_id, "blog_posts", query)
+        results = await client2.data.query( "blog_posts", query)
         assert len(results.documents) == 3
         
         # Verify descending order
@@ -279,7 +279,7 @@ class TestQueryOperations:
             assert results.documents[i-1]["views"] >= results.documents[i]["views"]
     
     @pytest.mark.asyncio
-    async def test_pagination(self, client2, funded_did, app_id):
+    async def test_pagination(self, client2, funded_did, dataset_prefix):
         """Test pagination with limit and offset."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -290,7 +290,7 @@ class TestQueryOperations:
             "offset": 0
         }
         
-        page1 = await client2.data.query(app_id, "blog_posts", page1_query)
+        page1 = await client2.data.query( "blog_posts", page1_query)
         assert len(page1.documents) == 2
         assert page1.limit == 2
         assert page1.offset == 0
@@ -302,12 +302,12 @@ class TestQueryOperations:
             "offset": 2
         }
         
-        page2 = await client2.data.query(app_id, "blog_posts", page2_query)
+        page2 = await client2.data.query( "blog_posts", page2_query)
         assert len(page2.documents) <= 2
         assert page2.offset == 2
     
     @pytest.mark.asyncio
-    async def test_compound_queries(self, client2, funded_did, app_id):
+    async def test_compound_queries(self, client2, funded_did, dataset_prefix):
         """Test compound queries with multiple conditions."""
         client2.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -322,7 +322,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query(app_id, "blog_posts", query)
+        results = await client2.data.query( "blog_posts", query)
         assert len(results.documents) == 1
         assert results.documents[0]["author"] == "alice"
         assert results.documents[0]["views"] >= 200
@@ -332,7 +332,7 @@ class TestCrossNodeConsistency:
     """Test consistency across multiple nodes."""
     
     @pytest.mark.asyncio
-    async def test_query_consistency_across_nodes(self, client1, client2, client3, funded_did, app_id):
+    async def test_query_consistency_across_nodes(self, client1, client2, client3, funded_did, dataset_prefix):
         """Test that all nodes return consistent query results."""
         # Authenticate all clients
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
@@ -345,9 +345,9 @@ class TestCrossNodeConsistency:
         
         # Query from all nodes
         results = await asyncio.gather(
-            client1.data.query(app_id, "blog_posts", query),
-            client2.data.query(app_id, "blog_posts", query),
-            client3.data.query(app_id, "blog_posts", query)
+            client1.data.query( "blog_posts", query),
+            client2.data.query( "blog_posts", query),
+            client3.data.query( "blog_posts", query)
         )
         
         results1, results2, results3 = results
@@ -365,7 +365,7 @@ class TestUniqueConstraints:
     """Test unique constraint enforcement."""
     
     @pytest.mark.asyncio
-    async def test_unique_constraint_enforcement(self, client1, funded_did, app_id):
+    async def test_unique_constraint_enforcement(self, client1, funded_did, dataset_prefix):
         """Test that unique constraints are enforced."""
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -379,14 +379,14 @@ class TestUniqueConstraints:
         
         # This should raise an exception
         with pytest.raises(Exception):
-            await client1.data.store(app_id, "blog_posts", {"post_duplicate": duplicate_post})
+            await client1.data.store( "blog_posts", {"post_duplicate": duplicate_post})
 
 
 class TestPerformance:
     """Performance tests for indexing operations."""
     
     @pytest.mark.asyncio
-    async def test_bulk_indexing_performance(self, client1, funded_did, app_id):
+    async def test_bulk_indexing_performance(self, client1, funded_did, dataset_prefix):
         """Test bulk indexing performance."""
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
@@ -407,7 +407,7 @@ class TestPerformance:
         
         perf_dataset = {
             "dataset_id": "perf_test",
-            "app_id": app_id,
+
             "name": "Performance Test Dataset",
             "dataset_path": [],
             "schema": perf_schema.model_dump(),
@@ -437,7 +437,7 @@ class TestPerformance:
         # Measure bulk insert time
         import time
         start_time = time.time()
-        await client1.data.batch_store(app_id, "perf_test", test_data)
+        await client1.data.batch_store( "perf_test", test_data)
         await asyncio.sleep(5)  # Wait for indexing
         insert_time = (time.time() - start_time) * 1000  # Convert to ms
         
@@ -446,7 +446,7 @@ class TestPerformance:
         
         # Test query performance
         query_start = time.time()
-        category_results = await client1.data.query(app_id, "perf_test", {
+        category_results = await client1.data.query( "perf_test", {
             "filters": {"category": "electronics"}
         })
         category_query_time = (time.time() - query_start) * 1000
@@ -456,7 +456,7 @@ class TestPerformance:
         
         # Range query performance
         range_start = time.time()
-        range_results = await client1.data.query(app_id, "perf_test", {
+        range_results = await client1.data.query( "perf_test", {
             "filters": {
                 "value": {"$gte": 200, "$lte": 500}
             }

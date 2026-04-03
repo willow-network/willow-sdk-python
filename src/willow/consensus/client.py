@@ -14,7 +14,7 @@ import logging
 
 from ..auth import sign_message, detect_algorithm_from_did
 from .types import (
-    RegisterDidTx, RegisterAppTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
+    RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx,
     BroadcastResult, TransactionStatus, ConsensusConfig, ConsensusError,
     create_transaction_wrapper, create_sign_message, Transaction
@@ -86,51 +86,9 @@ class ConsensusClient:
         # Sign and broadcast
         return await self._sign_and_broadcast("RegisterDid", tx, private_key)
     
-    async def register_app(
-        self,
-        app_id: str,
-        name: str,
-        description: str,
-        app_type: str,
-        owner_did: str,
-        private_key: str,
-        public_key_id: str,
-        admins: Optional[list] = None
-    ) -> BroadcastResult:
-        """
-        Register an application on the blockchain.
-        
-        Args:
-            app_id: Unique application identifier
-            name: Human-readable application name
-            description: Application description
-            app_type: Type of application
-            owner_did: DID of the application owner
-            private_key: Private key for signing (hex-encoded)
-            public_key_id: Public key identifier in the DID document
-            admins: List of admin DIDs (optional)
-            
-        Returns:
-            BroadcastResult with transaction status
-        """
-        tx = RegisterAppTx(
-            app_id=app_id,
-            name=name,
-            description=description,
-            app_type=app_type,
-            owner_did=owner_did,
-            admins=admins or [],
-            signature="",
-            public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did)
-        )
-        
-        return await self._sign_and_broadcast("RegisterApp", tx, private_key)
-    
     async def register_subgrove(
         self,
         subgrove_id: str,
-        app_id: str,
         schema: str,
         owner_did: str,
         private_key: str,
@@ -142,7 +100,6 @@ class ConsensusClient:
 
         Args:
             subgrove_id: Unique subgrove identifier
-            app_id: Parent application ID
             schema: JSON schema definition
             owner_did: DID of the subgrove owner
             private_key: Private key for signing (hex-encoded)
@@ -156,7 +113,6 @@ class ConsensusClient:
         """
         tx = RegisterSubgroveTx(
             subgrove_id=subgrove_id,
-            app_id=app_id,
             schema=schema,
             owner_did=owner_did,
             mode=mode,
@@ -204,7 +160,6 @@ class ConsensusClient:
     
     async def store_data(
         self,
-        app_id: str,
         subgrove_id: str,
         key: str,
         data: Dict[str, Any],
@@ -216,7 +171,6 @@ class ConsensusClient:
         Store data on the blockchain.
         
         Args:
-            app_id: Application ID
             subgrove_id: Subgrove ID
             key: Data key
             data: Data to store
@@ -228,7 +182,6 @@ class ConsensusClient:
             BroadcastResult with transaction status
         """
         tx = DataStoreTx(
-            app_id=app_id,
             subgrove_id=subgrove_id,
             key=key,
             data=json.dumps(data, separators=(',', ':'), sort_keys=True),
@@ -242,7 +195,6 @@ class ConsensusClient:
 
     async def store_file_manifest(
         self,
-        app_id: str,
         subgrove_id: str,
         file_key: str,
         filename: str,
@@ -260,7 +212,6 @@ class ConsensusClient:
         Store a file manifest on the blockchain.
 
         Args:
-            app_id: Application ID
             subgrove_id: Subgrove ID
             file_key: Unique key for the file
             filename: Original filename
@@ -278,7 +229,6 @@ class ConsensusClient:
             BroadcastResult with transaction status
         """
         tx = StoreFileManifestTx(
-            app_id=app_id,
             subgrove_id=subgrove_id,
             file_key=file_key,
             filename=filename,
@@ -298,7 +248,6 @@ class ConsensusClient:
 
     async def delete_file_manifest(
         self,
-        app_id: str,
         subgrove_id: str,
         file_key: str,
         owner_did: str,
@@ -309,7 +258,6 @@ class ConsensusClient:
         Delete a file manifest from the blockchain.
 
         Args:
-            app_id: Application ID
             subgrove_id: Subgrove ID
             file_key: Key of the file to delete
             owner_did: DID of the file owner
@@ -320,7 +268,6 @@ class ConsensusClient:
             BroadcastResult with transaction status
         """
         tx = DeleteFileManifestTx(
-            app_id=app_id,
             subgrove_id=subgrove_id,
             file_key=file_key,
             owner_did=owner_did,

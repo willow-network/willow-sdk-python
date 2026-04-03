@@ -199,7 +199,7 @@ def sign_request(
         private_key_hex: Hex-encoded private key
         public_key_id: Public key ID from DID document
         method: HTTP method (e.g., "GET", "POST")
-        path: API path (e.g., "/data/my-app/my-data")
+        path: API path (e.g., "/data/my-subgrove/my-key")
 
     Returns:
         Dictionary of authentication headers to include in the request

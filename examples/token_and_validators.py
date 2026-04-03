@@ -64,13 +64,13 @@ async def main():
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 3. Get App Balance
-        print("\n3. App Balance")
+        # 3. Get Subgrove Balance
+        print("\n3. Subgrove Balance")
         print("-" * 40)
 
         try:
-            app_balance = await client.token.get_app_balance("demo-app")
-            print(f"App balance: {app_balance}")
+            subgrove_balance = await client.token.get_subgrove_balance("demo-subgrove")
+            print(f"Subgrove balance: {subgrove_balance}")
         except WillowError as e:
             print(f"Error: {e}")
 

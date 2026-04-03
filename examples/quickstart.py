@@ -47,7 +47,7 @@ async def main():
         print("\nStoring data...")
         try:
             await client.data.store(
-                app_id="quickstart-app",
+
                 collection="users",
                 data={"name": "Alice", "email": "alice@example.com"}
             )
@@ -59,7 +59,7 @@ async def main():
         print("\nQuerying data...")
         try:
             result = await client.data.query(
-                app_id="quickstart-app",
+
                 collection="users",
                 query={"filters": {"name": "Alice"}}
             )
