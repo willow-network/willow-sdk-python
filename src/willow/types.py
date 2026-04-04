@@ -405,6 +405,17 @@ class FundSubgroveRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class DeregisterSubgroveRequest(BaseModel):
+    """Deregister subgrove request."""
+    subgrove_id: str = Field(alias="subgrove_id")
+    owner_did: str = Field(alias="owner_did")
+    signature: bytes
+    public_key_id: str = Field(alias="public_key_id")
+    nonce: int
+
+    model_config = {"populate_by_name": True}
+
+
 # ============================================================================
 # Token Types
 # ============================================================================

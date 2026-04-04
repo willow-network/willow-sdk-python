@@ -257,10 +257,30 @@ class DeleteFileManifestTx:
         }
 
 
+@dataclass
+class DeregisterSubgroveTx:
+    """Deregister (delete) a subgrove transaction. Remaining funding is refunded to the owner."""
+    subgrove_id: str
+    owner_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "subgrove_id": self.subgrove_id,
+            "owner_did": self.owner_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
 # Transaction type union
 Transaction = Union[
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
-    StoreFileManifestTx, DeleteFileManifestTx,
+    StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
 ]
 
 
@@ -334,6 +354,10 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
     elif tx_type == "DeleteFileManifest":
         tx = transaction
         return f"delete_file:{tx.subgrove_id}:{tx.file_key}"
+
+    elif tx_type == "DeregisterSubgrove":
+        tx = transaction
+        return f"DeregisterSubgrove:{tx.subgrove_id}:{tx.owner_did}:{tx.nonce}"
 
     else:
         raise ValueError(f"Unknown transaction type: {tx_type}")

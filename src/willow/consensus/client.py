@@ -15,7 +15,7 @@ import logging
 from ..auth import sign_message, detect_algorithm_from_did
 from .types import (
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
-    StoreFileManifestTx, DeleteFileManifestTx,
+    StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
     BroadcastResult, TransactionStatus, ConsensusConfig, ConsensusError,
     create_transaction_wrapper, create_sign_message, Transaction
 )
@@ -277,6 +277,35 @@ class ConsensusClient:
         )
 
         return await self._sign_and_broadcast("DeleteFileManifest", tx, private_key)
+
+    async def deregister_subgrove(
+        self,
+        subgrove_id: str,
+        owner_did: str,
+        private_key: str,
+        public_key_id: str,
+    ) -> BroadcastResult:
+        """
+        Deregister (delete) a subgrove. Remaining funding is refunded to the owner.
+
+        Args:
+            subgrove_id: Subgrove to deregister
+            owner_did: DID of the subgrove owner
+            private_key: Private key for signing (hex-encoded)
+            public_key_id: Public key identifier in the DID document
+
+        Returns:
+            BroadcastResult with transaction status
+        """
+        tx = DeregisterSubgroveTx(
+            subgrove_id=subgrove_id,
+            owner_did=owner_did,
+            signature="",
+            public_key_id=public_key_id,
+            nonce=await self._get_next_nonce(owner_did),
+        )
+
+        return await self._sign_and_broadcast("DeregisterSubgrove", tx, private_key)
 
     async def get_transaction_status(self, tx_hash: str) -> TransactionStatus:
         """

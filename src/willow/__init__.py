@@ -110,6 +110,7 @@ from .types import (
     # Data Operation Types
     StoreDataRequest,
     FundSubgroveRequest,
+    DeregisterSubgroveRequest,
     # Token Types
     TokenInfo,
     BalanceInfo,
@@ -315,6 +316,7 @@ __all__ = [
     # Data Operation Types
     "StoreDataRequest",
     "FundSubgroveRequest",
+    "DeregisterSubgroveRequest",
     # Token Types
     "TokenInfo",
     "BalanceInfo",
