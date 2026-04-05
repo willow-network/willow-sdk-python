@@ -630,6 +630,9 @@ class IndexingOperations:
     ) -> GraphQLResponse:
         """Execute a GraphQL query against a subgrove.
 
+        When ``indexer_url`` is configured on the client, the query is routed
+        to the indexer node. Otherwise it falls back to the validator API.
+
         Args:
             subgrove_id: Subgrove identifier
             query: GraphQL query string
@@ -641,6 +644,11 @@ class IndexingOperations:
         request_data = {"query": query}
         if variables:
             request_data["variables"] = variables
+
+        if self.client.indexer_url:
+            url = f"{self.client.indexer_url}/graphql/{subgrove_id}"
+            response = await self.client._http.post(url, json=request_data)
+            return GraphQLResponse(**response.json())
 
         response = await self.client._request(
             "POST",
@@ -657,6 +665,9 @@ class IndexingOperations:
     ) -> SqlResponse:
         """Execute a SQL query against a subgrove.
 
+        When ``indexer_url`` is configured on the client, the query is routed
+        to the indexer node. Otherwise it falls back to the validator API.
+
         Args:
             subgrove_id: The subgrove to query
             query: SQL SELECT query string
@@ -666,6 +677,14 @@ class IndexingOperations:
             SqlResponse with columns, rows, and optional proof
         """
         request = SqlRequest(query=query, include_proof=include_proof)
+
+        if self.client.indexer_url:
+            url = f"{self.client.indexer_url}/sql/{subgrove_id}"
+            response = await self.client._http.post(
+                url, json=request.model_dump(exclude_none=True)
+            )
+            return SqlResponse(**response.json())
+
         response = await self.client._request(
             "POST",
             f"/sql/{subgrove_id}",
@@ -742,6 +761,7 @@ class WillowClientBuilder:
 
     def __init__(self, api_url: str = "http://localhost:3031"):
         self._api_url = api_url
+        self._indexer_url: Optional[str] = None
         self._timeout = 30.0
         self._retry_config: Optional[RetryConfig] = None
         self._proof_options: Optional[ProofVerificationOptions] = None
@@ -767,6 +787,11 @@ class WillowClientBuilder:
         self._light_client_config = config
         return self
 
+    def indexer_url(self, url: str) -> "WillowClientBuilder":
+        """Set indexer node URL for routing GraphQL/SQL queries."""
+        self._indexer_url = url
+        return self
+
     def build(self) -> "WillowClient":
         """Build and return the WillowClient instance."""
         return WillowClient(
@@ -774,6 +799,7 @@ class WillowClientBuilder:
             timeout=self._timeout,
             retry_config=self._retry_config,
             proof_verification_options=self._proof_options,
+            indexer_url=self._indexer_url,
         )
 
 
@@ -807,7 +833,8 @@ class WillowClient:
         api_url: str = "http://localhost:3031",
         timeout: float = 30.0,
         retry_config: Optional[RetryConfig] = None,
-        proof_verification_options: Optional[ProofVerificationOptions] = None
+        proof_verification_options: Optional[ProofVerificationOptions] = None,
+        indexer_url: Optional[str] = None,
     ):
         """Initialize Willow client.
 
@@ -816,8 +843,10 @@ class WillowClient:
             timeout: Request timeout in seconds
             retry_config: Optional retry configuration
             proof_verification_options: Optional proof verification configuration
+            indexer_url: Optional indexer node URL for routing GraphQL/SQL queries
         """
         self.api_url = api_url.rstrip("/")
+        self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
         self.timeout = timeout
         self.retry_config = retry_config or RetryConfig()
         self._did: Optional[str] = None
