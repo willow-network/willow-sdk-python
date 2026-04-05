@@ -647,7 +647,13 @@ class IndexingOperations:
 
         if self.client.indexer_url:
             url = f"{self.client.indexer_url}/graphql/{subgrove_id}"
-            response = await self.client._http.post(url, json=request_data)
+            headers = {}
+            if self.client.is_authenticated():
+                headers = sign_request(
+                    self.client._did, self.client._private_key,
+                    self.client._public_key_id, "POST", f"/graphql/{subgrove_id}"
+                )
+            response = await self.client._http.post(url, json=request_data, headers=headers)
             return GraphQLResponse(**response.json())
 
         response = await self.client._request(
@@ -680,8 +686,14 @@ class IndexingOperations:
 
         if self.client.indexer_url:
             url = f"{self.client.indexer_url}/sql/{subgrove_id}"
+            headers = {}
+            if self.client.is_authenticated():
+                headers = sign_request(
+                    self.client._did, self.client._private_key,
+                    self.client._public_key_id, "POST", f"/sql/{subgrove_id}"
+                )
             response = await self.client._http.post(
-                url, json=request.model_dump(exclude_none=True)
+                url, json=request.model_dump(exclude_none=True), headers=headers
             )
             return SqlResponse(**response.json())
 
