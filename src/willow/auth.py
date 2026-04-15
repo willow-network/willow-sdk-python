@@ -4,15 +4,91 @@ import os
 import time
 import hashlib
 from typing import Dict, Literal, Optional, Union
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.hazmat.primitives import serialization
-import coincurve
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+from cryptography.hazmat.primitives.asymmetric.utils import (
+    Prehashed,
+    decode_dss_signature,
+    encode_dss_signature,
+)
 from eth_utils import keccak
+
 from .types import DidDocument, PublicKey
 from .utils import generate_id
 
 
 SignatureAlgorithm = Literal["Ed25519", "secp256k1"]
+
+
+# ---------------------------------------------------------------------------
+# secp256k1 helpers backed by `cryptography` (pure-Python wheel coverage,
+# no libsecp256k1 C build required). Formats match the Willow wire protocol:
+#
+#   - public keys:  64-byte uncompressed (X || Y), no 0x04 prefix
+#   - signatures:   64-byte compact (r || s)
+#   - message input: the caller pre-hashes (we sign/verify the raw digest)
+#
+# Previously this module used `coincurve`, which wraps libsecp256k1 and
+# has spotty prebuilt-wheel coverage on newer Pythons (e.g. 3.14 on macOS)
+# — building from source requires pkg-config and a C toolchain. Switching
+# to `cryptography` keeps us aligned with the rest of the SDK (which
+# already uses `cryptography` for Ed25519) and avoids the native-build
+# failure mode entirely.
+# ---------------------------------------------------------------------------
+
+
+def _secp256k1_public_key_bytes_from_private(private_key_bytes: bytes) -> bytes:
+    """Derive a 64-byte uncompressed public key (X || Y) from a 32-byte private key."""
+    private_int = int.from_bytes(private_key_bytes, "big")
+    private_key = ec.derive_private_key(private_int, ec.SECP256K1())
+    pub = private_key.public_key().public_numbers()
+    return pub.x.to_bytes(32, "big") + pub.y.to_bytes(32, "big")
+
+
+def _secp256k1_sign_prehashed(private_key_bytes: bytes, digest: bytes) -> bytes:
+    """Sign a 32-byte digest with secp256k1, returning a 64-byte compact (r || s) signature.
+
+    The caller is responsible for hashing (we use Prehashed to tell
+    `cryptography` the input is already a digest). SHA256 is passed as the
+    declared pre-hash algorithm purely because both SHA256 and Keccak-256
+    produce 32-byte outputs and `cryptography` only uses the algorithm to
+    validate the input length.
+    """
+    private_int = int.from_bytes(private_key_bytes, "big")
+    private_key = ec.derive_private_key(private_int, ec.SECP256K1())
+    signature_der = private_key.sign(digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+    r, s = decode_dss_signature(signature_der)
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+
+def _secp256k1_verify_prehashed(
+    public_key_bytes: bytes, digest: bytes, signature_compact: bytes
+) -> bool:
+    """Verify a 64-byte compact signature against a 64-byte uncompressed public key.
+
+    `public_key_bytes` must be 64 bytes (X || Y, no 0x04 prefix).
+    `signature_compact` must be 64 bytes (r || s).
+    """
+    if len(public_key_bytes) != 64 or len(signature_compact) != 64:
+        return False
+    try:
+        x = int.from_bytes(public_key_bytes[:32], "big")
+        y = int.from_bytes(public_key_bytes[32:], "big")
+        public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256K1())
+        public_key = public_numbers.public_key()
+        r = int.from_bytes(signature_compact[:32], "big")
+        s = int.from_bytes(signature_compact[32:], "big")
+        signature_der = encode_dss_signature(r, s)
+        public_key.verify(signature_der, digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+        return True
+    except (InvalidSignature, ValueError):
+        return False
 
 
 def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[str, DidDocument]]:
@@ -48,9 +124,8 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
     elif algorithm == "secp256k1":
         # Generate secp256k1 keypair (Ethereum compatible)
         private_key_bytes = os.urandom(32)
-        private_key = coincurve.PrivateKey(private_key_bytes)
-        public_key_bytes = private_key.public_key.format(compressed=False)[1:]  # Remove 0x04 prefix
-        
+        public_key_bytes = _secp256k1_public_key_bytes_from_private(private_key_bytes)
+
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
     
@@ -107,15 +182,13 @@ def sign_challenge(
         signature = private_key.sign(message_bytes)
         
     elif algorithm == "secp256k1":
-        # Hash message with Keccak256 (Ethereum style)
+        # Hash message with Keccak256 (Ethereum style), then sign the digest.
         message_hash = keccak(message_bytes)
-        private_key = coincurve.PrivateKey(private_key_bytes)
-        signature_obj = private_key.sign(message_hash, hasher=None)
-        signature = signature_obj.serialize_compact()
-        
+        signature = _secp256k1_sign_prehashed(private_key_bytes, message_hash)
+
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
-    
+
     return signature.hex()
 
 
@@ -148,13 +221,12 @@ def verify_signature(
             return True
             
         elif algorithm == "secp256k1":
-            # Hash message with Keccak256
+            # Hash message with Keccak256 to match sign_challenge, then verify.
             message_hash = keccak(message_bytes)
-            # Add 0x04 prefix for uncompressed public key
-            full_public_key = b'\x04' + public_key_bytes
-            public_key = coincurve.PublicKey(full_public_key)
-            return public_key.verify(signature_bytes, message_hash, hasher=None)
-            
+            return _secp256k1_verify_prehashed(
+                public_key_bytes, message_hash, signature_bytes
+            )
+
         else:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
             

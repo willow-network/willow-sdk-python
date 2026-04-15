@@ -1,9 +1,14 @@
 """Tests for authentication module."""
 
 import pytest
-from willow.auth import generate_did, sign_challenge, verify_signature, detect_algorithm_from_did
-import ed25519
-import coincurve
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from willow.auth import (
+    detect_algorithm_from_did,
+    generate_did,
+    sign_challenge,
+    verify_signature,
+)
 
 
 class TestGenerateDid:
@@ -92,37 +97,45 @@ class TestVerifySignature:
     
     def test_verify_ed25519_valid(self):
         """Test valid Ed25519 signature verification."""
-        # Generate real keypair
-        signing_key = ed25519.SigningKey(b"a" * 32)
-        verifying_key = signing_key.verifying_key
-        
+        # Generate real keypair via cryptography (same library the SDK uses).
+        signing_key = Ed25519PrivateKey.from_private_bytes(b"a" * 32)
+        from cryptography.hazmat.primitives import serialization
+        verifying_key_bytes = signing_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+
         message = "test message"
         signature = signing_key.sign(message.encode())
-        
+
         is_valid = verify_signature(
             message,
             signature.hex(),
-            verifying_key.to_bytes().hex(),
-            "Ed25519"
+            verifying_key_bytes.hex(),
+            "Ed25519",
         )
-        
+
         assert is_valid is True
-    
+
     def test_verify_ed25519_invalid(self):
         """Test invalid Ed25519 signature verification."""
-        signing_key = ed25519.SigningKey(b"a" * 32)
-        verifying_key = signing_key.verifying_key
-        
+        signing_key = Ed25519PrivateKey.from_private_bytes(b"a" * 32)
+        from cryptography.hazmat.primitives import serialization
+        verifying_key_bytes = signing_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+
         message = "test message"
         invalid_signature = "0" * 128  # Invalid signature
-        
+
         is_valid = verify_signature(
             message,
             invalid_signature,
-            verifying_key.to_bytes().hex(),
-            "Ed25519"
+            verifying_key_bytes.hex(),
+            "Ed25519",
         )
-        
+
         assert is_valid is False
     
     def test_verify_secp256k1_valid(self):
