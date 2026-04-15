@@ -48,6 +48,13 @@ from .indexers import (
     ValidatorHasNoDataError,
     NoIndexersReachableError,
 )
+from .subscriptions import (
+    WillowSubscriptions,
+    SubscribeOptions,
+    SubscribeSource,
+    Subscription,
+    SubscriptionPayload,
+)
 from .auth import (
     generate_did,
     sign_challenge,

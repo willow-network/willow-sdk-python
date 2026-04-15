@@ -29,6 +29,8 @@ setup(
     install_requires=[
         "httpx>=0.24.0",
         "pydantic>=2.0.0",
+        # WebSocket client for GraphQL subscriptions (graphql-transport-ws).
+        "websockets>=12.0",
         # `cryptography` covers both Ed25519 and secp256k1 for us. We used to
         # pull `coincurve` (libsecp256k1 wrapper) for secp256k1, but it has
         # spotty prebuilt-wheel coverage on newer Pythons (e.g. 3.14 on

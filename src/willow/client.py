@@ -894,6 +894,12 @@ class WillowClient:
         # routing layer stays uniform.
         self.indexers = WillowIndexers(self._http, self.api_url, self.indexer_url)
 
+        # GraphQL subscriptions over WebSocket. Shares the indexer
+        # discovery client so `source=SubscribeSource.INDEXER` works
+        # without any extra setup.
+        from .subscriptions import WillowSubscriptions as _WillowSubscriptions
+        self.subscriptions = _WillowSubscriptions(self.api_url, self.indexers)
+
     @classmethod
     def builder(cls, api_url: str = "http://localhost:3031") -> WillowClientBuilder:
         """Create a builder for configuring the client.
