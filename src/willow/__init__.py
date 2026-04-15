@@ -40,6 +40,14 @@ from .client import (
     ValidatorOperations,
     IndexingOperations,
 )
+from .indexers import (
+    WillowIndexers,
+    QuerySource,
+    RoutedQueryResult,
+    ServedBy,
+    ValidatorHasNoDataError,
+    NoIndexersReachableError,
+)
 from .auth import (
     generate_did,
     sign_challenge,

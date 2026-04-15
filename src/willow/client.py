@@ -43,6 +43,14 @@ from .errors import (
     ProofVerificationError,
     parse_api_error,
 )
+from .indexers import (
+    WillowIndexers,
+    QuerySource,
+    RoutedQueryResult,
+    ServedBy,
+    ValidatorHasNoDataError,
+    NoIndexersReachableError,
+)
 from .utils import require_auth
 from .proof import ProofVerifier, ProofVerificationOptions, configure_proof_verification
 from .computed_fields import (
@@ -626,83 +634,75 @@ class IndexingOperations:
         self,
         subgrove_id: str,
         query: str,
-        variables: Optional[Dict[str, Any]] = None
-    ) -> GraphQLResponse:
-        """Execute a GraphQL query against a subgrove.
+        variables: Optional[Dict[str, Any]] = None,
+        source: QuerySource = QuerySource.AUTO,
+    ) -> RoutedQueryResult[GraphQLResponse]:
+        """Execute a GraphQL query against a subgrove with source routing.
 
-        When ``indexer_url`` is configured on the client, the query is routed
-        to the indexer node. Otherwise it falls back to the validator API.
+        The ``source`` argument makes the trust model part of the API:
+
+        - :attr:`QuerySource.VALIDATOR` — consensus-verified chain-tip.
+          Raises :class:`ValidatorHasNoDataError` for ``VerifyOnly`` subgroves.
+        - :attr:`QuerySource.INDEXER` — historical/analytics via an indexer.
+          Raises :class:`NoIndexersReachableError` if none serves the subgrove.
+        - :attr:`QuerySource.AUTO` (default) — indexer if one serves this
+          subgrove, otherwise validator. On indexer failure falls back with
+          ``fallback=True``.
 
         Args:
             subgrove_id: Subgrove identifier
             query: GraphQL query string
             variables: Optional query variables
+            source: Routing preference (default: ``AUTO``)
 
         Returns:
-            GraphQL response with data and optional proof
+            :class:`RoutedQueryResult` wrapping the :class:`GraphQLResponse`
+            along with which backend served it.
         """
-        request_data = {"query": query}
+        request_data: Dict[str, Any] = {"query": query}
         if variables:
             request_data["variables"] = variables
 
-        if self.client.indexer_url:
-            url = f"{self.client.indexer_url}/graphql/{subgrove_id}"
-            headers = {}
-            if self.client.is_authenticated():
-                headers = sign_request(
-                    self.client._did, self.client._private_key,
-                    self.client._public_key_id, "POST", f"/graphql/{subgrove_id}"
-                )
-            response = await self.client._http.post(url, json=request_data, headers=headers)
-            return GraphQLResponse(**response.json())
-
-        response = await self.client._request(
-            "POST",
-            f"/indexing/subgroves/{subgrove_id}/graphql",
-            json=request_data
+        raw = await self.client._route_query(
+            "graphql", subgrove_id, request_data, source
         )
-        return GraphQLResponse(**response["data"])
+        return RoutedQueryResult(
+            result=GraphQLResponse(**raw.result),
+            source=raw.source,
+            indexer_did=raw.indexer_did,
+            fallback=raw.fallback,
+        )
 
     async def sql_query(
         self,
         subgrove_id: str,
         query: str,
         include_proof: bool = True,
-    ) -> SqlResponse:
-        """Execute a SQL query against a subgrove.
+        source: QuerySource = QuerySource.AUTO,
+    ) -> RoutedQueryResult[SqlResponse]:
+        """Execute a SQL query against a subgrove with source routing.
 
-        When ``indexer_url`` is configured on the client, the query is routed
-        to the indexer node. Otherwise it falls back to the validator API.
+        See :meth:`graphql_query` for ``source`` semantics.
 
         Args:
             subgrove_id: The subgrove to query
             query: SQL SELECT query string
             include_proof: Whether to include Merkle proof
+            source: Routing preference (default: ``AUTO``)
 
         Returns:
-            SqlResponse with columns, rows, and optional proof
+            :class:`RoutedQueryResult` wrapping the :class:`SqlResponse`.
         """
         request = SqlRequest(query=query, include_proof=include_proof)
+        body = request.model_dump(exclude_none=True)
 
-        if self.client.indexer_url:
-            url = f"{self.client.indexer_url}/sql/{subgrove_id}"
-            headers = {}
-            if self.client.is_authenticated():
-                headers = sign_request(
-                    self.client._did, self.client._private_key,
-                    self.client._public_key_id, "POST", f"/sql/{subgrove_id}"
-                )
-            response = await self.client._http.post(
-                url, json=request.model_dump(exclude_none=True), headers=headers
-            )
-            return SqlResponse(**response.json())
-
-        response = await self.client._request(
-            "POST",
-            f"/sql/{subgrove_id}",
-            json=request.model_dump(exclude_none=True),
+        raw = await self.client._route_query("sql", subgrove_id, body, source)
+        return RoutedQueryResult(
+            result=SqlResponse(**raw.result),
+            source=raw.source,
+            indexer_did=raw.indexer_did,
+            fallback=raw.fallback,
         )
-        return SqlResponse(**response)
 
     async def list_subgroves(self) -> List[SubgroveInfo]:
         """List all subgroves.
@@ -889,6 +889,11 @@ class WillowClient:
         # HTTP client
         self._http = httpx.AsyncClient(timeout=timeout)
 
+        # Indexer discovery client. When ``indexer_url`` is set, discovery
+        # is bypassed and a synthetic single-entry list is returned so the
+        # routing layer stays uniform.
+        self.indexers = WillowIndexers(self._http, self.api_url, self.indexer_url)
+
     @classmethod
     def builder(cls, api_url: str = "http://localhost:3031") -> WillowClientBuilder:
         """Create a builder for configuring the client.
@@ -921,6 +926,110 @@ class WillowClient:
         """
         response = await self._request("GET", "/health")
         return HealthStatus(**response.get("data", response))
+
+    async def _route_query(
+        self,
+        path_prefix: str,
+        subgrove_id: str,
+        body: Dict[str, Any],
+        source: QuerySource,
+    ) -> RoutedQueryResult[Dict[str, Any]]:
+        """Shared source-routing helper for ``/graphql/:sg`` and ``/sql/:sg``.
+
+        Returns a :class:`RoutedQueryResult` wrapping the raw JSON body. The
+        caller parses that body into the appropriate pydantic model — this
+        keeps the routing logic generic.
+        """
+        path = f"/{path_prefix}/{subgrove_id}"
+
+        async def _call_validator() -> Dict[str, Any]:
+            headers: Dict[str, str] = {}
+            if self.is_authenticated():
+                headers = sign_request(
+                    self._did, self._private_key, self._public_key_id,
+                    "POST", path,
+                )
+            url = f"{self.api_url}{path}"
+            resp = await self._http.post(url, json=body, headers=headers)
+            if resp.status_code == 404 or resp.status_code == 403:
+                reason = "not available"
+                try:
+                    reason = resp.json().get("error") or reason
+                except Exception:
+                    pass
+                raise ValidatorHasNoDataError(subgrove_id, reason)
+            resp.raise_for_status()
+            data = resp.json()
+            # Validator wraps in ApiResponse({success, data}); indexer returns raw.
+            if isinstance(data, dict) and "data" in data and "success" in data:
+                return data.get("data") or {}
+            return data
+
+        async def _call_indexer(info: IndexerInfo) -> Dict[str, Any]:
+            headers: Dict[str, str] = {}
+            if self.is_authenticated():
+                headers = sign_request(
+                    self._did, self._private_key, self._public_key_id,
+                    "POST", path,
+                )
+            endpoint = info.effective_query_endpoint().rstrip("/")
+            url = f"{endpoint}{path}"
+            resp = await self._http.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data and "success" in data:
+                return data.get("data") or {}
+            return data
+
+        if source == QuerySource.VALIDATOR:
+            result = await _call_validator()
+            return RoutedQueryResult(result=result, source=ServedBy.VALIDATOR)
+
+        if source == QuerySource.INDEXER:
+            candidates = await self.indexers.for_subgrove(subgrove_id)
+            if not candidates:
+                raise NoIndexersReachableError(
+                    subgrove_id, "no indexer serves this subgrove"
+                )
+            errors: List[str] = []
+            for info in candidates:
+                try:
+                    result = await _call_indexer(info)
+                    return RoutedQueryResult(
+                        result=result,
+                        source=ServedBy.INDEXER,
+                        indexer_did=info.indexer_did,
+                    )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code >= 500:
+                        self.indexers.evict(info.indexer_did)
+                    errors.append(f"{info.indexer_did}: HTTP {e.response.status_code}")
+                except Exception as e:  # pragma: no cover - transport errors
+                    errors.append(f"{info.indexer_did}: {e}")
+            raise NoIndexersReachableError(subgrove_id, "; ".join(errors))
+
+        # QuerySource.AUTO
+        candidates = await self.indexers.for_subgrove(subgrove_id)
+        had_candidates = bool(candidates)
+        for info in candidates:
+            try:
+                result = await _call_indexer(info)
+                return RoutedQueryResult(
+                    result=result,
+                    source=ServedBy.INDEXER,
+                    indexer_did=info.indexer_did,
+                )
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500:
+                    self.indexers.evict(info.indexer_did)
+            except Exception:  # pragma: no cover
+                pass
+        result = await _call_validator()
+        return RoutedQueryResult(
+            result=result,
+            source=ServedBy.VALIDATOR,
+            fallback=had_candidates,
+        )
 
     async def register_did(self, did_document: DidDocument) -> DidDocument:
         """Register a DID document.

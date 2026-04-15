@@ -602,12 +602,25 @@ class IndexerInfo(BaseModel):
     indexer_did: str = Field(alias="indexer_did")
     subgroves: List[str] = Field(default_factory=list)
     stake_amount: int = Field(alias="stake_amount")
+    #: Monitoring / health endpoint (historically also used for queries).
     endpoint: str
+    #: Optional dedicated endpoint for client query traffic (GraphQL/SQL).
+    #: When ``None``, callers should fall back to ``endpoint``. See
+    #: :meth:`effective_query_endpoint`.
+    query_endpoint: Optional[str] = Field(default=None, alias="query_endpoint")
     status: IndexerStatus
     performance_score: float = Field(alias="performance_score")
     last_update: int = Field(alias="last_update")
 
     model_config = {"populate_by_name": True}
+
+    def effective_query_endpoint(self) -> str:
+        """URL clients should POST GraphQL/SQL queries to.
+
+        Prefers :attr:`query_endpoint` when set; falls back to
+        :attr:`endpoint` otherwise.
+        """
+        return self.query_endpoint or self.endpoint
 
 
 # ============================================================================
