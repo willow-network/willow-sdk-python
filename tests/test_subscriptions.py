@@ -247,3 +247,201 @@ async def test_indexer_source_errors_when_no_indexer_serves_subgrove():
             )
     finally:
         await http.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Reconnect tests
+#
+# These exercise the auto-reconnect loop by scripting the server's
+# per-connection behavior via a counter. The fixture below spins up a
+# single `websockets.serve()` instance whose handler consults a
+# user-provided callback with the current connection index, so tests can
+# say things like "drop connection #1 after one payload; on connection
+# #2 send two payloads then complete".
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def scripted_ws_server(script):
+    """Start a graphql-transport-ws server that dispatches per connection.
+
+    ``script`` is a coroutine ``(ws, sub_id, conn_index) -> None`` called
+    after the handshake completes. ``conn_index`` starts at 0 and
+    increments per accepted connection.
+    """
+    counter = {"n": 0}
+
+    async def handler(ws):
+        idx = counter["n"]
+        counter["n"] += 1
+        try:
+            init_text = await ws.recv()
+            assert json.loads(init_text)["type"] == "connection_init"
+            await ws.send(json.dumps({"type": "connection_ack"}))
+
+            sub_text = await ws.recv()
+            sub = json.loads(sub_text)
+            assert sub["type"] == "subscribe"
+            sub_id = sub["id"]
+
+            await script(ws, sub_id, idx)
+        except websockets.ConnectionClosed:
+            return
+
+    server = await websockets.serve(
+        handler, "127.0.0.1", 0, subprotocols=["graphql-transport-ws"]
+    )
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield port, counter
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_reconnects_on_unexpected_disconnect():
+    """Socket drops after first payload; client reconnects and gets
+    second payload transparently."""
+
+    async def script(ws, sub_id, idx):
+        if idx == 0:
+            await ws.send(
+                json.dumps(
+                    {"type": "next", "id": sub_id, "payload": {"data": {"tick": 0}}}
+                )
+            )
+            # Give the client a moment to receive, then drop the socket
+            # with no `complete` — simulates an unexpected disconnect.
+            await asyncio.sleep(0.05)
+            await ws.close(code=1011)
+        else:
+            await ws.send(
+                json.dumps(
+                    {"type": "next", "id": sub_id, "payload": {"data": {"tick": 1}}}
+                )
+            )
+            await ws.send(json.dumps({"type": "complete", "id": sub_id}))
+            await asyncio.sleep(0.05)
+
+    async with scripted_ws_server(script) as (port, _counter):
+        subs = _subs_for(f"http://127.0.0.1:{port}")
+        sub = await subs.subscribe(
+            "my-subgrove",
+            "subscription { tick }",
+            SubscribeOptions(reconnect_backoff=0.01, max_reconnect_backoff=0.05),
+        )
+
+        received = []
+        async for payload in sub:
+            received.append(payload)
+
+        assert [p.data for p in received] == [{"tick": 0}, {"tick": 1}]
+        await sub.unsubscribe()
+
+
+@pytest.mark.asyncio
+async def test_does_not_reconnect_when_reconnect_is_false():
+    """A single unexpected disconnect terminates the subscription when
+    the caller opted out of auto-reconnect."""
+
+    async def script(ws, sub_id, idx):
+        # Always drop after one payload, regardless of connection index.
+        await ws.send(
+            json.dumps(
+                {"type": "next", "id": sub_id, "payload": {"data": {"tick": idx}}}
+            )
+        )
+        await asyncio.sleep(0.02)
+        await ws.close(code=1011)
+
+    async with scripted_ws_server(script) as (port, counter):
+        subs = _subs_for(f"http://127.0.0.1:{port}")
+        sub = await subs.subscribe(
+            "my-subgrove",
+            "subscription { tick }",
+            SubscribeOptions(reconnect=False),
+        )
+
+        received = []
+        async for payload in sub:
+            received.append(payload)
+
+        assert [p.data for p in received] == [{"tick": 0}]
+        # Only one connection should have been accepted.
+        assert counter["n"] == 1
+        await sub.unsubscribe()
+
+
+@pytest.mark.asyncio
+async def test_gives_up_after_max_reconnect_attempts():
+    """Server accepts-then-drops without ever delivering data; client
+    hits the attempt cap and exits instead of looping forever.
+
+    This is the test that justifies resetting ``attempts`` only on a
+    delivered payload (not on bare handshake success) — otherwise the
+    accept-then-drop cycle would reset the counter every round trip.
+    """
+
+    async def script(ws, sub_id, idx):
+        # Never send a payload — just drop.
+        await asyncio.sleep(0.02)
+        await ws.close(code=1011)
+
+    async with scripted_ws_server(script) as (port, counter):
+        subs = _subs_for(f"http://127.0.0.1:{port}")
+        sub = await subs.subscribe(
+            "my-subgrove",
+            "subscription { tick }",
+            SubscribeOptions(
+                max_reconnect_attempts=2,
+                reconnect_backoff=0.01,
+                max_reconnect_backoff=0.05,
+            ),
+        )
+
+        received = []
+        async for payload in sub:
+            received.append(payload)
+
+        assert received == []
+        # Initial connection + 2 reconnects = 3 total.
+        assert counter["n"] == 3
+        await sub.unsubscribe()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_during_backoff_cancels_reconnect():
+    """Unsubscribing while the loop is sleeping in its backoff wakes it
+    promptly and exits — no further connection attempts should happen."""
+
+    first_drop = asyncio.Event()
+
+    async def script(ws, sub_id, idx):
+        if idx == 0:
+            await asyncio.sleep(0.02)
+            first_drop.set()
+            await ws.close(code=1011)
+        else:
+            # We never want the test to reach here.
+            await asyncio.sleep(10)
+
+    async with scripted_ws_server(script) as (port, counter):
+        subs = _subs_for(f"http://127.0.0.1:{port}")
+        sub = await subs.subscribe(
+            "my-subgrove",
+            "subscription { tick }",
+            SubscribeOptions(
+                reconnect_backoff=1.0,
+                max_reconnect_backoff=1.0,
+            ),
+        )
+
+        # Wait for the server-side drop, then unsubscribe while the SDK
+        # is mid-backoff (1 second is plenty of wiggle room).
+        await first_drop.wait()
+        await asyncio.sleep(0.01)
+        await sub.unsubscribe()
+
+        # No second connection should have been accepted.
+        assert counter["n"] == 1
