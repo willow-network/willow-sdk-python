@@ -7,7 +7,6 @@ Provides direct transaction broadcasting to CometBFT consensus layer.
 import asyncio
 import aiohttp
 import json
-import base64
 import time
 from typing import Optional, Dict, Any, Tuple
 import logging
@@ -407,14 +406,47 @@ class ConsensusClient:
         return await self._broadcast_transaction(tx_wrapper)
     
     async def _broadcast_transaction(self, transaction: Dict[str, Any]) -> BroadcastResult:
-        """Broadcast a transaction to CometBFT."""
-        # Serialize and encode transaction
-        tx_json = json.dumps(transaction, separators=(',', ':'), sort_keys=True)
-        tx_base64 = base64.b64encode(tx_json.encode('utf-8')).decode('ascii')
-        
-        # Broadcast via JSON-RPC
-        response = await self._rpc_request("broadcast_tx_sync", {"tx": tx_base64})
-        return BroadcastResult.from_response({"result": response})
+        """Submit a transaction via the API server's /tx/submit endpoint.
+
+        The chain's on-the-wire format is bincode (see
+        docs/todo/proposal-bincode-wire.md). The API server accepts JSON,
+        bincode-encodes it, and forwards to CometBFT's broadcast_tx_sync —
+        so SDKs can keep sending JSON without a per-language bincode
+        encoder.
+        """
+        if not self.config.api_url:
+            raise ConsensusError(
+                "api_url is required for transaction submission. Set it in the SDK config."
+            )
+
+        url = f"{self.config.api_url.rstrip('/')}/tx/submit"
+        last_error: Optional[str] = None
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                async with self._session.post(url, json=transaction) as response:
+                    body = await response.json()
+                    if not response.status == 200 or not body.get('success') or 'data' not in body:
+                        msg = body.get('error') or f"HTTP {response.status}"
+                        return BroadcastResult(success=False, error_message=msg, raw_log=msg)
+
+                    data = body['data']
+                    code = data.get('code', 0)
+                    return BroadcastResult(
+                        success=code == 0,
+                        tx_hash=data.get('tx_hash'),
+                        error_code=code if code != 0 else None,
+                        error_message=data.get('log') if code != 0 else None,
+                        raw_log=data.get('log'),
+                    )
+            except Exception as e:
+                last_error = str(e)
+                if attempt == self.config.max_retries:
+                    raise ConsensusError(
+                        f"tx submit failed after {self.config.max_retries + 1} attempts: {e}"
+                    )
+                logger.warning(f"tx submit attempt {attempt + 1} failed: {e}")
+
+        raise ConsensusError(f"tx submit exhausted retries: {last_error}")
     
     async def _rpc_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Make a JSON-RPC request to CometBFT."""
