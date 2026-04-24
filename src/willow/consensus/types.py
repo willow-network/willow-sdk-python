@@ -167,7 +167,7 @@ class TransferTx:
         return {
             "from_did": self.from_did,
             "to_did": self.to_did,
-            "amount": str(self.amount),  # Convert to string for large numbers
+            "amount": self.amount,  # u128 on the wire — serde expects a JSON number
             "memo": self.memo,
             "signature": self.signature,
             "public_key_id": self.public_key_id,
@@ -284,9 +284,30 @@ Transaction = Union[
 ]
 
 
+def _hex_signature_to_bytes(hex_sig: str) -> List[int]:
+    """Convert a hex-encoded signature to the list-of-ints wire format.
+
+    The consensus `Transaction` enum stores `signature: Vec<u8>`; serde_json
+    serializes that as a JSON number array, which is what the API server's
+    `/tx/submit` expects. SDK call sites still hand us hex for ergonomics;
+    convert at the boundary.
+    """
+    s = hex_sig[2:] if hex_sig.startswith("0x") else hex_sig
+    if not s:
+        return []
+    return [int(s[i:i + 2], 16) for i in range(0, len(s), 2)]
+
+
 def create_transaction_wrapper(tx_type: str, transaction: Transaction) -> Dict[str, Any]:
-    """Create transaction wrapper for consensus submission."""
-    return {tx_type: transaction.to_dict()}
+    """Create transaction wrapper for consensus submission.
+
+    Converts the internal hex-string `signature` to the `Vec<u8>` wire
+    shape the validator expects (a JSON number array).
+    """
+    body = transaction.to_dict()
+    if isinstance(body.get("signature"), str):
+        body["signature"] = _hex_signature_to_bytes(body["signature"])
+    return {tx_type: body}
 
 
 def create_sign_message(tx_type: str, transaction: Transaction) -> str:
