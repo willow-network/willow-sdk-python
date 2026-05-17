@@ -236,6 +236,23 @@ from .files import (
     decrypt_file,
 )
 
+# Canonical WillowManifest builder + SupportedChain helpers
+from .manifest import (
+    SUPPORTED_CHAINS,
+    MANIFEST_SPEC_VERSION,
+    WillowManifest,
+    EvmDataSource,
+    DataSource,
+    ManifestValidationError,
+    chain_family,
+    evm_chain_id,
+    from_evm_chain_id,
+    is_supported_chain,
+    serialize_manifest,
+    parse_manifest,
+    validate_manifest,
+)
+
 __version__ = "0.2.0"
 
 # Pre-funded test account for local devnet development.
