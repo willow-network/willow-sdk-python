@@ -28,6 +28,8 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "httpx>=0.24.0",
+        # Used by the light-client, consensus, and ERC-8004 modules.
+        "aiohttp>=3.9.0",
         "pydantic>=2.0.0",
         # WebSocket client for GraphQL subscriptions (graphql-transport-ws).
         "websockets>=12.0",
