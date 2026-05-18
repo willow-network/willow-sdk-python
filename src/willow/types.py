@@ -186,7 +186,9 @@ class RegisterDatasetRequest(BaseModel):
     dataset_id: str = Field(alias="dataset_id")
     name: str
     dataset_path: List[str] = Field(default_factory=list, alias="dataset_path")
-    schema: Optional[SchemaDefinition] = None
+    # Trailing underscore avoids shadowing BaseModel.schema(); wire format
+    # is unchanged via the alias.
+    schema_: Optional[SchemaDefinition] = Field(default=None, alias="schema")
     owner_did: str = Field(alias="owner_did")
     writers: List[str] = Field(default_factory=list)
     readers: List[str] = Field(default_factory=list)
@@ -206,7 +208,7 @@ class SubgroveRegistration(BaseModel):
     subgrove_id: str = Field(alias="subgrove_id")
     name: str
     subgrove_path: List[str] = Field(default_factory=list, alias="subgrove_path")
-    schema: Optional[SchemaDefinition] = None
+    schema_: Optional[SchemaDefinition] = Field(default=None, alias="schema")
     owner_did: str = Field(alias="owner_did")
     writers: List[str] = Field(default_factory=list)
     readers: List[str] = Field(default_factory=list)
