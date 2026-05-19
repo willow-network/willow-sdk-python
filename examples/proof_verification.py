@@ -1,13 +1,15 @@
 """
 Willow Python SDK - Proof Verification Example
 
-This example demonstrates the trustless proof verification capabilities:
-1. Automatic verification (default behavior)
-2. Manual verification with expected root hash
-3. Quick root hash extraction
-4. Unverified operations for performance
+Demonstrates trustless proof verification:
+1. Automatic verification (default behaviour)
+2. Manual verification with a GroveDBProofVerifier instance
+3. Verify against a pinned expected root hash
+4. Quick root-hash extraction
+5. Unverified operations (performance mode)
+6. Low-level grovedb module access
 
-All verification is done locally using pure Python - no server trust required.
+All verification is done locally - no server trust required.
 
 Prerequisites:
 - pip install willow-sdk
@@ -26,112 +28,96 @@ from willow import (
 )
 
 
+SUBGROVE = "items"
+
+
 async def main():
     print("Willow Proof Verification Demo")
     print("=" * 50)
 
-    # Example 1: Automatic verification (default)
+    # 1. Automatic verification (default on query/get)
     print("\n1. Automatic Proof Verification")
     print("-" * 40)
-
     async with WillowClient("http://localhost:3031") as client:
-        # All data operations verify proofs by default
         try:
             result = await client.data.query(
-
-                collection="items",
-                query={"filters": {"status": "active"}}
+                SUBGROVE,
+                {"filters": {"status": "active"}},
             )
             print(f"Query returned {len(result.documents)} results")
-            print("All results are cryptographically verified!")
+            print("All results are cryptographically verified.")
         except ProofVerificationError as e:
             print(f"Verification failed: {e}")
         except Exception as e:
             print(f"Query error: {e}")
 
-    # Example 2: Manual verification with GroveDBProofVerifier
+    # 2. Manual verification
     print("\n2. Manual Proof Verification")
     print("-" * 40)
-
-    # Create a verifier with specific options
     verifier = GroveDBProofVerifier(
         ProofVerificationOptions(
             deserialize_elements=True,
-            limit=100
+            limit=100,
         )
     )
-
-    # Verify a proof (hex-encoded)
-    sample_proof = "00" + "ff" * 32  # Invalid proof for demo
+    sample_proof = "00" + "ff" * 32  # Intentionally invalid for demo.
     result = await verifier.verify_query_proof(
         proof_hex=sample_proof,
-        documents=[{"key": "test", "value": {"data": "example"}}]
+        documents=[{"key": "test", "value": {"data": "example"}}],
     )
     print(f"Valid: {result.valid}")
     print(f"Error: {result.error}")
 
-    # Example 3: Verify against expected root hash
+    # 3. Pin a verifier to an expected root hash
     print("\n3. Verify Against Expected Root Hash")
     print("-" * 40)
-
-    expected_root = "a" * 64  # 32-byte hash as hex
-    verifier_with_root = GroveDBProofVerifier(
+    expected_root = "a" * 64
+    pinned_verifier = GroveDBProofVerifier(
         ProofVerificationOptions(expected_root_hash=expected_root)
     )
-
-    result = await verifier_with_root.verify_query_proof(
+    result = await pinned_verifier.verify_query_proof(
         proof_hex=sample_proof,
-        documents=[]
+        documents=[],
     )
     print(f"Matches expected root: {result.valid}")
 
-    # Example 4: Quick root hash extraction
+    # 4. Quick root-hash extraction
     print("\n4. Quick Root Hash Extraction")
     print("-" * 40)
-
     try:
-        # This parses the proof and computes the root hash
         root_hash = verify_proof_quick(sample_proof)
         print(f"Extracted root hash: {root_hash[:16]}...")
     except ProofVerificationError as e:
         print(f"Could not extract root hash: {e}")
 
-    # Example 5: Verify proof matches root
-    print("\n5. Verify Proof Matches Root")
+    # 5. Proof-vs-expected-root one-shot
+    print("\n5. Verify Proof Matches Expected Root")
     print("-" * 40)
-
     try:
         matches = verify_proof_with_expected_root(sample_proof, expected_root)
-        print(f"Proof matches root: {matches}")
+        print(f"Proof matches expected root: {matches}")
     except ProofVerificationError as e:
         print(f"Verification failed: {e}")
 
-    # Example 6: Unverified operations (performance mode)
+    # 6. Unverified operations (performance mode)
     print("\n6. Unverified Operations (Performance Mode)")
     print("-" * 40)
-
     async with WillowClient("http://localhost:3031") as client:
         try:
-            # Skip verification for maximum performance
             result = await client.data.query_unverified(
-
-                collection="items",
-                query={"filters": {"status": "active"}}
+                SUBGROVE,
+                {"filters": {"status": "active"}},
             )
             print(f"Unverified query returned {len(result.documents)} results")
-            print("WARNING: Results not cryptographically verified!")
+            print("WARNING: results not cryptographically verified.")
         except Exception as e:
             print(f"Query error: {e}")
 
-    # Example 7: Low-level grovedb module access
+    # 7. Low-level grovedb module access
     print("\n7. Low-Level GroveDB Access")
     print("-" * 40)
-
-    # Direct access to GroveDB functions
     print(f"Hash length: {grovedb.HASH_LENGTH} bytes")
     print(f"Null hash: {grovedb.hash_to_hex(grovedb.NULL_HASH)[:16]}...")
-
-    # BLAKE3 hashing
     test_data = b"Hello, Willow!"
     hash_result = grovedb.blake3_hash(test_data)
     print(f"BLAKE3 hash: {grovedb.hash_to_hex(hash_result)[:16]}...")
@@ -139,7 +125,7 @@ async def main():
     print("\n" + "=" * 50)
     print("Key Takeaways:")
     print("- All verification is done locally (trustless)")
-    print("- Proofs use GroveDB Merkle tree structure")
+    print("- Proofs use the GroveDB Merkle tree structure")
     print("- Root hash can be compared against consensus")
     print("- Use unverified operations only when trust is acceptable")
 

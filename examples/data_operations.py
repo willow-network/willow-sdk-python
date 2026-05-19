@@ -1,20 +1,21 @@
 """
 Willow Python SDK - Data Operations Example
 
-This example demonstrates comprehensive data operations:
+Comprehensive data operations:
 1. Store single items
 2. Batch store multiple items
-3. Get single item
-4. Query with filters
-5. Update items
-6. Delete items
+3. Get single item (with proof verification)
+4. Get unverified (performance mode)
+5. Query with filters / range / sort
+6. Update items
+7. Delete items
 
 All operations include automatic proof verification by default.
 
 Prerequisites:
 - pip install willow-sdk
 - Run a local Willow node
-- Register and fund a subgrove
+- Register the subgrove first (see app_registration.py)
 """
 
 import asyncio
@@ -25,40 +26,38 @@ from willow import (
 )
 
 
+SUBGROVE = "products"
+
+
 async def main():
     print("Willow Data Operations Demo")
     print("=" * 50)
 
-    # Setup
     did_info = generate_did()
 
     async with WillowClient("http://localhost:3031") as client:
-        # Authenticate
+        # Auth
         await client.register_did(did_info["did_document"])
-        await client.authenticate(
-            did=did_info["did"],
-            private_key_hex=did_info["private_key"],
-            public_key_id=did_info["public_key_id"]
+        client.set_identity(
+            did_info["did"],
+            did_info["private_key"],
+            did_info["public_key_id"],
         )
-
-
-        collection = "products"
 
         # 1. Store single item
         print("\n1. Store Single Item")
         print("-" * 40)
-
         try:
-            await client.data.store(
-
-                collection=collection,
-                data={
+            await client.data.store_item(
+                SUBGROVE,
+                "prod-001",
+                {
                     "id": "prod-001",
                     "name": "Laptop Pro",
                     "category": "electronics",
                     "price": 1299.99,
-                    "stock": 50
-                }
+                    "stock": 50,
+                },
             )
             print("Stored product: prod-001")
         except WillowError as e:
@@ -67,7 +66,6 @@ async def main():
         # 2. Batch store multiple items
         print("\n2. Batch Store Multiple Items")
         print("-" * 40)
-
         products = [
             {
                 "key": "prod-002",
@@ -76,8 +74,8 @@ async def main():
                     "name": "Wireless Mouse",
                     "category": "electronics",
                     "price": 49.99,
-                    "stock": 200
-                }
+                    "stock": 200,
+                },
             },
             {
                 "key": "prod-003",
@@ -86,8 +84,8 @@ async def main():
                     "name": "USB-C Cable",
                     "category": "accessories",
                     "price": 19.99,
-                    "stock": 500
-                }
+                    "stock": 500,
+                },
             },
             {
                 "key": "prod-004",
@@ -96,13 +94,12 @@ async def main():
                     "name": "Monitor 27\"",
                     "category": "electronics",
                     "price": 399.99,
-                    "stock": 30
-                }
-            }
+                    "stock": 30,
+                },
+            },
         ]
-
         try:
-await client.data.batch_store(collection, products)
+            await client.data.batch_store(SUBGROVE, products)
             print(f"Batch stored {len(products)} products")
         except WillowError as e:
             print(f"Error: {e}")
@@ -110,20 +107,18 @@ await client.data.batch_store(collection, products)
         # 3. Get single item (with proof verification)
         print("\n3. Get Single Item")
         print("-" * 40)
-
         try:
-item = await client.data.get(collection, "prod-001")
+            item = await client.data.get(SUBGROVE, "prod-001")
             print(f"Retrieved: {item}")
             print("Proof verified automatically")
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 4. Get unverified (faster, no proof check)
+        # 4. Get unverified (performance mode)
         print("\n4. Get Unverified (Performance Mode)")
         print("-" * 40)
-
         try:
-item = await client.data.get_unverified(collection, "prod-001")
+            item = await client.data.get_unverified(SUBGROVE, "prod-001")
             print(f"Retrieved (unverified): {item}")
         except WillowError as e:
             print(f"Error: {e}")
@@ -131,17 +126,10 @@ item = await client.data.get_unverified(collection, "prod-001")
         # 5. Query with filters
         print("\n5. Query with Filters")
         print("-" * 40)
-
         try:
-            # Filter by category
             result = await client.data.query(
-
-                collection=collection,
-                query={
-                    "filters": {
-                        "category": "electronics"
-                    }
-                }
+                SUBGROVE,
+                {"filters": {"category": "electronics"}},
             )
             print(f"Electronics products: {len(result.documents)}")
             for doc in result.documents:
@@ -152,19 +140,10 @@ item = await client.data.get_unverified(collection, "prod-001")
         # 6. Query with range filter
         print("\n6. Query with Range Filter")
         print("-" * 40)
-
         try:
             result = await client.data.query(
-
-                collection=collection,
-                query={
-                    "filters": {
-                        "price": {
-                            "$gte": 50,
-                            "$lte": 500
-                        }
-                    }
-                }
+                SUBGROVE,
+                {"filters": {"price": {"$gte": 50, "$lte": 500}}},
             )
             print(f"Products $50-$500: {len(result.documents)}")
             for doc in result.documents:
@@ -175,19 +154,14 @@ item = await client.data.get_unverified(collection, "prod-001")
         # 7. Query with sorting and pagination
         print("\n7. Query with Sorting and Pagination")
         print("-" * 40)
-
         try:
             result = await client.data.query(
-
-                collection=collection,
-                query={
-                    "sort": {
-                        "field": "price",
-                        "order": "desc"
-                    },
+                SUBGROVE,
+                {
+                    "sort": {"field": "price", "order": "desc"},
                     "limit": 2,
-                    "offset": 0
-                }
+                    "offset": 0,
+                },
             )
             print("Top 2 by price (descending):")
             for doc in result.documents:
@@ -198,20 +172,18 @@ item = await client.data.get_unverified(collection, "prod-001")
         # 8. Update item
         print("\n8. Update Item")
         print("-" * 40)
-
         try:
             await client.data.update(
-
-                collection=collection,
-                key="prod-001",
-                data={
+                SUBGROVE,
+                "prod-001",
+                {
                     "id": "prod-001",
                     "name": "Laptop Pro",
                     "category": "electronics",
-                    "price": 1199.99,  # Price reduced!
+                    "price": 1199.99,
                     "stock": 45,
-                    "on_sale": True
-                }
+                    "on_sale": True,
+                },
             )
             print("Updated prod-001 (price reduced, on_sale flag added)")
         except WillowError as e:
@@ -220,9 +192,8 @@ item = await client.data.get_unverified(collection, "prod-001")
         # 9. Delete item
         print("\n9. Delete Item")
         print("-" * 40)
-
         try:
-await client.data.delete(collection, "prod-004")
+            await client.data.delete(SUBGROVE, "prod-004")
             print("Deleted prod-004")
         except WillowError as e:
             print(f"Error: {e}")

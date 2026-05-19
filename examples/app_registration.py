@@ -1,11 +1,12 @@
 """
 Willow Python SDK - Subgrove Registration Example
 
-This example demonstrates how to:
-1. Register a subgrove
-2. Define schemas with indexes
-3. Create subgroves for data organization
-4. Manage permissions
+Demonstrates:
+1. Define a schema with multiple index types
+2. Register a subgrove
+3. List subgroves
+4. Get a subgrove
+5. Check DID permissions
 
 Prerequisites:
 - pip install willow-sdk
@@ -18,7 +19,6 @@ from willow import (
     WillowClient,
     generate_did,
     WillowError,
-
     RegisterSubgroveRequest,
     SchemaDefinition,
     FieldType,
@@ -33,27 +33,17 @@ async def main():
     did_info = generate_did()
 
     async with WillowClient("http://localhost:3031") as client:
-        # Authenticate
+        # Auth
         await client.register_did(did_info["did_document"])
-        await client.authenticate(
-            did=did_info["did"],
-            private_key_hex=did_info["private_key"],
-            public_key_id=did_info["public_key_id"]
+        client.set_identity(
+            did_info["did"],
+            did_info["private_key"],
+            did_info["public_key_id"],
         )
 
-        # 1. Register a Subgrove
-        print("\n1. Register Subgrove")
+        # 1. Define a schema with indexes
+        print("\n1. Define Schema with Indexes")
         print("-" * 40)
-
-
-
-        try:
-
-        # 2. Define a Schema with Indexes
-        print("\n2. Define Schema with Indexes")
-        print("-" * 40)
-
-        # Product catalog schema with various index types
         product_schema = SchemaDefinition(
             version=1,
             fields={
@@ -67,44 +57,23 @@ async def main():
                 "specifications": FieldType(type="object"),
             },
             indexes=[
-                # Unique constraint
-                IndexDefinition(
-                    name="unique_sku",
-                    fields=["sku"],
-                    unique=True,
-                    type="unique"
-                ),
-                # Hash index for category lookups
-                IndexDefinition(
-                    name="by_category",
-                    fields=["category"],
-                    unique=False,
-                    type="hash"
-                ),
-                # Range index for price queries
-                IndexDefinition(
-                    name="by_price",
-                    fields=["price"],
-                    unique=False,
-                    type="range"
-                ),
-                # Fulltext search
+                IndexDefinition(name="unique_sku", fields=["sku"], unique=True, type="unique"),
+                IndexDefinition(name="by_category", fields=["category"], unique=False, type="hash"),
+                IndexDefinition(name="by_price", fields=["price"], unique=False, type="range"),
                 IndexDefinition(
                     name="product_search",
                     fields=["name", "description"],
                     unique=False,
-                    type="fulltext"
+                    type="fulltext",
                 ),
-                # Compound index
                 IndexDefinition(
                     name="category_price",
                     fields=["category", "price"],
                     unique=False,
-                    type="compound"
+                    type="compound",
                 ),
-            ]
+            ],
         )
-
         print("Schema defined with indexes:")
         print("  - unique_sku: Unique constraint on SKU")
         print("  - by_category: Hash index for category")
@@ -112,31 +81,27 @@ async def main():
         print("  - product_search: Fulltext on name/description")
         print("  - category_price: Compound index")
 
-        # 3. Create a Subgrove
-        print("\n3. Create Subgrove")
+        # 2. Register the subgrove
+        print("\n2. Register Subgrove")
         print("-" * 40)
-
         try:
             subgrove_request = RegisterSubgroveRequest(
-                subgrove_id="products",
-
+                dataset_id="products",
                 name="Product Catalog",
-                description="All product data",
-                schema=product_schema.model_dump(),
+                dataset_path=["collections"],
+                schema=product_schema,
                 owner_did=did_info["did"],
                 writers=[did_info["did"]],
-                readers=[],  # Empty = public read
-                reward_rate=1000,  # Indexer reward rate
+                readers=[],
             )
-            await client.registration.register_subgrove(subgrove_request)
+            await client.registration.register_subgrove(subgrove_request.model_dump(by_alias=True))
             print("Created subgrove: products")
         except WillowError as e:
             print(f"Error (may already exist): {e}")
 
-        # 4. List Subgroves
-        print("\n4. List Registered Subgroves")
+        # 3. List subgroves
+        print("\n3. List Registered Subgroves")
         print("-" * 40)
-
         try:
             subgroves = await client.registration.list_subgroves()
             print(f"Found {len(subgroves)} subgroves:")
@@ -145,54 +110,27 @@ async def main():
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 5. Get Subgrove Details
-        print("\n5. Get Subgrove Details")
+        # 4. Get a subgrove
+        print("\n4. Get Subgrove Details")
         print("-" * 40)
-
         try:
-subgrove = await client.registration.get_subgrove("products")
+            subgrove = await client.registration.get_subgrove("products")
             print(f"Subgrove: {subgrove.subgrove_id}")
             print(f"Name: {subgrove.name}")
             print(f"Owner: {subgrove.owner_did}")
+            print(f"Writers: {len(subgrove.writers)}, Readers: {len(subgrove.readers)}")
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 6. List Subgroves
-        print("\n6. List Subgroves")
+        # 5. Check DID permissions
+        print("\n5. Check Permissions")
         print("-" * 40)
-
         try:
-subgroves = await client.registration.list_subgroves()
-            print(f"Found {len(subgroves)} subgroves:")
-            for sg in subgroves:
-                print(f"  - {sg.subgrove_id}: {sg.name}")
-        except WillowError as e:
-            print(f"Error: {e}")
-
-        # 7. Get Subgrove Details
-        print("\n7. Get Subgrove Details")
-        print("-" * 40)
-
-        try:
-subgrove = await client.registration.get_subgrove("products")
-            print(f"Subgrove: {subgrove.subgrove_id}")
-            print(f"Reward Rate: {subgrove.reward_rate}")
-        except WillowError as e:
-            print(f"Error: {e}")
-
-        # 8. Check Permissions
-        print("\n8. Check Permissions")
-        print("-" * 40)
-
-        try:
-            permissions = await client.registration.get_permissions(
-
-                subgrove_id="products",
-                did=did_info["did"]
-            )
-            print(f"Can read: {permissions.can_read}")
-            print(f"Can write: {permissions.can_write}")
-            print(f"Is owner: {permissions.is_owner}")
+            permissions = await client.registration.get_permissions(did_info["did"])
+            print(f"Owned: {len(permissions.owned_subgroves)} ({permissions.owned_subgroves[:3]})")
+            print(f"Admin: {len(permissions.admin_subgroves)}")
+            print(f"Write access: {len(permissions.write_access)}")
+            print(f"Read access: {len(permissions.read_access)}")
         except WillowError as e:
             print(f"Error: {e}")
 
@@ -202,7 +140,6 @@ subgrove = await client.registration.get_subgrove("products")
     print("  Subgrove (products)")
     print("    -> Items (with schema validation)")
     print("    -> Indexes (for fast queries)")
-
 
 
 if __name__ == "__main__":

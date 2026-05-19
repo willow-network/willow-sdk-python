@@ -1,11 +1,11 @@
 """
 Willow Python SDK - Quickstart Example
 
-This example demonstrates the core workflow:
+Demonstrates the core workflow:
 1. Generate a DID (identity)
 2. Connect to a Willow node
 3. Register the DID
-4. Authenticate
+4. Set the identity for per-request signing
 5. Store and query data with automatic proof verification
 
 Prerequisites:
@@ -21,6 +21,9 @@ from willow import (
 )
 
 
+SUBGROVE = "quickstart-users"
+
+
 async def main():
     # 1. Generate a new DID (Decentralized Identifier)
     print("Generating DID...")
@@ -34,34 +37,35 @@ async def main():
         await client.register_did(did_info["did_document"])
         print("  DID registered successfully")
 
-        # 4. Authenticate with the node
-        print("\nAuthenticating...")
-        await client.authenticate(
-            did=did_info["did"],
-            private_key_hex=did_info["private_key"],
-            public_key_id=did_info["public_key_id"]
+        # 4. Set identity for per-request signing (synchronous).
+        # Each authenticated call signs with this key; there is no server session.
+        print("\nSetting identity...")
+        client.set_identity(
+            did_info["did"],
+            did_info["private_key"],
+            did_info["public_key_id"],
         )
-        print("  Authenticated successfully")
+        print("  Identity set")
 
-        # 5. Store data (automatic proof verification)
+        # 5. Store data (automatic proof verification on reads).
+        # In a real app you'd register the subgrove/dataset first; see
+        # app_registration.py.
         print("\nStoring data...")
         try:
             await client.data.store(
-
-                collection="users",
-                data={"name": "Alice", "email": "alice@example.com"}
+                SUBGROVE,
+                {"name": "Alice", "email": "alice@example.com"},
             )
             print("  Data stored successfully")
         except WillowError as e:
-            print(f"  Note: {e} (app may need registration first)")
+            print(f"  Note: {e} (subgrove may need registration first)")
 
-        # 6. Query data (automatic proof verification)
+        # 6. Query data (automatic proof verification).
         print("\nQuerying data...")
         try:
             result = await client.data.query(
-
-                collection="users",
-                query={"filters": {"name": "Alice"}}
+                SUBGROVE,
+                {"filters": {"name": "Alice"}},
             )
             print(f"  Found {len(result.documents)} documents")
             if result.proof:

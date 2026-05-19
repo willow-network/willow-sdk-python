@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""CLI for Willow SDK."""
+"""CLI for Willow SDK.
+
+The SDK has no server-side session: every authenticated request is signed
+locally with a DID + private key + public key ID via `client.set_identity`.
+`willow-cli auth login` therefore just persists those three values to
+`~/.willow/config.json`, and subsequent commands re-load them on each
+invocation.
+"""
 
 import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import click
 from .client import WillowClient
 from .auth import generate_did
 from .types import DidDocument
 
 
-# Config file for storing credentials
 CONFIG_FILE = Path.home() / ".willow" / "config.json"
 
 
 def load_config() -> dict:
-    """Load config from file."""
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             return json.load(f)
@@ -25,10 +30,19 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
-    """Save config to file."""
     CONFIG_FILE.parent.mkdir(exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
+
+
+def get_identity_or_exit() -> Tuple[str, str, str]:
+    """Return (did, private_key, public_key_id) from config, or exit."""
+    config = load_config()
+    identity = config.get("identity")
+    if not identity:
+        click.echo("Not authenticated. Run: willow-cli auth login")
+        sys.exit(1)
+    return identity["did"], identity["private_key"], identity["public_key_id"]
 
 
 @click.group()
@@ -52,21 +66,25 @@ def did():
 def generate(algorithm, save):
     """Generate a new DID with keypair."""
     did_info = generate_did(algorithm)
-    
+
     output = {
         "did": did_info["did"],
         "private_key": did_info["private_key"],
         "public_key": did_info["public_key"],
         "public_key_id": did_info["public_key_id"],
-        "algorithm": did_info["algorithm"]
+        "algorithm": did_info["algorithm"],
     }
-    
+
     if save:
         config = load_config()
-        config["current_did"] = output
+        config["identity"] = {
+            "did": output["did"],
+            "private_key": output["private_key"],
+            "public_key_id": output["public_key_id"],
+        }
         save_config(config)
-        click.echo("DID saved to config file")
-    
+        click.echo("Identity saved to config file")
+
     click.echo(json.dumps(output, indent=2))
 
 
@@ -75,82 +93,75 @@ def generate(algorithm, save):
 @click.pass_context
 def register(ctx, did_file):
     """Register a DID document."""
+
     async def _register():
         did_doc_data = json.load(did_file)
         did_doc = DidDocument(**did_doc_data)
-        
+
         async with WillowClient(ctx.obj["api_url"]) as client:
             result = await client.register_did(did_doc)
             click.echo(f"DID registered successfully: {result.id}")
-    
+
     asyncio.run(_register())
 
 
 @cli.group()
 def auth():
-    """Authentication commands."""
+    """Authentication commands.
+
+    The SDK has no server session: signing happens per-request locally. These
+    commands just persist the DID + private key + public key ID to
+    ~/.willow/config.json so other CLI commands can load and use them.
+    """
     pass
 
 
 @auth.command()
-@click.option("--did", help="DID to authenticate with")
-@click.option("--key", help="Private key hex")
-@click.option("--key-id", help="Public key ID")
-@click.pass_context
-def login(ctx, did, key, key_id):
-    """Authenticate and save session."""
-    async def _login():
-        # Use saved credentials if not provided
-        if not all([did, key, key_id]):
-            config = load_config()
-            if "current_did" in config:
-                did = did or config["current_did"]["did"]
-                key = key or config["current_did"]["private_key"]
-                key_id = key_id or config["current_did"]["public_key_id"]
-            else:
-                click.echo("No saved credentials. Please provide --did, --key, and --key-id")
-                return
-        
-        async with WillowClient(ctx.obj["api_url"]) as client:
-            session = await client.authenticate(did, key, key_id)
-            
-            # Save session
-            config = load_config()
-            config["session"] = {
-                "did": session.did,
-                "token": session.token,
-                "expires_at": session.expires_at
-            }
-            save_config(config)
-            
-            click.echo(f"Authenticated as: {session.did}")
-            click.echo("Session saved to config file")
-    
-    asyncio.run(_login())
+@click.option("--did", "did_arg", help="DID to authenticate with")
+@click.option("--key", "key_arg", help="Private key hex")
+@click.option("--key-id", "key_id_arg", help="Public key ID")
+def login(did_arg, key_arg, key_id_arg):
+    """Save identity (DID + key + key-id) to ~/.willow/config.json."""
+    config = load_config()
+    existing = config.get("identity") or {}
+
+    did_val = did_arg or existing.get("did")
+    key_val = key_arg or existing.get("private_key")
+    key_id_val = key_id_arg or existing.get("public_key_id")
+
+    if not (did_val and key_val and key_id_val):
+        click.echo("Need --did, --key, and --key-id (or run `willow-cli did generate --save` first).")
+        sys.exit(1)
+
+    config["identity"] = {
+        "did": did_val,
+        "private_key": key_val,
+        "public_key_id": key_id_val,
+    }
+    save_config(config)
+    click.echo(f"Identity saved: {did_val}")
 
 
 @auth.command()
 def logout():
-    """Clear saved session."""
+    """Clear saved identity."""
     config = load_config()
-    if "session" in config:
-        del config["session"]
+    if "identity" in config:
+        del config["identity"]
         save_config(config)
-        click.echo("Session cleared")
+        click.echo("Identity cleared")
     else:
-        click.echo("No active session")
+        click.echo("No saved identity")
 
 
 @auth.command()
 def status():
-    """Check authentication status."""
+    """Check whether an identity is saved."""
     config = load_config()
-    if "session" in config:
-        session = config["session"]
-        click.echo(f"Authenticated as: {session['did']}")
-        click.echo(f"Token: {session['token'][:20]}...")
+    if "identity" in config:
+        click.echo(f"Saved identity: {config['identity']['did']}")
     else:
-        click.echo("Not authenticated")
+        click.echo("No saved identity")
 
 
 @cli.group()
@@ -159,91 +170,78 @@ def data():
     pass
 
 
-def get_session_from_config():
-    """Get session from config or error."""
-    config = load_config()
-    if "session" not in config:
-        click.echo("Not authenticated. Please run: willow-cli auth login")
-        sys.exit(1)
-    return config["session"]
-
-
 @data.command()
-@click.argument("dataset_id")
-@click.argument("data", type=click.File("r"))
+@click.argument("subgrove_id")
+@click.argument("data_file", type=click.File("r"))
 @click.pass_context
-def store(ctx, dataset_id, data):
-    """Store data in a dataset. Data should be JSON file or - for stdin."""
+def store(ctx, subgrove_id, data_file):
+    """Store data in a subgrove. DATA_FILE is JSON (or '-' for stdin)."""
+
     async def _store():
-        session = get_session_from_config()
-        data_dict = json.load(data)
-        
+        did_val, key_val, key_id_val = get_identity_or_exit()
+        data_dict = json.load(data_file)
+
         async with WillowClient(ctx.obj["api_url"]) as client:
-            # Restore session
-            client.session = type("Session", (), session)()
-            
-            await client.data.store(dataset_id, data_dict)
-            click.echo(f"Stored {len(data_dict)} items")
-    
+            client.set_identity(did_val, key_val, key_id_val)
+            await client.data.store(subgrove_id, data_dict)
+            click.echo(f"Stored {len(data_dict)} items in {subgrove_id}")
+
     asyncio.run(_store())
 
 
 @data.command()
-@click.argument("dataset_id")
+@click.argument("subgrove_id")
 @click.argument("key")
 @click.pass_context
-def get(ctx, dataset_id, key):
-    """Get data from a dataset."""
+def get(ctx, subgrove_id, key):
+    """Get a single item from a subgrove (with proof verification)."""
+
     async def _get():
-        session = get_session_from_config()
-        
+        did_val, key_val, key_id_val = get_identity_or_exit()
+
         async with WillowClient(ctx.obj["api_url"]) as client:
-            # Restore session
-            client.session = type("Session", (), session)()
-            
-            result = await client.data.get(dataset_id, key)
+            client.set_identity(did_val, key_val, key_id_val)
+            result = await client.data.get(subgrove_id, key)
             click.echo(json.dumps(result, indent=2))
-    
+
     asyncio.run(_get())
 
 
 @data.command()
-@click.argument("dataset_id")
+@click.argument("subgrove_id")
 @click.argument("key")
-@click.argument("data", type=click.File("r"))
+@click.argument("data_file", type=click.File("r"))
 @click.pass_context
-def update(ctx, dataset_id, key, data):
-    """Update data in a dataset."""
+def update(ctx, subgrove_id, key, data_file):
+    """Update an item in a subgrove."""
+
     async def _update():
-        session = get_session_from_config()
-        data_dict = json.load(data)
-        
+        did_val, key_val, key_id_val = get_identity_or_exit()
+        data_dict = json.load(data_file)
+
         async with WillowClient(ctx.obj["api_url"]) as client:
-            # Restore session
-            client.session = type("Session", (), session)()
-            
-            await client.data.update(dataset_id, key, data_dict)
-            click.echo(f"Updated {key}")
-    
+            client.set_identity(did_val, key_val, key_id_val)
+            await client.data.update(subgrove_id, key, data_dict)
+            click.echo(f"Updated {key} in {subgrove_id}")
+
     asyncio.run(_update())
 
 
 @data.command()
-@click.argument("dataset_id")
+@click.argument("subgrove_id")
 @click.argument("key")
 @click.pass_context
-def delete(ctx, dataset_id, key):
-    """Delete data from a dataset."""
+def delete(ctx, subgrove_id, key):
+    """Delete an item from a subgrove."""
+
     async def _delete():
-        session = get_session_from_config()
-        
+        did_val, key_val, key_id_val = get_identity_or_exit()
+
         async with WillowClient(ctx.obj["api_url"]) as client:
-            # Restore session
-            client.session = type("Session", (), session)()
-            
-            await client.data.delete(dataset_id, key)
-            click.echo(f"Deleted {key}")
-    
+            client.set_identity(did_val, key_val, key_id_val)
+            await client.data.delete(subgrove_id, key)
+            click.echo(f"Deleted {key} from {subgrove_id}")
+
     asyncio.run(_delete())
 
 
@@ -254,21 +252,21 @@ def proof():
 
 
 @proof.command()
-@click.argument("dataset_id")
+@click.argument("subgrove_id")
 @click.argument("key")
 @click.pass_context
-def get(ctx, dataset_id, key):
-    """Get Merkle proof for data."""
+def get(ctx, subgrove_id, key):
+    """Get the Merkle proof for an item."""
+
     async def _get_proof():
         async with WillowClient(ctx.obj["api_url"]) as client:
-            result = await client.proof.get(dataset_id, key)
+            result = await client.proof.get(subgrove_id, key)
             click.echo(json.dumps(result, indent=2))
-    
+
     asyncio.run(_get_proof())
 
 
 def main():
-    """Main entry point."""
     cli(obj={})
 
 

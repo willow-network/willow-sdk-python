@@ -105,9 +105,9 @@ from .types import (
     # Retention Types
     RetentionWindow,
     # Registration Types
-        RegisterDatasetRequest,
+    RegisterDatasetRequest,
     RegisterSubgroveRequest,
-        SubgroveRegistration,
+    SubgroveRegistration,
     DatasetRegistration,
     # API Response Types
     ApiResponse,
@@ -214,7 +214,7 @@ from .consensus import (
     ConsensusConfig,
     ConsensusConfigBuilder,
     RegisterDidTx,
-        RegisterSubgroveTx,
+    RegisterSubgroveTx,
     RetentionWindow as ConsensusRetentionWindow,
     TransferTx,
     StoreFileManifestTx,
@@ -332,9 +332,9 @@ __all__ = [
     # Retention Types
     "RetentionWindow",
     # Registration Types
-        "RegisterDatasetRequest",
+    "RegisterDatasetRequest",
     "RegisterSubgroveRequest",
-        "SubgroveRegistration",
+    "SubgroveRegistration",
     "DatasetRegistration",
     # API Response Types
     "ApiResponse",
@@ -418,7 +418,7 @@ __all__ = [
     "ConsensusConfig",
     "ConsensusConfigBuilder",
     "RegisterDidTx",
-        "RegisterSubgroveTx",
+    "RegisterSubgroveTx",
     "TransferTx",
     "StoreFileManifestTx",
     "DeleteFileManifestTx",

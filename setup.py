@@ -48,6 +48,8 @@ setup(
         "python-dateutil>=2.8.0",
         "click>=8.0.0",  # For CLI
         "blake3>=0.3.0",  # For GroveDB proof verification
+        # XChaCha20-Poly1305 for client-side file encryption (files.py).
+        "pynacl>=1.5.0",
     ],
     extras_require={
         "dev": [
