@@ -38,6 +38,7 @@ def mock_http_client():
 @pytest.fixture
 def authenticated_client(client, mock_http_client):
     """Create authenticated client."""
+    # RFC 8032 §7.1 Test 2 Ed25519 vector.
     client.set_identity(
         "did:willow:test",
         "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",

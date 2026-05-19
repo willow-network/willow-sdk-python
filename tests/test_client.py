@@ -175,6 +175,7 @@ class TestWillowClient:
 
 def _set_test_identity(client):
     """Helper to set a test identity on a client."""
+    # RFC 8032 §7.1 Test 2 Ed25519 vector.
     client.set_identity(
         "did:test",
         "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",

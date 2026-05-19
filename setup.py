@@ -11,7 +11,7 @@ setup(
     description="Python SDK for Willow - decentralized data indexing",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/willow/willow-python-sdk",
+    url="https://github.com/willow-network/willow",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
