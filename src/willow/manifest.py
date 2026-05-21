@@ -4,11 +4,10 @@ subgroves.
 Mirrors :class:`willow_types::consensus::manifest::WillowManifest` in the
 Rust workspace. The consensus validator rejects any ``manifest_content``
 that doesn't decode into this exact shape, so SDK callers should build
-their on-chain manifest bytes via :func:`serialize_manifest`.
-
-v1 scope is EVM-only. Solana data sources have a different shape
-(``program_id`` + ``start_slot`` + ``instructions``) and will be added in
-a follow-up alongside indexer pipeline support.
+their on-chain manifest bytes via :func:`serialize_manifest`. Each data
+source is either EVM (``address`` + ``abi`` + ``start_block`` + ``events``)
+or Solana (``program_id`` + ``start_slot`` + ``instructions``); the family
+is dispatched at parse time from the ``network`` field.
 
 Example::
 
@@ -34,7 +33,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Union
 
 # Canonical chains. Order mirrors ``SupportedChain::ALL`` in willow-types.
@@ -136,8 +135,18 @@ class EvmDataSource:
     events: List[str]
 
 
-# v1 union has only the EVM variant; Solana variant will join in a follow-up.
-DataSource = EvmDataSource
+@dataclass
+class SolanaDataSource:
+    """One indexed Solana program within a manifest."""
+
+    name: str
+    network: str
+    program_id: str  # base58-encoded 32-byte pubkey
+    start_slot: int
+    instructions: List[str]  # each `0x` + even hex chars (>= 2)
+
+
+DataSource = Union[EvmDataSource, SolanaDataSource]
 
 
 @dataclass
@@ -153,6 +162,8 @@ _EVENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EVENT_PARAM_RE = re.compile(r"^[A-Za-z0-9_\[\]]+$")
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _NAME_CHARSET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_DISCRIMINATOR_RE = re.compile(r"^0x([0-9a-fA-F]{2})+$")
+_BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
 
 def _validate_event_signature(sig: str, path: str) -> None:
@@ -178,31 +189,46 @@ def _validate_event_signature(sig: str, path: str) -> None:
             )
 
 
-def _validate_data_source(ds: DataSource, path: str) -> None:
-    if not ds.name:
+def _validate_name(name: str, path: str) -> None:
+    if not name:
         raise ManifestValidationError(f"{path}.name must not be empty", f"{path}.name")
-    if len(ds.name) > MAX_NAME_LEN:
+    if len(name) > MAX_NAME_LEN:
         raise ManifestValidationError(
-            f"{path}.name length {len(ds.name)} exceeds maximum {MAX_NAME_LEN}",
+            f"{path}.name length {len(name)} exceeds maximum {MAX_NAME_LEN}",
             f"{path}.name",
         )
-    if not _NAME_CHARSET_RE.match(ds.name):
+    if not _NAME_CHARSET_RE.match(name):
         raise ManifestValidationError(
-            f"{path}.name {ds.name!r} must be alphanumeric, '-', or '_'",
+            f"{path}.name {name!r} must be alphanumeric, '-', or '_'",
             f"{path}.name",
         )
+
+
+def _validate_data_source(ds: DataSource, path: str) -> None:
+    _validate_name(ds.name, path)
     if not is_supported_chain(ds.network):
         raise ManifestValidationError(
             f"{path}.network {ds.network!r} is not a canonical chain",
             f"{path}.network",
         )
-    if chain_family(ds.network) != "evm":
-        raise ManifestValidationError(
-            f"{path}.network {ds.network!r} is non-EVM; Solana data sources have a "
-            "different shape (program_id / start_slot / instructions) and are "
-            "not yet supported by this builder",
-            f"{path}.network",
-        )
+    family = chain_family(ds.network)
+    if family == "evm":
+        if not isinstance(ds, EvmDataSource):
+            raise ManifestValidationError(
+                f"{path}.network {ds.network!r} is EVM-family but data source is not EvmDataSource",
+                path,
+            )
+        _validate_evm_data_source(ds, path)
+    else:
+        if not isinstance(ds, SolanaDataSource):
+            raise ManifestValidationError(
+                f"{path}.network {ds.network!r} is Solana-family but data source is not SolanaDataSource",
+                path,
+            )
+        _validate_solana_data_source(ds, path)
+
+
+def _validate_evm_data_source(ds: EvmDataSource, path: str) -> None:
     if not _ADDRESS_RE.match(ds.address):
         raise ManifestValidationError(
             f"{path}.address must be 0x + 40 hex chars (got {ds.address!r})",
@@ -231,6 +257,42 @@ def _validate_data_source(ds: DataSource, path: str) -> None:
         )
     for idx, sig in enumerate(ds.events):
         _validate_event_signature(sig, f"{path}.events[{idx}]")
+
+
+def _validate_solana_data_source(ds: SolanaDataSource, path: str) -> None:
+    if not ds.program_id or not (32 <= len(ds.program_id) <= 44):
+        raise ManifestValidationError(
+            f"{path}.program_id must be a base58-encoded 32-byte pubkey (got {ds.program_id!r})",
+            f"{path}.program_id",
+        )
+    for c in ds.program_id:
+        if c not in _BASE58_ALPHABET:
+            raise ManifestValidationError(
+                f"{path}.program_id contains invalid base58 character {c!r}",
+                f"{path}.program_id",
+            )
+    if not isinstance(ds.start_slot, int) or ds.start_slot < 0:
+        raise ManifestValidationError(
+            f"{path}.start_slot must be a non-negative integer",
+            f"{path}.start_slot",
+        )
+    if not ds.instructions:
+        raise ManifestValidationError(
+            f"{path}.instructions must declare at least one discriminator",
+            f"{path}.instructions",
+        )
+    if len(ds.instructions) > MAX_EVENTS_PER_SOURCE:
+        raise ManifestValidationError(
+            f"{path}.instructions has {len(ds.instructions)} entries "
+            f"(maximum {MAX_EVENTS_PER_SOURCE})",
+            f"{path}.instructions",
+        )
+    for idx, d in enumerate(ds.instructions):
+        if not _DISCRIMINATOR_RE.match(d):
+            raise ManifestValidationError(
+                f"{path}.instructions[{idx}] must be 0x + an even, non-zero number of hex chars (got {d!r})",
+                f"{path}.instructions[{idx}]",
+            )
 
 
 def validate_manifest(manifest: WillowManifest) -> None:
@@ -275,19 +337,28 @@ def serialize_manifest(manifest: WillowManifest) -> bytes:
     produces in Rust.
     """
     validate_manifest(manifest)
-    payload = {
-        "spec_version": manifest.spec_version,
-        "data_sources": [
-            {
+    sources_payload = []
+    for ds in manifest.data_sources:
+        if isinstance(ds, EvmDataSource):
+            sources_payload.append({
                 "name": ds.name,
                 "network": ds.network,
                 "address": ds.address.lower(),
                 "abi": ds.abi,
                 "start_block": ds.start_block,
                 "events": list(ds.events),
-            }
-            for ds in manifest.data_sources
-        ],
+            })
+        else:
+            sources_payload.append({
+                "name": ds.name,
+                "network": ds.network,
+                "program_id": ds.program_id,
+                "start_slot": ds.start_slot,
+                "instructions": [d.lower() for d in ds.instructions],
+            })
+    payload = {
+        "spec_version": manifest.spec_version,
+        "data_sources": sources_payload,
     }
     if manifest.description is not None:
         payload["description"] = manifest.description
@@ -317,27 +388,45 @@ def parse_manifest(data: Union[bytes, str]) -> WillowManifest:
         raise ManifestValidationError("data_sources must be a list", "data_sources")
 
     data_sources: List[DataSource] = []
-    allowed_ds_keys = {"name", "network", "address", "abi", "start_block", "events"}
+    evm_keys = {"name", "network", "address", "abi", "start_block", "events"}
+    solana_keys = {"name", "network", "program_id", "start_slot", "instructions"}
     for idx, raw in enumerate(sources_raw):
         if not isinstance(raw, dict):
             raise ManifestValidationError(
                 f"data_sources[{idx}] must be a JSON object", f"data_sources[{idx}]"
             )
-        unknown = set(raw.keys()) - allowed_ds_keys
+        network = raw.get("network")
+        if not isinstance(network, str) or not is_supported_chain(network):
+            raise ManifestValidationError(
+                f"data_sources[{idx}].network {network!r} is not a canonical chain",
+                f"data_sources[{idx}].network",
+            )
+        family = chain_family(network)
+        allowed = evm_keys if family == "evm" else solana_keys
+        unknown = set(raw.keys()) - allowed
         if unknown:
             raise ManifestValidationError(
                 f"data_sources[{idx}] has unknown fields: {sorted(unknown)!r}",
                 f"data_sources[{idx}]",
             )
         try:
-            ds = EvmDataSource(
-                name=raw["name"],
-                network=raw["network"],
-                address=raw["address"],
-                abi=raw["abi"],
-                start_block=raw["start_block"],
-                events=list(raw["events"]),
-            )
+            if family == "evm":
+                ds = EvmDataSource(
+                    name=raw["name"],
+                    network=raw["network"],
+                    address=raw["address"],
+                    abi=raw["abi"],
+                    start_block=raw["start_block"],
+                    events=list(raw["events"]),
+                )
+            else:
+                ds = SolanaDataSource(
+                    name=raw["name"],
+                    network=raw["network"],
+                    program_id=raw["program_id"],
+                    start_slot=raw["start_slot"],
+                    instructions=list(raw["instructions"]),
+                )
         except KeyError as e:
             raise ManifestValidationError(
                 f"data_sources[{idx}] missing required field {e.args[0]!r}",
@@ -366,6 +455,7 @@ __all__ = [
     "MAX_DESCRIPTION_LEN",
     "WillowManifest",
     "EvmDataSource",
+    "SolanaDataSource",
     "DataSource",
     "ManifestValidationError",
     "chain_family",

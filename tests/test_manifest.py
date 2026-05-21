@@ -8,6 +8,7 @@ from willow.manifest import (
     MANIFEST_SPEC_VERSION,
     SUPPORTED_CHAINS,
     EvmDataSource,
+    SolanaDataSource,
     ManifestValidationError,
     WillowManifest,
     chain_family,
@@ -31,6 +32,21 @@ def good_manifest() -> WillowManifest:
                 abi="UniswapV3Pool",
                 start_block=12369621,
                 events=["Swap(address,address,int256,int256,uint160,uint128,int24)"],
+            ),
+        ],
+    )
+
+
+def solana_manifest() -> WillowManifest:
+    return WillowManifest(
+        spec_version=MANIFEST_SPEC_VERSION,
+        data_sources=[
+            SolanaDataSource(
+                name="SplToken",
+                network="solana-mainnet",
+                program_id="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                start_slot=100_000_000,
+                instructions=["0x03"],
             ),
         ],
     )
@@ -80,10 +96,10 @@ def test_rejects_legacy_ethereum_alias():
         validate_manifest(m)
 
 
-def test_rejects_solana_via_evm_builder():
+def test_rejects_evm_fields_on_solana_network():
     m = good_manifest()
     m.data_sources[0].network = "solana-mainnet"
-    with pytest.raises(ManifestValidationError, match="non-EVM"):
+    with pytest.raises(ManifestValidationError, match="Solana-family"):
         validate_manifest(m)
 
 
@@ -213,3 +229,117 @@ def test_chain_family_classifies():
     assert chain_family("mainnet") == "evm"
     assert chain_family("arbitrum-one") == "evm"
     assert chain_family("solana-mainnet") == "solana"
+
+
+# --- Solana data sources ---
+
+
+def test_solana_round_trip_native_spl():
+    bytes_ = serialize_manifest(solana_manifest())
+    parsed = parse_manifest(bytes_)
+    assert isinstance(parsed.data_sources[0], SolanaDataSource)
+    assert parsed.data_sources[0].program_id == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    assert parsed.data_sources[0].instructions == ["0x03"]
+
+
+def test_solana_accepts_anchor_eight_byte_discriminator():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0xc1209b3341d69c81"]
+    validate_manifest(m)
+
+
+def test_solana_accepts_four_byte_system_tag():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0x02000000"]
+    validate_manifest(m)
+
+
+def test_solana_accepts_mixed_length_discriminators():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0x03", "0x07", "0xc1209b3341d69c81"]
+    validate_manifest(m)
+
+
+def test_solana_normalizes_discriminator_to_lowercase():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0xABCD"]
+    payload = serialize_manifest(m)
+    assert b"0xabcd" in payload
+    assert b"0xABCD" not in payload
+
+
+def test_solana_rejects_odd_hex_discriminator():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0x123"]
+    with pytest.raises(ManifestValidationError, match="even.*non-zero number of hex"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_empty_discriminator():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["0x"]
+    with pytest.raises(ManifestValidationError, match="even.*non-zero number of hex"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_discriminator_without_0x():
+    m = solana_manifest()
+    m.data_sources[0].instructions = ["03"]
+    with pytest.raises(ManifestValidationError, match="even.*non-zero number of hex"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_empty_instructions():
+    m = solana_manifest()
+    m.data_sources[0].instructions = []
+    with pytest.raises(ManifestValidationError, match="at least one discriminator"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_negative_start_slot():
+    m = solana_manifest()
+    m.data_sources[0].start_slot = -1
+    with pytest.raises(ManifestValidationError, match="non-negative"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_program_id_with_bad_charset():
+    m = solana_manifest()
+    m.data_sources[0].program_id = "Tokenkeg0feZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    with pytest.raises(ManifestValidationError, match="invalid base58"):
+        validate_manifest(m)
+
+
+def test_solana_rejects_program_id_with_wrong_length():
+    m = solana_manifest()
+    m.data_sources[0].program_id = "Token"
+    with pytest.raises(ManifestValidationError, match="base58-encoded 32-byte"):
+        validate_manifest(m)
+
+
+def test_solana_mixed_evm_and_solana_manifest():
+    m = WillowManifest(
+        spec_version=MANIFEST_SPEC_VERSION,
+        data_sources=good_manifest().data_sources + solana_manifest().data_sources,
+    )
+    validate_manifest(m)
+    payload = serialize_manifest(m)
+    parsed = parse_manifest(payload)
+    assert isinstance(parsed.data_sources[0], EvmDataSource)
+    assert isinstance(parsed.data_sources[1], SolanaDataSource)
+
+
+def test_solana_rejects_unknown_data_source_field():
+    text = json.dumps({
+        "spec_version": "1.0.0",
+        "data_sources": [{
+            "name": "T",
+            "network": "solana-mainnet",
+            "program_id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "start_slot": 0,
+            "instructions": ["0x03"],
+            "address": "0x0000000000000000000000000000000000000000",
+        }],
+    })
+    with pytest.raises(ManifestValidationError, match="unknown fields"):
+        parse_manifest(text)
