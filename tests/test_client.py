@@ -228,7 +228,9 @@ class TestDataOperations:
         result = await client.data.get("dataset1", "key1")
 
         assert result == {"value": "test"}
-        assert "data/dataset1/key1" in mock_http_client.request.call_args[0][1]
+        # `get` makes two calls: GET /data/... then GET /proof/...
+        called_urls = [c.args[1] for c in mock_http_client.request.call_args_list]
+        assert any("data/dataset1/key1" in url for url in called_urls), called_urls
 
     @pytest.mark.asyncio
     async def test_update_data(self, client, mock_http_client):

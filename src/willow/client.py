@@ -1147,6 +1147,7 @@ class WillowClient:
 
             # Import here to avoid circular imports
             from .light_client import LightClient, LightClientConfig
+            from .light_client.types import TrustThreshold
 
             # TODO: When mainnet/testnet launches, use hardcoded checkpoint headers
             # instead of trust-on-first-use for true trustless initialization from genesis.
@@ -1154,8 +1155,7 @@ class WillowClient:
                 chain_id="willow-chain",
                 # Derive CometBFT RPC endpoint from API URL (typically :3031 -> :26657)
                 validator_endpoints=[self.api_url.replace(":3031", ":26657")],
-                trust_threshold_numerator=2,
-                trust_threshold_denominator=3,
+                trust_threshold=TrustThreshold(numerator=2, denominator=3),
                 trusting_period_secs=86400,  # 24 hours
                 max_clock_drift_secs=30,
                 auto_sync=False,

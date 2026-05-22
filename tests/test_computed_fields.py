@@ -33,9 +33,9 @@ class TestComputedFieldRegistry:
             )
         ]
 
-        registry.register("dataset1", "dataset1", fields)
+        registry.register("dataset1", fields)
 
-        result = registry.get("dataset1", "dataset1")
+        result = registry.get("dataset1")
         assert result is not None
         assert len(result) == 1
         assert result[0].name == "testField"
@@ -44,46 +44,46 @@ class TestComputedFieldRegistry:
         """Test getting unregistered fields returns None."""
         registry = ComputedFieldRegistry()
 
-        result = registry.get("nonexistent", "nonexistent")
+        result = registry.get("nonexistent")
         assert result is None
 
     def test_has_method(self):
         """Test has method."""
         registry = ComputedFieldRegistry()
 
-        assert not registry.has("dataset1", "dataset1")
+        assert not registry.has("dataset1")
 
-        registry.register("dataset1", "dataset1", [])
+        registry.register("dataset1", [])
 
-        assert registry.has("dataset1", "dataset1")
-        assert not registry.has("dataset1", "dataset2")
+        assert registry.has("dataset1")
+        assert not registry.has("dataset2")
 
     def test_unregister(self):
         """Test unregistering fields."""
         registry = ComputedFieldRegistry()
 
-        registry.register("dataset1", "dataset1", [])
-        assert registry.has("dataset1", "dataset1")
+        registry.register("dataset1", [])
+        assert registry.has("dataset1")
 
-        result = registry.unregister("dataset1", "dataset1")
+        result = registry.unregister("dataset1")
         assert result is True
-        assert not registry.has("dataset1", "dataset1")
+        assert not registry.has("dataset1")
 
         # Unregistering again returns False
-        result = registry.unregister("dataset1", "dataset1")
+        result = registry.unregister("dataset1")
         assert result is False
 
     def test_clear(self):
         """Test clearing all registrations."""
         registry = ComputedFieldRegistry()
 
-        registry.register("dataset1", "dataset1", [])
-        registry.register("dataset2", "dataset2", [])
+        registry.register("dataset1", [])
+        registry.register("dataset2", [])
 
         registry.clear()
 
-        assert not registry.has("dataset1", "dataset1")
-        assert not registry.has("dataset2", "dataset2")
+        assert not registry.has("dataset1")
+        assert not registry.has("dataset2")
 
 
 class TestApplyComputedFields:
