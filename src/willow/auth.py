@@ -27,19 +27,12 @@ SignatureAlgorithm = Literal["Ed25519", "secp256k1"]
 
 
 # ---------------------------------------------------------------------------
-# secp256k1 helpers backed by `cryptography` (pure-Python wheel coverage,
-# no libsecp256k1 C build required). Formats match the Willow wire protocol:
+# secp256k1 helpers backed by `cryptography`. Formats match the Willow
+# wire protocol:
 #
 #   - public keys:  64-byte uncompressed (X || Y), no 0x04 prefix
 #   - signatures:   64-byte compact (r || s)
 #   - message input: the caller pre-hashes (we sign/verify the raw digest)
-#
-# Previously this module used `coincurve`, which wraps libsecp256k1 and
-# has spotty prebuilt-wheel coverage on newer Pythons (e.g. 3.14 on macOS)
-# — building from source requires pkg-config and a C toolchain. Switching
-# to `cryptography` keeps us aligned with the rest of the SDK (which
-# already uses `cryptography` for Ed25519) and avoids the native-build
-# failure mode entirely.
 # ---------------------------------------------------------------------------
 
 
