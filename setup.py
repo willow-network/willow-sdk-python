@@ -45,6 +45,8 @@ setup(
         # pycryptodome has wide prebuilt-wheel coverage. Without this,
         # every call to `keccak(...)` raises ImportError on fresh installs.
         "eth-hash[pycryptodome]>=0.5.0",
+        # RLP encode/decode for MPT inclusion proof verification (eth_state).
+        "rlp>=3.0.0",
         "python-dateutil>=2.8.0",
         "click>=8.0.0",  # For CLI
         "blake3>=0.3.0",  # For GroveDB proof verification

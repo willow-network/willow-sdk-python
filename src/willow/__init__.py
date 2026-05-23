@@ -236,6 +236,17 @@ from .files import (
     decrypt_file,
 )
 
+# Verifiable Ethereum state reads.
+from .eth_state import (
+    EthOperations,
+    StateVerifyMode,
+    VerifiedCall,
+    VerifiedStateRead,
+    VerifiedStorage,
+    verify_mpt_proof,
+    verify_state_proof,
+)
+
 # Canonical WillowManifest builder + SupportedChain helpers
 from .manifest import (
     SUPPORTED_CHAINS,
