@@ -408,11 +408,10 @@ class ConsensusClient:
     async def _broadcast_transaction(self, transaction: Dict[str, Any]) -> BroadcastResult:
         """Submit a transaction via the API server's /tx/submit endpoint.
 
-        The chain's on-the-wire format is bincode (see
-        docs/todo/proposal-bincode-wire.md). The API server accepts JSON,
-        bincode-encodes it, and forwards to CometBFT's broadcast_tx_sync —
-        so SDKs can keep sending JSON without a per-language bincode
-        encoder.
+        The chain's on-the-wire format is bincode. The API server accepts
+        JSON, bincode-encodes it, and forwards to CometBFT's
+        broadcast_tx_sync — so SDKs can keep sending JSON without a
+        per-language bincode encoder.
         """
         if not self.config.api_url:
             raise ConsensusError(

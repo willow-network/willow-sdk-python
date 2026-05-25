@@ -1128,14 +1128,10 @@ class WillowClient:
     async def _get_or_create_light_client(self) -> "LightClient":
         """Get or create a light client for trustless verification.
 
-        This auto-initializes a light client using trust-on-first-use:
-        the first block received from validators is trusted, and all subsequent
-        blocks are verified against it.
-
-        Important: TODO: When mainnet/testnet launches, replace trust-on-first-use
-        with hardcoded checkpoint headers for true trustless initialization.
-        Trust-on-first-use is secure for subsequent operations but trusts the
-        initial block from the connected validators.
+        Auto-initializes a light client using trust-on-first-use: the
+        first block received from validators is trusted, and every
+        subsequent block is verified against it. Pin a known-good
+        checkpoint header instead for production deployments.
         """
         if self._light_client is not None:
             return self._light_client
@@ -1149,8 +1145,6 @@ class WillowClient:
             from .light_client import LightClient, LightClientConfig
             from .light_client.types import TrustThreshold
 
-            # TODO: When mainnet/testnet launches, use hardcoded checkpoint headers
-            # instead of trust-on-first-use for true trustless initialization from genesis.
             config = LightClientConfig(
                 chain_id="willow-chain",
                 # Derive CometBFT RPC endpoint from API URL (typically :3031 -> :26657)
@@ -1172,11 +1166,8 @@ class WillowClient:
     async def get_root_hash(self) -> str:
         """Get the verified root hash using the light client.
 
-        This uses trustless verification through the light client instead of
-        asking the node for the root hash.
-
-        Important: TODO: When mainnet/testnet launches, the light client will be
-        initialized with hardcoded checkpoint headers instead of trust-on-first-use.
+        Uses the light client for trustless verification. Auto-initializes
+        with trust-on-first-use if no light client is configured.
 
         Returns:
             Verified root hash as hex string from the light client
