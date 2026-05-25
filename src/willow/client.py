@@ -847,6 +847,7 @@ class WillowClient:
         retry_config: Optional[RetryConfig] = None,
         proof_verification_options: Optional[ProofVerificationOptions] = None,
         indexer_url: Optional[str] = None,
+        api_key: Optional[str] = None,
     ):
         """Initialize Willow client.
 
@@ -856,11 +857,17 @@ class WillowClient:
             retry_config: Optional retry configuration
             proof_verification_options: Optional proof verification configuration
             indexer_url: Optional indexer node URL for routing GraphQL/SQL queries
+            api_key: Managed-tier API key (``wk_...``). When set, the SDK
+                sends ``X-API-Key`` on every request. Mint a key at
+                https://dashboard.willow.tech/account. Required for queries
+                and writes against managed ``api.willow.tech`` /
+                ``indexer.willow.tech``.
         """
         self.api_url = api_url.rstrip("/")
         self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
         self.timeout = timeout
         self.retry_config = retry_config or RetryConfig()
+        self.api_key = api_key
         self._did: Optional[str] = None
         self._private_key: Optional[str] = None
         self._public_key_id: Optional[str] = None
@@ -884,10 +891,15 @@ class WillowClient:
         self.validators = ValidatorOperations(self)
         self.indexing = IndexingOperations(self)
         self.privacy = PrivacyOperations(self)
-        self.files = FileOperations(self.api_url)
+        self.files = FileOperations(self.api_url, api_key=api_key)
 
-        # HTTP client
-        self._http = httpx.AsyncClient(timeout=timeout)
+        # HTTP client. ``X-API-Key`` is set as a default header so it
+        # rides on every request through this client (data, query, proof,
+        # token, validator, indexing, privacy — all routes through
+        # ``self._http``). Per-request auth headers (DID signature) are
+        # merged on top at call sites and do not replace the default.
+        default_headers = {"X-API-Key": api_key} if api_key else {}
+        self._http = httpx.AsyncClient(timeout=timeout, headers=default_headers)
 
         # Indexer discovery client. When ``indexer_url`` is set, discovery
         # is bypassed and a synthetic single-entry list is returned so the

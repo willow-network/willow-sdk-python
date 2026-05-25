@@ -37,9 +37,14 @@ class FileManifest:
 class FileOperations:
     """File storage operations."""
 
-    def __init__(self, api_url: str, get_headers=None):
+    def __init__(self, api_url: str, get_headers=None, api_key: Optional[str] = None):
         self._api_url = api_url
-        self._get_headers = get_headers or (lambda: {})
+        self._api_key = api_key
+        base_headers = get_headers or (lambda: {})
+        if api_key:
+            self._get_headers = lambda: {**base_headers(), "X-API-Key": api_key}
+        else:
+            self._get_headers = base_headers
 
     async def upload(
         self,
