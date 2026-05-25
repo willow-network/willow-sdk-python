@@ -13,8 +13,6 @@ via discovery (the failing indexer is evicted from the cache), so a dead
 indexer won't keep the caller pinned to it. Set ``reconnect=False`` to
 opt out.
 
-See ``docs/QUERY_ROUTING.md`` for the validator-vs-indexer trust model.
-
 Example
 -------
 .. code-block:: python
