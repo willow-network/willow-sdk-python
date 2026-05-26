@@ -5,13 +5,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="willow-sdk",
-    version="0.2.0",
+    version="0.1.0",
     author="Willow",
     author_email="dev@willow.network",
     description="Python SDK for Willow - decentralized data indexing",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/willow-network/willow",
+    url="https://github.com/willow-network/willow-sdk-python",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[

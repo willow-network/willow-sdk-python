@@ -11,7 +11,6 @@ pip install willow-sdk
 Or install from source:
 
 ```bash
-cd sdk/willow-python
 pip install -e .
 ```
 
