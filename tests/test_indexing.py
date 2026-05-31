@@ -1,8 +1,11 @@
 """
-Indexing tests for Willow Python SDK
+Integration tests for the Willow Python SDK.
 
-These tests require a running three-node network with funded DID.
-Run: ./scripts/start_network.sh
+These tests require a running three-node Willow network with a funded DID
+written to the file pointed at by the ``WILLOW_TEST_DID_FILE`` env var (one
+line, the DID string). When the env var is unset or the file is missing,
+the whole module is skipped — there's nothing meaningful to assert without
+live nodes.
 """
 
 import pytest
@@ -29,14 +32,20 @@ PUBLIC_KEY_HEX = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af466
 PUBLIC_KEY_ID = "#key1"
 
 
-# Helper to get funded DID
+_did_file = os.environ.get("WILLOW_TEST_DID_FILE")
+_funded_did = (
+    Path(_did_file).read_text().strip()
+    if _did_file and Path(_did_file).is_file()
+    else None
+)
+pytestmark = pytest.mark.skipif(
+    _funded_did is None,
+    reason="WILLOW_TEST_DID_FILE unset or missing — set to a path containing a funded DID to run",
+)
+
+
 def get_funded_did() -> str:
-    """Read the funded DID from the file created by the script."""
-    did_path = Path(__file__).parent.parent.parent.parent / "devnet" / "test_owner_did.txt"
-    try:
-        return did_path.read_text().strip()
-    except FileNotFoundError:
-        raise Exception("Test DID file not found - ensure network is running with funding")
+    return _funded_did
 
 
 # Test fixtures
