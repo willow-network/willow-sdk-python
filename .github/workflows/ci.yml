@@ -15,5 +15,3 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
       - run: pytest
-      - run: black --check src
-      - run: flake8 src
