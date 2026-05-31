@@ -28,29 +28,16 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "httpx>=0.24.0",
-        # Used by the light-client, consensus, and ERC-8004 modules.
         "aiohttp>=3.9.0",
         "pydantic>=2.0.0",
-        # WebSocket client for GraphQL subscriptions (graphql-transport-ws).
         "websockets>=12.0",
-        # `cryptography` covers both Ed25519 and secp256k1 for us. We used to
-        # pull `coincurve` (libsecp256k1 wrapper) for secp256k1, but it has
-        # spotty prebuilt-wheel coverage on newer Pythons (e.g. 3.14 on
-        # macOS) and building from source requires a C toolchain. Using
-        # `cryptography` keeps installation pure-wheel across supported
-        # Python versions.
         "cryptography>=41.0.0",
         "eth-utils>=2.2.0",
-        # `eth-utils.keccak` needs a keccak-256 backend at runtime;
-        # pycryptodome has wide prebuilt-wheel coverage. Without this,
-        # every call to `keccak(...)` raises ImportError on fresh installs.
         "eth-hash[pycryptodome]>=0.5.0",
-        # RLP encode/decode for MPT inclusion proof verification (eth_state).
         "rlp>=3.0.0",
         "python-dateutil>=2.8.0",
-        "click>=8.0.0",  # For CLI
-        "blake3>=0.3.0",  # For GroveDB proof verification
-        # XChaCha20-Poly1305 for client-side file encryption (files.py).
+        "click>=8.0.0",
+        "blake3>=0.3.0",
         "pynacl>=1.5.0",
     ],
     extras_require={
