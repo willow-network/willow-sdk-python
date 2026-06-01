@@ -156,6 +156,7 @@ class WillowManifest:
     spec_version: str = MANIFEST_SPEC_VERSION
     data_sources: List[DataSource] = field(default_factory=list)
     description: Optional[str] = None
+    deferred_completeness: bool = False
 
 
 _EVENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -362,6 +363,8 @@ def serialize_manifest(manifest: WillowManifest) -> bytes:
     }
     if manifest.description is not None:
         payload["description"] = manifest.description
+    if manifest.deferred_completeness:
+        payload["deferred_completeness"] = True
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
@@ -377,7 +380,12 @@ def parse_manifest(data: Union[bytes, str]) -> WillowManifest:
     if not isinstance(parsed, dict):
         raise ManifestValidationError("manifest must be a JSON object", "")
 
-    extra_keys = set(parsed.keys()) - {"spec_version", "description", "data_sources"}
+    extra_keys = set(parsed.keys()) - {
+        "spec_version",
+        "description",
+        "data_sources",
+        "deferred_completeness",
+    }
     if extra_keys:
         raise ManifestValidationError(
             f"manifest has unknown top-level fields: {sorted(extra_keys)!r}", ""
@@ -438,6 +446,7 @@ def parse_manifest(data: Union[bytes, str]) -> WillowManifest:
         spec_version=parsed["spec_version"],
         data_sources=data_sources,
         description=parsed.get("description"),
+        deferred_completeness=bool(parsed.get("deferred_completeness", False)),
     )
     validate_manifest(manifest)
     return manifest
