@@ -4,11 +4,18 @@ The two vectors below are the cross-language correctness gate — they MUST matc
 the canonical Rust ``canonical_event_set_hash`` byte-for-byte.
 """
 
+import base64
+import json
+
+import httpx
 import pytest
 
 from willow.completeness import (
+    CompletenessError,
+    CompletenessOperations,
     Log,
     canonical_event_set_hash,
+    logs_from_matched_logs_response,
     verify_served_events,
 )
 
@@ -123,3 +130,169 @@ class TestVerifyServedEvents:
         """Reordering the served set fails verification (order is committed)."""
         reordered = list(reversed(VECTOR_B_LOGS))
         assert not verify_served_events(VECTOR_B_HASH, VECTOR_B_BLOCK, reordered)
+
+
+# The authoritative indexer ``matched-logs`` response body for vector B. This is
+# the exact JSON contract from willow PR #676 — the JSON->Log parse must reduce
+# it to the canonical set that hashes to VECTOR_B_HASH.
+MATCHED_LOGS_BODY = {
+    "subgrove_id": "sg",
+    "block_number": 7,
+    "count": 2,
+    "matched_logs": [
+        {
+            "block_number": 7,
+            "block_hash": "0x" + "00" * 32,
+            "transaction_hash": "0x" + "00" * 32,
+            "transaction_index": 0,
+            "log_index": "0x0",
+            "address": "0x4242424242424242424242424242424242424242",
+            "topics": [
+                "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "0x1111111111111111111111111111111111111111111111111111111111111111",
+            ],
+            "data": "0x01020304",
+            "removed": False,
+        },
+        {
+            "block_number": 7,
+            "block_hash": "0x" + "00" * 32,
+            "transaction_hash": "0x" + "00" * 32,
+            "transaction_index": 0,
+            "log_index": "0x1",
+            "address": "0x4343434343434343434343434343434343434343",
+            "topics": [
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            "data": "0x",
+            "removed": False,
+        },
+    ],
+}
+
+
+class TestParseMatchedLogsBody:
+    """Gate the JSON->Log parse against the authoritative indexer body."""
+
+    def test_parsed_body_verifies_against_anchor(self):
+        """Parsing the real response body yields logs that hash to the anchor.
+
+        This is the cross-implementation gate: only ``address``/``topics``/
+        ``data`` are part of the commitment, so dropping block_hash, tx_hash,
+        log_index, removed, etc. must still reproduce VECTOR_B_HASH exactly.
+        """
+        logs = logs_from_matched_logs_response(MATCHED_LOGS_BODY)
+        assert verify_served_events(VECTOR_B_HASH, 7, logs)
+
+    def test_parse_preserves_order_and_count(self):
+        logs = logs_from_matched_logs_response(MATCHED_LOGS_BODY)
+        assert len(logs) == 2
+        assert logs[0].data == "0x01020304"
+        assert logs[1].data == "0x"
+
+
+def _anchor_rpc_response(commitment_hex: str) -> dict:
+    """Build a CometBFT ``abci_query`` envelope carrying the anchor value.
+
+    The chain JSON-encodes ``{subgrove_id, block_number, events_commitment}``
+    into ResponseQuery.value; CometBFT base64s it into ``result.response.value``.
+    """
+    value = json.dumps(
+        {
+            "subgrove_id": "sg",
+            "block_number": 7,
+            "events_commitment": commitment_hex,
+        }
+    ).encode()
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"response": {"code": 0, "value": base64.b64encode(value).decode()}},
+    }
+
+
+class TestVerifyBlockCompletenessMocked:
+    """Full fetch-anchor + fetch-preimage + verify path over a mock transport."""
+
+    def _ops(self, handler) -> CompletenessOperations:
+        transport = httpx.MockTransport(handler)
+        http = httpx.AsyncClient(transport=transport)
+        return CompletenessOperations(
+            http,
+            "http://validator:26657",
+            "http://indexer:9090",
+        )
+
+    async def test_verify_block_completeness_true(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/matched-logs"):
+                assert request.url.path == "/completeness/sg/7/matched-logs"
+                return httpx.Response(200, json=MATCHED_LOGS_BODY)
+            # CometBFT abci_query JSON-RPC POST.
+            assert request.method == "POST"
+            return httpx.Response(200, json=_anchor_rpc_response(VECTOR_B_HASH[2:]))
+
+        ops = self._ops(handler)
+        assert await ops.verify_block_completeness("sg", 7) is True
+        await ops._http.aclose()
+
+    async def test_verify_block_completeness_tampered_false(self):
+        """A served set that doesn't match the anchor verifies False (not an error)."""
+        tampered = json.loads(json.dumps(MATCHED_LOGS_BODY))
+        tampered["matched_logs"][0]["data"] = "0x01020305"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/matched-logs"):
+                return httpx.Response(200, json=tampered)
+            return httpx.Response(200, json=_anchor_rpc_response(VECTOR_B_HASH[2:]))
+
+        ops = self._ops(handler)
+        assert await ops.verify_block_completeness("sg", 7) is False
+        await ops._http.aclose()
+
+    async def test_missing_anchor_raises(self):
+        """ABCI code != 0 surfaces as not-verifiable (CompletenessError)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "response": {
+                            "code": 1,
+                            "log": "No events commitment for block 7",
+                        }
+                    },
+                },
+            )
+
+        ops = self._ops(handler)
+        with pytest.raises(CompletenessError):
+            await ops.verify_block_completeness("sg", 7)
+        await ops._http.aclose()
+
+    async def test_missing_preimage_raises(self):
+        """A 404 from the indexer surfaces as not-verifiable (CompletenessError)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/matched-logs"):
+                return httpx.Response(404, text="no retained matched logs")
+            return httpx.Response(200, json=_anchor_rpc_response(VECTOR_B_HASH[2:]))
+
+        ops = self._ops(handler)
+        with pytest.raises(CompletenessError):
+            await ops.verify_block_completeness("sg", 7)
+        await ops._http.aclose()
+
+    async def test_no_indexer_configured_raises(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_anchor_rpc_response(VECTOR_B_HASH[2:]))
+
+        transport = httpx.MockTransport(handler)
+        http = httpx.AsyncClient(transport=transport)
+        ops = CompletenessOperations(http, "http://validator:26657", None)
+        with pytest.raises(CompletenessError):
+            await ops.fetch_matched_logs("sg", 7)
+        await http.aclose()

@@ -239,7 +239,12 @@ from .files import (
 # Client-side completeness verification.
 from .completeness import (
     Log,
+    CompletenessError,
+    CompletenessOperations,
     canonical_event_set_hash,
+    commitment_from_anchor_value,
+    log_from_indexer_json,
+    logs_from_matched_logs_response,
     verify_served_events,
 )
 
@@ -421,7 +426,12 @@ __all__ = [
     "verify_proof_with_expected_root",
     # Completeness Verification
     "Log",
+    "CompletenessError",
+    "CompletenessOperations",
     "canonical_event_set_hash",
+    "commitment_from_anchor_value",
+    "log_from_indexer_json",
+    "logs_from_matched_logs_response",
     "verify_served_events",
     # GroveDB module
     "grovedb",
