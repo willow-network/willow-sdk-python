@@ -236,6 +236,13 @@ from .files import (
     decrypt_file,
 )
 
+# Client-side completeness verification.
+from .completeness import (
+    Log,
+    canonical_event_set_hash,
+    verify_served_events,
+)
+
 # Verifiable Ethereum state reads.
 from .eth_state import (
     EthOperations,
@@ -412,6 +419,10 @@ __all__ = [
     "extract_root_hash_from_proof",
     "verify_proof_quick",
     "verify_proof_with_expected_root",
+    # Completeness Verification
+    "Log",
+    "canonical_event_set_hash",
+    "verify_served_events",
     # GroveDB module
     "grovedb",
     # Light Client
