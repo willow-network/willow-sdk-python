@@ -60,6 +60,7 @@ from .computed_fields import (
 )
 from .privacy import PrivacyOperations
 from .files import FileOperations
+from .completeness import CompletenessOperations
 
 if TYPE_CHECKING:
     from .light_client import LightClient
@@ -900,6 +901,16 @@ class WillowClient:
         # merged on top at call sites and do not replace the default.
         default_headers = {"X-API-Key": api_key} if api_key else {}
         self._http = httpx.AsyncClient(timeout=timeout, headers=default_headers)
+
+        # Client-side completeness checks. The on-chain anchor is read from the
+        # validator's CometBFT RPC (derived from api_url, typically :3031 ->
+        # :26657, matching the light client); the matched-log preimage comes
+        # from the configured indexer.
+        self.completeness = CompletenessOperations(
+            self._http,
+            self.api_url.replace(":3031", ":26657"),
+            self.indexer_url,
+        )
 
         # Indexer discovery client. When ``indexer_url`` is set, discovery
         # is bypassed and a synthetic single-entry list is returned so the
