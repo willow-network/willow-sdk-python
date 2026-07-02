@@ -11,7 +11,7 @@ import time
 from typing import Optional, Dict, Any, Tuple
 import logging
 
-from ..auth import sign_message, detect_algorithm_from_did
+from ..auth import sign_message, SignatureAlgorithm
 from .types import (
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
@@ -61,7 +61,8 @@ class ConsensusClient:
         self,
         did_document: Dict[str, Any],
         private_key: str,
-        public_key_id: str
+        public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Register a DID on the blockchain.
@@ -90,7 +91,7 @@ class ConsensusClient:
         )
         
         # Sign and broadcast
-        return await self._sign_and_broadcast("RegisterDid", tx, private_key)
+        return await self._sign_and_broadcast("RegisterDid", tx, private_key, algorithm)
     
     async def register_subgrove(
         self,
@@ -99,7 +100,8 @@ class ConsensusClient:
         owner_did: str,
         private_key: str,
         public_key_id: str,
-        mode: Optional[Dict[str, Any]] = None
+        mode: Optional[Dict[str, Any]] = None,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Register a subgrove (dataset) on the blockchain.
@@ -127,7 +129,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(owner_did)
         )
 
-        return await self._sign_and_broadcast("RegisterSubgrove", tx, private_key)
+        return await self._sign_and_broadcast("RegisterSubgrove", tx, private_key, algorithm)
     
     async def transfer(
         self,
@@ -136,7 +138,8 @@ class ConsensusClient:
         amount: int,
         private_key: str,
         public_key_id: str,
-        memo: Optional[str] = None
+        memo: Optional[str] = None,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Transfer tokens between DIDs.
@@ -162,7 +165,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(from_did)
         )
         
-        return await self._sign_and_broadcast("Transfer", tx, private_key)
+        return await self._sign_and_broadcast("Transfer", tx, private_key, algorithm)
     
     async def store_data(
         self,
@@ -171,7 +174,8 @@ class ConsensusClient:
         data: Dict[str, Any],
         owner_did: str,
         private_key: str,
-        public_key_id: str
+        public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Store data on the blockchain.
@@ -197,7 +201,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(owner_did)
         )
         
-        return await self._sign_and_broadcast("DataStore", tx, private_key)
+        return await self._sign_and_broadcast("DataStore", tx, private_key, algorithm)
 
     async def store_file_manifest(
         self,
@@ -213,6 +217,7 @@ class ConsensusClient:
         owner_did: str,
         private_key: str,
         public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Store a file manifest on the blockchain.
@@ -250,7 +255,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("StoreFileManifest", tx, private_key)
+        return await self._sign_and_broadcast("StoreFileManifest", tx, private_key, algorithm)
 
     async def delete_file_manifest(
         self,
@@ -259,6 +264,7 @@ class ConsensusClient:
         owner_did: str,
         private_key: str,
         public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Delete a file manifest from the blockchain.
@@ -282,7 +288,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("DeleteFileManifest", tx, private_key)
+        return await self._sign_and_broadcast("DeleteFileManifest", tx, private_key, algorithm)
 
     async def deregister_subgrove(
         self,
@@ -290,6 +296,7 @@ class ConsensusClient:
         owner_did: str,
         private_key: str,
         public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
         """
         Deregister (delete) a subgrove. Remaining funding is refunded to the owner.
@@ -311,7 +318,7 @@ class ConsensusClient:
             nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("DeregisterSubgrove", tx, private_key)
+        return await self._sign_and_broadcast("DeregisterSubgrove", tx, private_key, algorithm)
 
     async def get_transaction_status(self, tx_hash: str) -> TransactionStatus:
         """
@@ -393,14 +400,19 @@ class ConsensusClient:
         self,
         tx_type: str,
         transaction: Transaction,
-        private_key: str
+        private_key: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> BroadcastResult:
-        """Sign a transaction and broadcast it."""
+        """Sign a transaction and broadcast it.
+
+        ``algorithm`` selects the signing algorithm. It must be supplied by the
+        caller because the self-certifying DID no longer encodes it; it cannot
+        be recovered from the transaction's ``owner_did``.
+        """
         # Create canonical message for signing
         sign_message_text = create_sign_message(tx_type, transaction)
-        
-        # Detect signature algorithm and sign
-        algorithm = detect_algorithm_from_did(getattr(transaction, 'owner_did', ''))
+
+        # Sign with the identity's algorithm
         signature_hex = sign_message(sign_message_text, private_key, algorithm)
         
         # Update transaction with signature

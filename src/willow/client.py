@@ -34,7 +34,7 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import sign_request
+from .auth import sign_request, SignatureAlgorithm
 from .errors import (
     WillowError,
     AuthenticationError,
@@ -872,6 +872,7 @@ class WillowClient:
         self._did: Optional[str] = None
         self._private_key: Optional[str] = None
         self._public_key_id: Optional[str] = None
+        self._algorithm: SignatureAlgorithm = "Ed25519"
 
         # Configure proof verification if options provided
         if proof_verification_options:
@@ -976,7 +977,7 @@ class WillowClient:
             if self.is_authenticated():
                 headers = sign_request(
                     self._did, self._private_key, self._public_key_id,
-                    "POST", path,
+                    "POST", path, self._algorithm,
                 )
             url = f"{self.api_url}{path}"
             resp = await self._http.post(url, json=body, headers=headers)
@@ -999,7 +1000,7 @@ class WillowClient:
             if self.is_authenticated():
                 headers = sign_request(
                     self._did, self._private_key, self._public_key_id,
-                    "POST", path,
+                    "POST", path, self._algorithm,
                 )
             endpoint = info.effective_query_endpoint().rstrip("/")
             url = f"{endpoint}{path}"
@@ -1091,7 +1092,8 @@ class WillowClient:
         self,
         did: str,
         private_key_hex: str,
-        public_key_id: str
+        public_key_id: str,
+        algorithm: SignatureAlgorithm = "Ed25519",
     ) -> None:
         """Set identity for per-request authentication.
 
@@ -1102,10 +1104,17 @@ class WillowClient:
             did: DID to authenticate as
             private_key_hex: Hex-encoded private key
             public_key_id: Public key ID from DID document
+            algorithm: Signature algorithm of this identity ("Ed25519" or
+                "secp256k1"). Willow DIDs are self-certifying and no longer
+                encode the algorithm in the string, so it cannot be inferred
+                from ``did`` — pass "secp256k1" for Ethereum/wallet identities
+                so per-request auth is signed with the right algorithm.
+                Defaults to "Ed25519" (the SDK's default identity type).
         """
         self._did = did
         self._private_key = private_key_hex
         self._public_key_id = public_key_id
+        self._algorithm = algorithm
 
     def is_authenticated(self) -> bool:
         """Check if client has identity set for per-request signing."""
@@ -1116,6 +1125,7 @@ class WillowClient:
         self._did = None
         self._private_key = None
         self._public_key_id = None
+        self._algorithm = "Ed25519"
 
     def register_computed_fields(
         self,
@@ -1265,7 +1275,8 @@ class WillowClient:
         headers = {}
         if authenticated and self.is_authenticated():
             headers = sign_request(
-                self._did, self._private_key, self._public_key_id, method, path
+                self._did, self._private_key, self._public_key_id, method, path,
+                self._algorithm,
             )
 
         try:

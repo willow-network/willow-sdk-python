@@ -93,6 +93,63 @@ class TestWillowClient:
         assert client._did == did_info["did"]
         assert client._private_key == did_info["private_key"]
         assert client._public_key_id == did_info["public_key_id"]
+        # Algorithm defaults to Ed25519 when not supplied.
+        assert client._algorithm == "Ed25519"
+
+    @pytest.mark.asyncio
+    async def test_set_identity_secp256k1_algorithm(self, client):
+        """set_identity stores an explicit secp256k1 algorithm."""
+        info = generate_did("secp256k1")
+        client.set_identity(
+            info["did"], info["private_key"], info["public_key_id"], "secp256k1"
+        )
+        assert client._algorithm == "secp256k1"
+        # clear_identity resets the algorithm back to the default.
+        client.clear_identity()
+        assert client._algorithm == "Ed25519"
+
+    @pytest.mark.asyncio
+    async def test_secp256k1_identity_signs_requests_with_secp256k1(self):
+        """A secp256k1 identity must sign per-request auth with secp256k1.
+
+        Regression guard for the self-certifying DID migration: the algorithm
+        can no longer be parsed from the ``did:willow:z...`` string, so it is
+        threaded through ``set_identity`` into ``sign_request``. Before the fix
+        the client defaulted to Ed25519 and secp256k1 auth silently failed.
+        """
+        from willow.auth import verify_signature
+
+        info = generate_did("secp256k1")
+        client = WillowClient("http://localhost:3031")
+        client.set_identity(
+            info["did"], info["private_key"], info["public_key_id"], "secp256k1"
+        )
+
+        captured = {}
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"success": True}
+
+        async def fake_request(method, url, json=None, headers=None):
+            captured["headers"] = headers
+            return mock_response
+
+        client._http.request = AsyncMock(side_effect=fake_request)
+
+        await client.data.store("my-subgrove", {"k": "v"})
+
+        headers = captured["headers"]
+        assert headers["X-DID"] == info["did"]
+        message = f"POST:/data/my-subgrove:{headers['X-Timestamp']}"
+        # The captured signature verifies under secp256k1 (the true algorithm)...
+        assert verify_signature(
+            message, headers["X-Signature"], info["public_key"], "secp256k1"
+        )
+        # ...and would NOT verify had the client defaulted to Ed25519.
+        assert not verify_signature(
+            message, headers["X-Signature"], info["public_key"], "Ed25519"
+        )
+        await client.close()
 
     @pytest.mark.asyncio
     async def test_is_authenticated(self, client):
