@@ -4,6 +4,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from willow.auth import (
+    derive_did,
     detect_algorithm_from_did,
     generate_did,
     sign_challenge,
@@ -17,8 +18,8 @@ class TestGenerateDid:
     def test_generate_ed25519_did(self):
         """Test Ed25519 DID generation."""
         result = generate_did("Ed25519")
-        
-        assert result["did"].startswith("did:willow:ed25519:")
+
+        assert result["did"].startswith("did:willow:z")
         assert len(result["private_key"]) == 64  # 32 bytes hex
         assert len(result["public_key"]) == 64   # 32 bytes hex
         assert result["public_key_id"] == f"{result['did']}#key-1"
@@ -33,8 +34,8 @@ class TestGenerateDid:
     def test_generate_secp256k1_did(self):
         """Test secp256k1 DID generation."""
         result = generate_did("secp256k1")
-        
-        assert result["did"].startswith("did:willow:secp256k1:")
+
+        assert result["did"].startswith("did:willow:z")
         assert len(result["private_key"]) == 64  # 32 bytes hex
         assert len(result["public_key"]) == 128  # 64 bytes hex (uncompressed)
         assert result["algorithm"] == "secp256k1"
@@ -47,10 +48,59 @@ class TestGenerateDid:
         """Test that generated DIDs are unique."""
         did1 = generate_did()
         did2 = generate_did()
-        
+
         assert did1["did"] != did2["did"]
         assert did1["private_key"] != did2["private_key"]
         assert did1["public_key"] != did2["public_key"]
+
+
+class TestSelfCertifyingDid:
+    """Test the self-certifying DID derivation.
+
+    did = "did:willow:z" + base58btc( SHA3-256( multicodec_prefix || pubkey ) )
+    """
+
+    def test_ed25519_acceptance_vector(self):
+        """MANDATORY: this exact vector is what the chain's RegisterDid enforces.
+
+        If this fails, the derivation is wrong (e.g. Keccak-256 instead of
+        FIPS-202 SHA3-256, wrong multicodec prefix, or bad base58btc).
+        """
+        public_key_hex = (
+            "a003201e65e47d578ad9bb17cb1d3590e9f504f55eac6ee40002e3ab9517c49c"
+        )
+        expected = "did:willow:zDZ1Qqspppayjd9LF3Pkebq64Fa2PuK8zFQDDc11citB2"
+
+        derived = derive_did(public_key_hex, "Ed25519")
+
+        assert derived["did"] == expected
+        assert derived["public_key_id"] == f"{expected}#key-1"
+
+    def test_derive_accepts_bytes_and_hex(self):
+        """derive_did accepts both raw bytes and a hex string."""
+        public_key_hex = (
+            "a003201e65e47d578ad9bb17cb1d3590e9f504f55eac6ee40002e3ab9517c49c"
+        )
+        from_hex = derive_did(public_key_hex, "Ed25519")
+        from_bytes = derive_did(bytes.fromhex(public_key_hex), "Ed25519")
+        assert from_hex == from_bytes
+
+    def test_did_is_derived_from_key(self):
+        """The generated DID must equal the derivation of its own public key."""
+        result = generate_did("Ed25519")
+        assert result["did"] == derive_did(result["public_key"], "Ed25519")["did"]
+
+    def test_secp256k1_did_is_derived_from_compressed_key(self):
+        """secp256k1 DID is derived from the 33-byte compressed public key."""
+        result = generate_did("secp256k1")
+        # generate_did stores the 64-byte uncompressed key; derive_did must
+        # normalise it to compressed and reproduce the same id.
+        assert result["did"] == derive_did(result["public_key"], "secp256k1")["did"]
+        assert result["did"].startswith("did:willow:z")
+
+    def test_unsupported_algorithm_raises(self):
+        with pytest.raises(ValueError, match="Unsupported algorithm"):
+            derive_did("aa" * 32, "RSA")
 
 
 class TestSignChallenge:

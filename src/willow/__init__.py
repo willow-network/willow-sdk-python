@@ -57,6 +57,7 @@ from .subscriptions import (
 )
 from .auth import (
     generate_did,
+    derive_did,
     sign_challenge,
     verify_signature,
     detect_algorithm_from_did,
@@ -310,6 +311,7 @@ __all__ = [
     "IndexingOperations",
     # Auth
     "generate_did",
+    "derive_did",
     "sign_challenge",
     "verify_signature",
     "detect_algorithm_from_did",

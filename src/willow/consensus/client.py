@@ -65,12 +65,19 @@ class ConsensusClient:
     ) -> BroadcastResult:
         """
         Register a DID on the blockchain.
-        
+
+        The chain's RegisterDid check requires ``did_document['id']`` to be the
+        self-certifying id derived from the public key (see ``derive_did``); a
+        chosen or legacy-format id is rejected. Since the id is bound to the
+        key, it must be pre-funded before registration: transfer >= the
+        registration fee to the derived id first (see ``transfer``), then call
+        this method so the fee is paid from that balance.
+
         Args:
-            did_document: DID document to register
+            did_document: DID document to register (self-certifying ``id``)
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
-            
+
         Returns:
             BroadcastResult with transaction status
         """
