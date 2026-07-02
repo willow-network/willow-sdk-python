@@ -1063,8 +1063,19 @@ class WillowClient:
     async def register_did(self, did_document: DidDocument) -> DidDocument:
         """Register a DID document.
 
+        Willow DIDs are self-certifying: the id is derived from the public key
+        (see ``generate_did`` / ``derive_did``), not chosen. Because the id is
+        known before registration, onboarding is a two-step bootstrap:
+
+        1. Pre-fund: a funded account transfers >= the registration fee to the
+           derived ``did_document.id`` (e.g. via the consensus client's
+           ``transfer``).
+        2. Register: the holder calls this method; the fee is paid from that
+           pre-funded balance.
+
         Args:
-            did_document: DID document to register
+            did_document: DID document to register (its ``id`` must be the
+                self-certifying DID derived from the key).
 
         Returns:
             Registered DID document

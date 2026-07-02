@@ -93,8 +93,20 @@ async with WillowClient("http://localhost:3031") as client:
 
 ### DID Operations
 
+Willow DIDs are **self-certifying**: the id is derived from the public key, not
+chosen. The derivation is:
+
+```
+did = "did:willow:z" + base58btc( SHA3-256( multicodec_prefix || public_key ) )
+```
+
+where `multicodec_prefix` is `0xED 0x01` for Ed25519 and `0xE7 0x01` for
+secp256k1 (hashing the 33-byte compressed key), and the leading `z` is the
+multibase base58btc marker. The chain's `RegisterDid` check recomputes this and
+rejects any other id.
+
 ```python
-from willow import generate_did
+from willow import generate_did, derive_did
 
 # Ed25519 (default)
 did_info = generate_did()
@@ -102,9 +114,23 @@ did_info = generate_did()
 # secp256k1 (Ethereum-compatible)
 did_info = generate_did(algorithm="secp256k1")
 
-await client.register_did(did_info["did_document"])
+# Derive the DID for an existing public key (hex or bytes) without a keypair:
+derived = derive_did("a003201e65e47d578ad9bb17cb1d3590e9f504f55eac6ee40002e3ab9517c49c")
+# -> {"did": "did:willow:zDZ1Qqspppayjd9LF3Pkebq64Fa2PuK8zFQDDc11citB2", ...}
 
 # did_info keys: did, private_key, public_key, public_key_id, did_document, algorithm
+```
+
+#### Onboarding: pre-fund, then register
+
+Because the id is bound to the key, it is known *before* registration and must
+be funded first:
+
+```python
+# 1. Pre-fund: a funded account sends >= the registration fee to the derived id.
+#    (e.g. via the consensus client's transfer)
+# 2. Register: the holder registers; the fee is paid from that balance.
+await client.register_did(did_info["did_document"])
 ```
 
 ### Authentication (per-request signing)
@@ -113,9 +139,9 @@ There is no server-side session. Each authenticated request is signed locally wi
 
 ```python
 client.set_identity(
-    did="did:willow:ed25519:abc123",
-    private_key_hex="your_private_key_hex",
-    public_key_id="did:willow:ed25519:abc123#key-1",
+    did=did_info["did"],
+    private_key_hex=did_info["private_key"],
+    public_key_id=did_info["public_key_id"],
 )
 
 if client.is_authenticated():

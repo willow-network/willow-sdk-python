@@ -27,6 +27,119 @@ SignatureAlgorithm = Literal["Ed25519", "secp256k1"]
 
 
 # ---------------------------------------------------------------------------
+# Self-certifying DID derivation.
+#
+# Willow DIDs are bound to the public key, not chosen. The chain's RegisterDid
+# check recomputes this exact derivation and rejects any id that does not match:
+#
+#     did = "did:willow:z" + base58btc( SHA3-256( multicodec_prefix || pubkey ) )
+#
+#   - SHA3-256 is FIPS-202 SHA3-256 (hashlib.sha3_256), NOT Keccak-256.
+#   - multicodec_prefix: Ed25519 => 0xED 0x01 ; secp256k1 => 0xE7 0x01.
+#   - secp256k1 hashes the 33-byte COMPRESSED public key.
+#   - base58btc uses the Bitcoin alphabet; each leading 0x00 byte -> '1'.
+#   - the literal leading 'z' is the multibase base58btc marker.
+# ---------------------------------------------------------------------------
+
+_BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+_MULTICODEC_PREFIX: Dict[SignatureAlgorithm, bytes] = {
+    "Ed25519": bytes([0xED, 0x01]),
+    "secp256k1": bytes([0xE7, 0x01]),
+}
+
+
+def _base58btc_encode(data: bytes) -> str:
+    """Encode bytes with the Bitcoin/base58btc alphabet.
+
+    Each leading 0x00 byte is preserved as a leading '1', matching the
+    canonical base58check/base58btc convention.
+    """
+    num = int.from_bytes(data, "big")
+    encoded = ""
+    while num > 0:
+        num, remainder = divmod(num, 58)
+        encoded = _BASE58BTC_ALPHABET[remainder] + encoded
+    # Preserve leading zero bytes as leading '1's.
+    leading_zeros = 0
+    for byte in data:
+        if byte == 0:
+            leading_zeros += 1
+        else:
+            break
+    return "1" * leading_zeros + encoded
+
+
+def _secp256k1_compress(public_key_bytes: bytes) -> bytes:
+    """Normalise a secp256k1 public key to its 33-byte compressed form.
+
+    Accepts the SDK's 64-byte uncompressed form (X || Y, no prefix), the
+    65-byte SEC1 uncompressed form (0x04 || X || Y), or an already-compressed
+    33-byte key (0x02/0x03 || X).
+    """
+    if len(public_key_bytes) == 33 and public_key_bytes[0] in (0x02, 0x03):
+        return public_key_bytes
+    if len(public_key_bytes) == 65 and public_key_bytes[0] == 0x04:
+        body = public_key_bytes[1:]
+    elif len(public_key_bytes) == 64:
+        body = public_key_bytes
+    else:
+        raise ValueError(
+            "secp256k1 public key must be 64-byte uncompressed (X||Y), "
+            "65-byte SEC1 (0x04||X||Y), or 33-byte compressed"
+        )
+    x = body[:32]
+    y = body[32:]
+    prefix = 0x02 if (y[-1] & 1) == 0 else 0x03
+    return bytes([prefix]) + x
+
+
+def _did_key_material(public_key_bytes: bytes, algorithm: SignatureAlgorithm) -> bytes:
+    """Return the key bytes that are hashed (after the multicodec prefix)."""
+    if algorithm == "Ed25519":
+        if len(public_key_bytes) != 32:
+            raise ValueError("Ed25519 public key must be 32 bytes")
+        return public_key_bytes
+    if algorithm == "secp256k1":
+        return _secp256k1_compress(public_key_bytes)
+    raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+
+def derive_did(
+    public_key: Union[bytes, str],
+    algorithm: SignatureAlgorithm = "Ed25519",
+) -> Dict[str, str]:
+    """Derive the self-certifying Willow DID for a public key.
+
+    The id is bound to the key, so anyone holding the public key can compute
+    it (this is what enables the pre-fund step of onboarding: fund the derived
+    id *before* it is registered). The chain recomputes this exact value.
+
+    Args:
+        public_key: The public key as raw ``bytes`` or a hex string. Ed25519
+            is the 32-byte key; secp256k1 may be 64-byte uncompressed (the
+            SDK's wire form), 65-byte SEC1, or 33-byte compressed (it is
+            normalised to compressed before hashing).
+        algorithm: "Ed25519" or "secp256k1".
+
+    Returns:
+        ``{"did": ..., "public_key_id": "{did}#key-1"}``
+    """
+    if isinstance(public_key, str):
+        public_key = bytes.fromhex(public_key)
+
+    try:
+        prefix = _MULTICODEC_PREFIX[algorithm]
+    except KeyError:
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
+
+    material = _did_key_material(public_key, algorithm)
+    digest = hashlib.sha3_256(prefix + material).digest()
+    did = "did:willow:z" + _base58btc_encode(digest)
+    return {"did": did, "public_key_id": f"{did}#key-1"}
+
+
+# ---------------------------------------------------------------------------
 # secp256k1 helpers backed by `cryptography`. Formats match the Willow
 # wire protocol:
 #
@@ -86,18 +199,25 @@ def _secp256k1_verify_prehashed(
 
 def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[str, DidDocument]]:
     """
-    Generate a new DID with keypair.
+    Generate a new keypair and derive its self-certifying Willow DID.
+
+    The DID is *derived* from the public key (see ``derive_did``); it is not
+    chosen. Because the id is bound to the key, onboarding is a two-step
+    bootstrap: a funded account must transfer >= the registration fee to the
+    derived ``did`` *first*, then the holder registers the DID document (the
+    fee is paid from that pre-funded balance).
 
     Args:
         algorithm: Signature algorithm to use ("Ed25519" or "secp256k1")
 
     Returns:
         Dictionary containing:
-        - did: The generated DID string
+        - did: The derived, self-certifying DID string
         - private_key: Hex-encoded private key
         - public_key: Hex-encoded public key
-        - public_key_id: Public key identifier
+        - public_key_id: Public key identifier ("{did}#key-1")
         - did_document: The DID document
+        - algorithm: The signature algorithm
     """
     if algorithm == "Ed25519":
         # Generate Ed25519 keypair using cryptography library
@@ -122,10 +242,12 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
     
-    # Create DID
-    did_suffix = public_key_bytes[:8].hex()
-    did = f"did:willow:{algorithm.lower()}:{did_suffix}"
-    public_key_id = f"{did}#key-1"
+    # Derive the self-certifying DID from the public key. The id is bound to
+    # the key (not chosen): the chain's RegisterDid check recomputes this exact
+    # value and rejects anything else. See ``derive_did`` for the derivation.
+    derived = derive_did(public_key_bytes, algorithm)
+    did = derived["did"]
+    public_key_id = derived["public_key_id"]
     
     # Create DID document
     did_document = DidDocument(
