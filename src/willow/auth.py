@@ -351,13 +351,25 @@ def verify_signature(
 
 def detect_algorithm_from_did(did: str) -> SignatureAlgorithm:
     """
-    Detect signature algorithm from DID.
+    Detect signature algorithm from a *legacy* DID string.
+
+    .. deprecated::
+        Willow DIDs are now self-certifying and no longer embed the key
+        algorithm in the string::
+
+            did:willow:z<base58btc(SHA3-256(multicodec || pubkey))>
+
+        The algorithm is therefore **not recoverable** from the DID and this
+        helper returns ``"Ed25519"`` for every self-certifying id. Do not use
+        it to pick a signing algorithm: pass the algorithm explicitly instead
+        (see ``sign_request`` and ``Client.set_identity``). It is retained only
+        to parse the retired ``did:willow:<alg>:<pubkey>`` format.
 
     Args:
         did: The DID string
 
     Returns:
-        The detected algorithm
+        The detected algorithm (``"Ed25519"`` for any self-certifying id)
     """
     if "ed25519" in did.lower():
         return "Ed25519"
@@ -373,7 +385,8 @@ def sign_request(
     private_key_hex: str,
     public_key_id: str,
     method: str,
-    path: str
+    path: str,
+    algorithm: SignatureAlgorithm = "Ed25519",
 ) -> Dict[str, str]:
     """
     Sign an HTTP request for per-request authentication.
@@ -387,13 +400,17 @@ def sign_request(
         public_key_id: Public key ID from DID document
         method: HTTP method (e.g., "GET", "POST")
         path: API path (e.g., "/data/my-subgrove/my-key")
+        algorithm: Signature algorithm of the identity ("Ed25519" or
+            "secp256k1"). Must be supplied by the caller because the
+            self-certifying DID no longer encodes it; the algorithm cannot be
+            recovered from the DID string. Defaults to "Ed25519" for backward
+            compatibility with the SDK's Ed25519-first identities.
 
     Returns:
         Dictionary of authentication headers to include in the request
     """
     timestamp = int(time.time())
     message = f"{method}:{path}:{timestamp}"
-    algorithm = detect_algorithm_from_did(did)
     signature = sign_challenge(message, private_key_hex, algorithm)
     return {
         "X-DID": did,

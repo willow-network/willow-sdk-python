@@ -8,6 +8,7 @@ from willow.auth import (
     detect_algorithm_from_did,
     generate_did,
     sign_challenge,
+    sign_request,
     verify_signature,
 )
 
@@ -246,6 +247,90 @@ class TestDetectAlgorithm:
         """Test default algorithm detection."""
         assert detect_algorithm_from_did("did:willow:unknown:abc123") == "Ed25519"
         assert detect_algorithm_from_did("did:willow:test:abc123") == "Ed25519"
+
+    def test_self_certifying_did_is_not_detectable(self):
+        """Self-certifying DIDs do not encode the algorithm.
+
+        This documents *why* the algorithm can no longer be parsed from the
+        DID: a real secp256k1 self-certifying id is (mis)detected as Ed25519.
+        Callers must therefore pass the algorithm explicitly to ``sign_request``
+        rather than relying on this helper.
+        """
+        secp_did = generate_did("secp256k1")["did"]
+        assert secp_did.startswith("did:willow:z")
+        # The truth is secp256k1, but the string carries no algorithm marker.
+        assert detect_algorithm_from_did(secp_did) == "Ed25519"
+
+
+class TestSignRequest:
+    """Test per-request auth signing selects the correct algorithm.
+
+    Willow DIDs are self-certifying (``did:willow:z...``) and no longer encode
+    the key algorithm, so ``sign_request`` takes the algorithm explicitly.
+    """
+
+    @staticmethod
+    def _message_for(headers, method, path):
+        return f"{method}:{path}:{headers['X-Timestamp']}"
+
+    def test_secp256k1_identity_signs_with_secp256k1(self):
+        """A secp256k1 identity must produce a signature that verifies as
+        secp256k1 (the regression the self-certifying migration introduced)."""
+        info = generate_did("secp256k1")
+        method, path = "POST", "/data/my-subgrove/my-key"
+
+        headers = sign_request(
+            info["did"],
+            info["private_key"],
+            info["public_key_id"],
+            method,
+            path,
+            "secp256k1",
+        )
+        message = self._message_for(headers, method, path)
+
+        # Verifies under secp256k1 (the true algorithm)...
+        assert verify_signature(
+            message, headers["X-Signature"], info["public_key"], "secp256k1"
+        )
+        # ...and would NOT have verified had it defaulted to Ed25519.
+        assert not verify_signature(
+            message, headers["X-Signature"], info["public_key"], "Ed25519"
+        )
+        assert headers["X-DID"] == info["did"]
+        assert headers["X-Public-Key-ID"] == info["public_key_id"]
+
+    def test_ed25519_identity_defaults_correctly(self):
+        """With no explicit algorithm, Ed25519 (the SDK default) is used."""
+        info = generate_did("Ed25519")
+        method, path = "GET", "/data/my-subgrove/my-key"
+
+        headers = sign_request(
+            info["did"], info["private_key"], info["public_key_id"], method, path
+        )
+        message = self._message_for(headers, method, path)
+
+        assert verify_signature(
+            message, headers["X-Signature"], info["public_key"], "Ed25519"
+        )
+
+    def test_explicit_ed25519_matches_default(self):
+        """Passing ``"Ed25519"`` explicitly is equivalent to the default."""
+        info = generate_did("Ed25519")
+        method, path = "GET", "/x"
+
+        headers = sign_request(
+            info["did"],
+            info["private_key"],
+            info["public_key_id"],
+            method,
+            path,
+            "Ed25519",
+        )
+        message = self._message_for(headers, method, path)
+        assert verify_signature(
+            message, headers["X-Signature"], info["public_key"], "Ed25519"
+        )
 
 
 class TestIntegration:
