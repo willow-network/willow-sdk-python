@@ -382,6 +382,64 @@ class TestIndexingOperations:
         assert result.verification_rate == 0.95
 
 
+class TestIncludeProofWire:
+    """Assert display/analytics read paths serialize ``include_proof`` correctly.
+
+    These are Bucket-A *Unverified paths: they must default to
+    ``include_proof=False`` on the wire (proof off) and only send ``True``
+    when the caller explicitly opts in.
+    """
+
+    @staticmethod
+    def _routed(result):
+        from willow.indexers import RoutedQueryResult, ServedBy
+        return RoutedQueryResult(result=result, source=ServedBy.INDEXER)
+
+    @pytest.mark.asyncio
+    async def test_graphql_default_off(self, client):
+        """graphql_query omits proof by default -> include_proof=False on wire."""
+        route = AsyncMock(return_value=self._routed({"data": {}, "errors": None}))
+        client._route_query = route
+
+        await client.indexing.graphql_query("sg", "query { x }")
+
+        body = route.call_args.args[2]
+        assert body["include_proof"] is False
+
+    @pytest.mark.asyncio
+    async def test_graphql_opt_in(self, client):
+        """graphql_query honors explicit include_proof=True."""
+        route = AsyncMock(return_value=self._routed({"data": {}, "errors": None}))
+        client._route_query = route
+
+        await client.indexing.graphql_query("sg", "query { x }", include_proof=True)
+
+        body = route.call_args.args[2]
+        assert body["include_proof"] is True
+
+    @pytest.mark.asyncio
+    async def test_sql_default_off(self, client):
+        """sql_query defaults to include_proof=False on the wire."""
+        route = AsyncMock(return_value=self._routed({"columns": [], "rows": []}))
+        client._route_query = route
+
+        await client.indexing.sql_query("sg", "SELECT 1")
+
+        body = route.call_args.args[2]
+        assert body["include_proof"] is False
+
+    @pytest.mark.asyncio
+    async def test_sql_opt_in(self, client):
+        """sql_query honors explicit include_proof=True."""
+        route = AsyncMock(return_value=self._routed({"columns": [], "rows": []}))
+        client._route_query = route
+
+        await client.indexing.sql_query("sg", "SELECT 1", include_proof=True)
+
+        body = route.call_args.args[2]
+        assert body["include_proof"] is True
+
+
 class TestHealthAndRootHash:
     """Test health and root hash operations."""
 

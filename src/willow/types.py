@@ -512,6 +512,7 @@ class GraphQLRequest(BaseModel):
     """GraphQL query request."""
     query: str
     variables: Optional[Dict[str, Any]] = None
+    include_proof: Optional[bool] = None
 
 
 class GraphQLError(BaseModel):
