@@ -636,6 +636,7 @@ class IndexingOperations:
         subgrove_id: str,
         query: str,
         variables: Optional[Dict[str, Any]] = None,
+        include_proof: bool = False,
         source: QuerySource = QuerySource.AUTO,
     ) -> RoutedQueryResult[GraphQLResponse]:
         """Execute a GraphQL query against a subgrove with source routing.
@@ -654,6 +655,7 @@ class IndexingOperations:
             subgrove_id: Subgrove identifier
             query: GraphQL query string
             variables: Optional query variables
+            include_proof: Whether to request a Merkle proof (default: ``False``)
             source: Routing preference (default: ``AUTO``)
 
         Returns:
@@ -663,6 +665,7 @@ class IndexingOperations:
         request_data: Dict[str, Any] = {"query": query}
         if variables:
             request_data["variables"] = variables
+        request_data["include_proof"] = include_proof
 
         raw = await self.client._route_query(
             "graphql", subgrove_id, request_data, source
@@ -678,7 +681,7 @@ class IndexingOperations:
         self,
         subgrove_id: str,
         query: str,
-        include_proof: bool = True,
+        include_proof: bool = False,
         source: QuerySource = QuerySource.AUTO,
     ) -> RoutedQueryResult[SqlResponse]:
         """Execute a SQL query against a subgrove with source routing.
