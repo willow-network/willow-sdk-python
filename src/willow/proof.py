@@ -103,7 +103,7 @@ class GroveDBProofVerifier:
                     error="Empty proof provided"
                 )
 
-            return self._verify(proof_bytes)
+            return self._verify(proof_bytes, self._expected_path(path_query))
 
         except ValueError as e:
             return ProofVerificationResult(
@@ -140,7 +140,19 @@ class GroveDBProofVerifier:
 
         return await self.verify_query_proof(proof_hex, documents, path_query)
 
-    def _verify(self, proof_bytes: bytes) -> ProofVerificationResult:
+    @staticmethod
+    def _expected_path(path_query: Optional[PathQueryData]) -> Optional[List[bytes]]:
+        # A non-empty path is required to descend; [] keeps the legacy
+        # behaviour for root-level items.
+        if path_query is None or not path_query.path:
+            return None
+        return [seg.encode() for seg in path_query.path]
+
+    def _verify(
+        self,
+        proof_bytes: bytes,
+        expected_path: Optional[List[bytes]] = None,
+    ) -> ProofVerificationResult:
         """
         Verify proof bytes and return result.
 
@@ -153,7 +165,8 @@ class GroveDBProofVerifier:
         try:
             grovedb_options = GroveDBVerifyOptions(
                 limit=self.options.limit,
-                deserialize_elements=self.options.deserialize_elements
+                deserialize_elements=self.options.deserialize_elements,
+                expected_path=expected_path,
             )
 
             if self.options.expected_root_hash:

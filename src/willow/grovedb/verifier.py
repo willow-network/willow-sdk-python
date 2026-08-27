@@ -26,6 +26,44 @@ class VerifyOptions:
     """Options for proof verification."""
     limit: Optional[int] = None
     deserialize_elements: bool = True
+    # The GroveDB path the query was made at. When set, the proof envelope
+    # must carry a lower layer for every segment (see check_envelope); without
+    # it an empty result set at that path cannot be told apart from a proof
+    # whose subtree was silently dropped.
+    expected_path: Optional[List[bytes]] = None
+
+
+def check_envelope(proof: GroveDBProof, expected_path: List[bytes]) -> None:
+    """
+    The check grovedb's own verifier does not make. The verifier finds the
+    next layer by the envelope's `lower_layers` map KEY, which is not
+    hash-bound: a prover who renames or drops the entry for a subtree on the
+    query path gets the same root hash with that subtree's results silently
+    gone, so a proof of "K = V" verifies as "K is absent". Requiring a layer
+    for every path segment closes it (once a layer is present its root is
+    hash-bound to the parent). `prove_options` is prover-chosen bytes that
+    steer limit accounting, so it is pinned to the default the chain's prover
+    uses.
+    """
+    if proof.version != 0:
+        raise GroveDBVerificationError(f"Unsupported proof version: {proof.version}")
+    _check_prove_options(proof)
+    layer = proof.proof.root_layer
+    for i, seg in enumerate(expected_path):
+        nxt = layer.lower_layers.get(bytes_to_hex(seg))
+        if nxt is None:
+            raise GroveDBVerificationError(
+                f"envelope: no lower layer for path segment {i} ({seg!r}); "
+                "the proof does not descend to the query path"
+            )
+        layer = nxt
+    if layer.lower_layers:
+        raise GroveDBVerificationError("envelope: unexpected lower layers below the query path")
+
+
+def _check_prove_options(proof: GroveDBProof) -> None:
+    if not proof.proof.prove_options.decrease_limit_on_empty_sub_query_result:
+        raise GroveDBVerificationError("envelope: non-default prove_options")
 
 
 def verify_grovedb_proof(
@@ -56,6 +94,9 @@ def _verify_proof(
     """Verify a decoded GroveDB proof."""
     if proof.version != 0:
         raise GroveDBVerificationError(f"Unsupported proof version: {proof.version}")
+    _check_prove_options(proof)
+    if options.expected_path is not None:
+        check_envelope(proof, options.expected_path)
 
     results: List[Dict[str, Any]] = []
     limit = options.limit
