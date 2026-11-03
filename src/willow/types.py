@@ -6,7 +6,7 @@ indexing-related structures.
 """
 
 from typing import Dict, List, Optional, Any, Literal, Union
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from enum import Enum
 
 
@@ -30,6 +30,7 @@ class ValidatorStatus(str, Enum):
 
 class SubgroveStatus(str, Enum):
     """Subgrove status."""
+    ACTIVE = "active"
     SYNCING = "syncing"
     SYNCED = "synced"
     PAUSED = "paused"
@@ -436,11 +437,15 @@ class TokenInfo(BaseModel):
 
 
 class BalanceInfo(BaseModel):
-    """Balance information for a DID or app."""
-    account: str
-    balance: int
+    """Balance information for a DID or subgrove.
+
+    Reads both API shapes: a DID's ``{did, available, staked, locked}`` and a
+    subgrove's ``{subgrove_id, balance, total_spent, last_funded}``.
+    """
+    account: str = Field(validation_alias=AliasChoices("account", "did", "subgrove_id"))
+    balance: int = Field(validation_alias=AliasChoices("balance", "available"))
     staked: int = 0
-    unbonding: int = 0
+    unbonding: int = Field(0, validation_alias=AliasChoices("unbonding", "locked"))
 
 
 class TransferRequest(BaseModel):
@@ -584,17 +589,31 @@ class SubgroveInfo(BaseModel):
     status: SubgroveStatus
     latest_block: int = Field(alias="latest_block")
     indexers: List[str] = Field(default_factory=list)
+    #: Willow chain height at which the subgrove was registered.
+    deployment_block: Optional[int] = None
+    #: Chain the subgrove indexes (e.g. ``mainnet``); ``None`` for others.
+    chain: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 
 
 class SubgroveIndexingStatus(BaseModel):
-    """Subgrove indexing status with detailed progress."""
+    """Subgrove indexing status.
+
+    ``GET /subgroves/{id}/status`` answers ``subgrove_id``, ``owner_did``,
+    ``deployment_block``, ``total_queries``, ``active_indexers`` (a count),
+    and ``status`` ("indexing" or "pending_indexers"). The progress fields
+    are ``None`` unless a server reports them.
+    """
     subgrove_id: str = Field(alias="subgrove_id")
-    synced_block: int = Field(alias="synced_block")
-    target_block: int = Field(alias="target_block")
-    progress_percentage: float = Field(alias="progress_percentage")
     status: str
+    owner_did: Optional[str] = None
+    deployment_block: Optional[int] = None
+    total_queries: Optional[int] = None
+    active_indexers: Optional[int] = None
+    synced_block: Optional[int] = Field(None, alias="synced_block")
+    target_block: Optional[int] = Field(None, alias="target_block")
+    progress_percentage: Optional[float] = Field(None, alias="progress_percentage")
     last_error: Optional[str] = Field(None, alias="last_error")
 
     model_config = {"populate_by_name": True}
@@ -681,6 +700,15 @@ class VerifyProofResponse(BaseModel):
 # Identity Extensions
 # ============================================================================
 
+class Permission(BaseModel):
+    """A role a DID holds on a subgrove, as ``GET /did/{did}/permissions`` lists it."""
+    did: str
+    subgrove_id: str
+    role: PermissionRole
+    granted_by: str
+    granted_at: int
+
+
 class DidPermissions(BaseModel):
     """DID permissions response."""
     did: str
@@ -688,8 +716,25 @@ class DidPermissions(BaseModel):
     admin_subgroves: List[str] = Field(default_factory=list, alias="admin_subgroves")
     write_access: List[str] = Field(default_factory=list, alias="write_access")
     read_access: List[str] = Field(default_factory=list, alias="read_access")
+    #: Each grant as the API returns it.
+    permissions: List[Permission] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
+
+    @classmethod
+    def from_permissions(cls, did: str, permissions: List[Permission]) -> "DidPermissions":
+        """Group a DID's grants by role."""
+        by_role: Dict[PermissionRole, List[str]] = {role: [] for role in PermissionRole}
+        for permission in permissions:
+            by_role[permission.role].append(permission.subgrove_id)
+        return cls(
+            did=did,
+            owned_subgroves=by_role[PermissionRole.OWNER],
+            admin_subgroves=by_role[PermissionRole.ADMIN],
+            write_access=by_role[PermissionRole.WRITER],
+            read_access=by_role[PermissionRole.READER],
+            permissions=permissions,
+        )
 
 
 # ============================================================================

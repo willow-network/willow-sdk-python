@@ -30,7 +30,12 @@ class TestGenerateDid:
         did_doc = result["did_document"]
         assert did_doc.id == result["did"]
         assert len(did_doc.public_keys) == 1
-        assert did_doc.public_keys[0].key_type == "Ed25519VerificationKey2020"
+        # The key type, controller, and authentication entry the server needs
+        # to verify a request signed by this key.
+        assert did_doc.public_keys[0].key_type == "Ed25519VerificationKey2018"
+        assert did_doc.public_keys[0].controller == result["did"]
+        assert did_doc.public_keys[0].public_key_hex == result["public_key"]
+        assert did_doc.authentication == [result["public_key_id"]]
     
     def test_generate_secp256k1_did(self):
         """Test secp256k1 DID generation."""
@@ -38,12 +43,17 @@ class TestGenerateDid:
 
         assert result["did"].startswith("did:willow:z")
         assert len(result["private_key"]) == 64  # 32 bytes hex
-        assert len(result["public_key"]) == 128  # 64 bytes hex (uncompressed)
+        # 33-byte compressed: the server can't parse a 64-byte X || Y key.
+        assert len(result["public_key"]) == 66
+        assert result["public_key"][:2] in ("02", "03")
         assert result["algorithm"] == "secp256k1"
-        
+
         # Verify DID document
         did_doc = result["did_document"]
-        assert did_doc.public_keys[0].key_type == "secp256k1VerificationKey2020"
+        assert did_doc.public_keys[0].key_type == "EcdsaSecp256k1VerificationKey2019"
+        assert did_doc.public_keys[0].controller == result["did"]
+        assert did_doc.public_keys[0].public_key_hex == result["public_key"]
+        assert did_doc.authentication == [result["public_key_id"]]
     
     def test_generate_unique_dids(self):
         """Test that generated DIDs are unique."""
@@ -94,8 +104,6 @@ class TestSelfCertifyingDid:
     def test_secp256k1_did_is_derived_from_compressed_key(self):
         """secp256k1 DID is derived from the 33-byte compressed public key."""
         result = generate_did("secp256k1")
-        # generate_did stores the 64-byte uncompressed key; derive_did must
-        # normalise it to compressed and reproduce the same id.
         assert result["did"] == derive_did(result["public_key"], "secp256k1")["did"]
         assert result["did"].startswith("did:willow:z")
 

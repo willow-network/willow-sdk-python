@@ -217,37 +217,59 @@ class TestValidatorOperations:
         assert result.validator_did == "did:willow:validator1"
         assert result.stake_amount == 100000
 
+    # GET /validators, as the API answers it: the active, unjailed validators.
+    ACTIVE_VALIDATORS = {
+        "success": True,
+        "data": [
+            {
+                "did": "did:willow:validator1",
+                "total_stake": 100000000000000000000000,
+                "self_stake": 100000000000000000000000,
+                "active": True,
+                "jailed": False,
+                "jail_end_time": None,
+                "consensus_pubkey": "7KoBf++aEL/Py579EMbPNGslpmHz40rcCSRJV937S4w=",
+            },
+            {
+                "did": "did:willow:validator2",
+                "total_stake": 5,
+                "self_stake": 5,
+                "active": True,
+                "jailed": False,
+                "jail_end_time": None,
+                "consensus_pubkey": None,
+            },
+        ],
+        "error": None,
+    }
+
     @pytest.mark.asyncio
     async def test_get_total_staked(self, client, mock_http_client):
-        """Test get total staked."""
+        """The total is summed from GET /validators (there is no total route)."""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "success": True,
-            "data": {"total_staked": 1000000}
-        }
+        mock_response.json.return_value = self.ACTIVE_VALIDATORS
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
         result = await client.validators.get_total_staked()
 
-        assert result == 1000000
+        assert result == 100000000000000000000005
+        assert mock_http_client.request.call_args.args[1] == "http://localhost:3031/validators"
 
     @pytest.mark.asyncio
     async def test_get_active_count(self, client, mock_http_client):
-        """Test get active validator count."""
+        """The count is read from GET /validators (there is no count route)."""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "success": True,
-            "data": {"count": 10}
-        }
+        mock_response.json.return_value = self.ACTIVE_VALIDATORS
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
         result = await client.validators.get_active_count()
 
-        assert result == 10
+        assert result == 2
+        assert mock_http_client.request.call_args.args[1] == "http://localhost:3031/validators"
 
 
 class TestIndexingOperations:
@@ -586,27 +608,46 @@ class TestRegistrationOperationsExtended:
 
     @pytest.mark.asyncio
     async def test_get_permissions(self, client, mock_http_client):
-        """Test get permissions."""
+        """GET /did/{did}/permissions answers a list of grants, grouped by role."""
+        def grant(subgrove_id, role):
+            return {
+                "did": "did:willow:test",
+                "subgrove_id": subgrove_id,
+                "role": role,
+                "granted_by": "did:willow:owner",
+                "granted_at": 1234567890,
+            }
+
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "success": True,
-            "data": {
-                "did": "did:willow:test",
-                "owned_subgroves": ["subgrove-1"],
-                "admin_subgroves": ["subgrove-2"],
-                "write_access": ["subgrove-1"],
-                "read_access": ["subgrove-3"]
-            }
+            "data": [
+                grant("subgrove-1", "owner"),
+                grant("subgrove-2", "admin"),
+                grant("subgrove-4", "writer"),
+                grant("subgrove-3", "reader"),
+            ],
+            "error": None,
         }
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
         result = await client.registration.get_permissions("did:willow:test")
 
+        assert (
+            mock_http_client.request.call_args.args[1]
+            == "http://localhost:3031/did/did:willow:test/permissions"
+        )
         assert isinstance(result, DidPermissions)
-        assert "subgrove-1" in result.owned_subgroves
-        assert "subgrove-2" in result.admin_subgroves
+        assert result.did == "did:willow:test"
+        assert result.owned_subgroves == ["subgrove-1"]
+        assert result.admin_subgroves == ["subgrove-2"]
+        assert result.write_access == ["subgrove-4"]
+        assert result.read_access == ["subgrove-3"]
+        assert [p.subgrove_id for p in result.permissions] == [
+            "subgrove-1", "subgrove-2", "subgrove-4", "subgrove-3"
+        ]
 
 
 class TestClientBuilder:

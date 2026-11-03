@@ -92,10 +92,11 @@ async def main():
         print("-" * 40)
         try:
             status = await client.indexing.get_indexing_status("uniswap-v3-mainnet")
-            print(f"Synced block: {status.synced_block}")
-            print(f"Target block: {status.target_block}")
-            print(f"Progress: {status.progress_percentage:.1f}%")
             print(f"Status: {status.status}")
+            print(f"Active indexers: {status.active_indexers}")
+            print(f"Deployment block: {status.deployment_block}")
+            if status.progress_percentage is not None:
+                print(f"Progress: {status.progress_percentage:.1f}%")
             if status.last_error:
                 print(f"Last error: {status.last_error}")
         except WillowError as e:

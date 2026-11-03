@@ -61,6 +61,11 @@ from .auth import (
     sign_challenge,
     verify_signature,
     detect_algorithm_from_did,
+    sign_request,
+    sign_request_with_nonce,
+    signed_request_message,
+    legacy_request_message,
+    new_request_nonce,
 )
 from .errors import (
     WillowError,
@@ -155,6 +160,7 @@ from .types import (
     VerifyProofResponse,
     # Identity Extensions
     DidPermissions,
+    Permission,
     # Health / Status Types
     ComponentHealth,
     HealthStatus,
@@ -315,6 +321,11 @@ __all__ = [
     "sign_challenge",
     "verify_signature",
     "detect_algorithm_from_did",
+    "sign_request",
+    "sign_request_with_nonce",
+    "signed_request_message",
+    "legacy_request_message",
+    "new_request_nonce",
     # Errors
     "WillowError",
     "NetworkError",
@@ -402,6 +413,7 @@ __all__ = [
     "VerifyProofResponse",
     # Identity Extensions
     "DidPermissions",
+    "Permission",
     # Health / Status Types
     "ComponentHealth",
     "HealthStatus",

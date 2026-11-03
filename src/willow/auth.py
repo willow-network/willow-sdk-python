@@ -3,9 +3,10 @@
 import os
 import time
 import hashlib
+import secrets
 from typing import Dict, Literal, Optional, Union
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -73,9 +74,9 @@ def _base58btc_encode(data: bytes) -> str:
 def _secp256k1_compress(public_key_bytes: bytes) -> bytes:
     """Normalise a secp256k1 public key to its 33-byte compressed form.
 
-    Accepts the SDK's 64-byte uncompressed form (X || Y, no prefix), the
-    65-byte SEC1 uncompressed form (0x04 || X || Y), or an already-compressed
-    33-byte key (0x02/0x03 || X).
+    Accepts the 64-byte uncompressed form older versions of this SDK
+    generated (X || Y, no prefix), the 65-byte SEC1 uncompressed form
+    (0x04 || X || Y), or an already-compressed 33-byte key (0x02/0x03 || X).
     """
     if len(public_key_bytes) == 33 and public_key_bytes[0] in (0x02, 0x03):
         return public_key_bytes
@@ -117,9 +118,9 @@ def derive_did(
 
     Args:
         public_key: The public key as raw ``bytes`` or a hex string. Ed25519
-            is the 32-byte key; secp256k1 may be 64-byte uncompressed (the
-            SDK's wire form), 65-byte SEC1, or 33-byte compressed (it is
-            normalised to compressed before hashing).
+            is the 32-byte key; secp256k1 may be 33-byte compressed (what
+            ``generate_did`` publishes), 65-byte SEC1, or 64-byte X || Y (it
+            is normalised to compressed before hashing).
         algorithm: "Ed25519" or "secp256k1".
 
     Returns:
@@ -143,55 +144,95 @@ def derive_did(
 # secp256k1 helpers backed by `cryptography`. Formats match the Willow
 # wire protocol:
 #
-#   - public keys:  64-byte uncompressed (X || Y), no 0x04 prefix
-#   - signatures:   64-byte compact (r || s)
+#   - public keys:  33-byte compressed (0x02/0x03 || X), a form the server
+#                   reads from a DID document. Verification also accepts the
+#                   65-byte SEC1 form and the 64-byte X || Y form older
+#                   versions of this SDK published.
+#   - signatures:   64-byte compact (r || s), lower-S, over the Keccak-256
+#                   (Ethereum's hash, not FIPS-202 SHA3-256) of the message
 #   - message input: the caller pre-hashes (we sign/verify the raw digest)
 # ---------------------------------------------------------------------------
 
+# The order of the secp256k1 group.
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_HALF_N = _SECP256K1_N // 2
+
+# Key types the server verifies, by algorithm.
+_KEY_TYPES: Dict[SignatureAlgorithm, str] = {
+    "Ed25519": "Ed25519VerificationKey2018",
+    "secp256k1": "EcdsaSecp256k1VerificationKey2019",
+}
+
 
 def _secp256k1_public_key_bytes_from_private(private_key_bytes: bytes) -> bytes:
-    """Derive a 64-byte uncompressed public key (X || Y) from a 32-byte private key."""
+    """Derive the 33-byte compressed public key from a 32-byte private key."""
     private_int = int.from_bytes(private_key_bytes, "big")
     private_key = ec.derive_private_key(private_int, ec.SECP256K1())
-    pub = private_key.public_key().public_numbers()
-    return pub.x.to_bytes(32, "big") + pub.y.to_bytes(32, "big")
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint
+    )
+
+
+def _secp256k1_public_key(public_key_bytes: bytes) -> ec.EllipticCurvePublicKey:
+    """Parse a secp256k1 public key: 33-byte compressed, 65-byte SEC1
+    uncompressed, or the 64-byte X || Y form. Raises ValueError otherwise."""
+    if len(public_key_bytes) == 64:
+        public_key_bytes = b"\x04" + public_key_bytes
+    if len(public_key_bytes) not in (33, 65):
+        raise ValueError("secp256k1 public key must be 33, 64, or 65 bytes")
+    return ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), public_key_bytes)
 
 
 def _secp256k1_sign_prehashed(private_key_bytes: bytes, digest: bytes) -> bytes:
     """Sign a 32-byte digest with secp256k1, returning a 64-byte compact (r || s) signature.
 
+    The nonce is RFC 6979 deterministic where the installed `cryptography`
+    supports it, and s is normalised to the lower half of the order: the
+    server, like libsecp256k1, refuses a signature with a high s.
+
     The caller is responsible for hashing (we use Prehashed to tell
-    `cryptography` the input is already a digest). SHA256 is passed as the
-    declared pre-hash algorithm purely because both SHA256 and Keccak-256
-    produce 32-byte outputs and `cryptography` only uses the algorithm to
-    validate the input length.
+    `cryptography` the input is already a digest). SHA256 is the declared
+    pre-hash algorithm because `cryptography` uses it to check the digest's
+    length and, for RFC 6979, as the HMAC hash, as libsecp256k1 does.
     """
     private_int = int.from_bytes(private_key_bytes, "big")
     private_key = ec.derive_private_key(private_int, ec.SECP256K1())
-    signature_der = private_key.sign(digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+    try:
+        signature_der = private_key.sign(
+            digest, ec.ECDSA(Prehashed(hashes.SHA256()), deterministic_signing=True)
+        )
+    except (TypeError, UnsupportedAlgorithm):
+        # An older `cryptography`, or an OpenSSL without RFC 6979: a random nonce.
+        signature_der = private_key.sign(digest, ec.ECDSA(Prehashed(hashes.SHA256())))
     r, s = decode_dss_signature(signature_der)
+    if s > _SECP256K1_HALF_N:
+        s = _SECP256K1_N - s
     return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
 
 def _secp256k1_verify_prehashed(
-    public_key_bytes: bytes, digest: bytes, signature_compact: bytes
+    public_key_bytes: bytes, digest: bytes, signature: bytes
 ) -> bool:
-    """Verify a 64-byte compact signature against a 64-byte uncompressed public key.
+    """Verify a secp256k1 signature over a 32-byte digest as the server does.
 
-    `public_key_bytes` must be 64 bytes (X || Y, no 0x04 prefix).
-    `signature_compact` must be 64 bytes (r || s).
+    `signature` is a 64-byte compact r || s, or else DER; a signature with a
+    high s is refused. `public_key_bytes` is any form `_secp256k1_public_key`
+    reads.
     """
-    if len(public_key_bytes) != 64 or len(signature_compact) != 64:
-        return False
     try:
-        x = int.from_bytes(public_key_bytes[:32], "big")
-        y = int.from_bytes(public_key_bytes[32:], "big")
-        public_numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256K1())
-        public_key = public_numbers.public_key()
-        r = int.from_bytes(signature_compact[:32], "big")
-        s = int.from_bytes(signature_compact[32:], "big")
-        signature_der = encode_dss_signature(r, s)
-        public_key.verify(signature_der, digest, ec.ECDSA(Prehashed(hashes.SHA256())))
+        public_key = _secp256k1_public_key(public_key_bytes)
+        if len(signature) == 64:
+            r = int.from_bytes(signature[:32], "big")
+            s = int.from_bytes(signature[32:], "big")
+        else:
+            r, s = decode_dss_signature(signature)
+            if encode_dss_signature(r, s) != signature:
+                return False
+        if not (0 < r < _SECP256K1_N and 0 < s <= _SECP256K1_HALF_N):
+            return False
+        public_key.verify(
+            encode_dss_signature(r, s), digest, ec.ECDSA(Prehashed(hashes.SHA256()))
+        )
         return True
     except (InvalidSignature, ValueError):
         return False
@@ -214,9 +255,10 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
         Dictionary containing:
         - did: The derived, self-certifying DID string
         - private_key: Hex-encoded private key
-        - public_key: Hex-encoded public key
+        - public_key: Hex-encoded public key (secp256k1: 33-byte compressed)
         - public_key_id: Public key identifier ("{did}#key-1")
-        - did_document: The DID document
+        - did_document: The DID document, with the key listed for
+          authentication so it can sign requests
         - algorithm: The signature algorithm
     """
     if algorithm == "Ed25519":
@@ -235,7 +277,8 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
         )
         
     elif algorithm == "secp256k1":
-        # Generate secp256k1 keypair (Ethereum compatible)
+        # Generate secp256k1 keypair (Ethereum compatible). The public key is
+        # the 33-byte compressed form: the server can't parse 64-byte X || Y.
         private_key_bytes = os.urandom(32)
         public_key_bytes = _secp256k1_public_key_bytes_from_private(private_key_bytes)
 
@@ -249,18 +292,22 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
     did = derived["did"]
     public_key_id = derived["public_key_id"]
     
-    # Create DID document
+    # Create DID document. The server verifies a request only by a key of a
+    # type it knows that the document lists for authentication.
+    now = int(time.time())
     did_document = DidDocument(
         id=did,
         public_keys=[
             PublicKey(
                 id=public_key_id,
-                key_type=f"{algorithm}VerificationKey2020",
+                key_type=_KEY_TYPES[algorithm],
+                controller=did,
                 public_key_hex=public_key_bytes.hex()
             )
         ],
-        created=int(time.time()),
-        updated=int(time.time())
+        authentication=[public_key_id],
+        created=now,
+        updated=now
     )
     
     return {
@@ -271,6 +318,10 @@ def generate_did(algorithm: SignatureAlgorithm = "Ed25519") -> Dict[str, Union[s
         "did_document": did_document,
         "algorithm": algorithm
     }
+
+
+def _strip_0x(value: str) -> str:
+    return value[2:] if value.startswith(("0x", "0X")) else value
 
 
 def sign_challenge(
@@ -286,8 +337,15 @@ def sign_challenge(
         private_key_hex: Hex-encoded private key
         algorithm: Signature algorithm
 
+    Ed25519 signs the message's UTF-8 bytes. secp256k1 signs their
+    Keccak-256 (Ethereum's hash, not FIPS-202 SHA3-256), as the server
+    verifies every secp256k1 signature, and returns a 64-byte compact r || s
+    with a low s.
+
     Returns:
-        Hex-encoded signature
+        Hex-encoded signature, with no ``0x`` prefix. (A request signature
+        sent in ``X-Signature`` is encoded by ``sign_request`` and
+        ``sign_request_with_nonce``, which prefix secp256k1 with ``0x``.)
     """
     message_bytes = message.encode('utf-8')
     private_key_bytes = bytes.fromhex(private_key_hex)
@@ -318,8 +376,12 @@ def verify_signature(
 
     Args:
         message: The original message
-        signature_hex: Hex-encoded signature
-        public_key_hex: Hex-encoded public key
+        signature_hex: Hex-encoded signature, with or without a ``0x``
+            prefix. secp256k1 takes a 64-byte compact r || s or DER, with a
+            low s, over the Keccak-256 of the message, as the server does.
+        public_key_hex: Hex-encoded public key. secp256k1 takes the 33-byte
+            compressed form, the 65-byte SEC1 form, or the 64-byte X || Y
+            form older versions of this SDK generated.
         algorithm: Signature algorithm
 
     Returns:
@@ -327,8 +389,8 @@ def verify_signature(
     """
     try:
         message_bytes = message.encode('utf-8')
-        signature_bytes = bytes.fromhex(signature_hex)
-        public_key_bytes = bytes.fromhex(public_key_hex)
+        signature_bytes = bytes.fromhex(_strip_0x(signature_hex))
+        public_key_bytes = bytes.fromhex(_strip_0x(public_key_hex))
 
         if algorithm == "Ed25519":
             public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
@@ -380,6 +442,135 @@ def detect_algorithm_from_did(did: str) -> SignatureAlgorithm:
         return "Ed25519"
 
 
+# ---------------------------------------------------------------------------
+# Request signing.
+#
+# The API server reads X-DID, X-Public-Key-ID, X-Signature, X-Timestamp,
+# and, optionally, X-Nonce. With X-Nonce, the signature is over the eight
+# lines of ``signed_request_message``: the whole request, accepted once. That
+# is the only form that carries the DID's read rights. Without it, the
+# signature is over ``{METHOD}:{PATH}:{TIMESTAMP}``
+# (``legacy_request_message``), which proves the DID but carries no read
+# rights and can be replayed with any body until the timestamp expires.
+# ---------------------------------------------------------------------------
+
+REQUEST_SIGNATURE_VERSION = "willow-request-v2"
+
+
+def signed_request_message(
+    did: str,
+    public_key_id: str,
+    method: str,
+    path_and_query: str,
+    timestamp: Union[int, str],
+    nonce: str,
+    body: Optional[bytes] = None,
+) -> str:
+    """The message a nonce-signed request signs.
+
+    A version line, then one per line: the DID, its key's id, the method, the
+    path and query exactly as the server receives them, the Unix timestamp,
+    the nonce, and the lowercase hex SHA-256 of the exact body bytes (of no
+    bytes, for a request without a body). Lines are joined with ``\\n``, with
+    no trailing newline.
+    """
+    return "\n".join(
+        [
+            REQUEST_SIGNATURE_VERSION,
+            did,
+            public_key_id,
+            method,
+            path_and_query,
+            str(timestamp),
+            nonce,
+            hashlib.sha256(_body_bytes(body)).hexdigest(),
+        ]
+    )
+
+
+def legacy_request_message(method: str, path: str, timestamp: Union[int, str]) -> str:
+    """The message ``sign_request`` signs: ``{METHOD}:{PATH}:{TIMESTAMP}``.
+
+    The server verifies this form over the request's path alone, so anything
+    from the first ``?`` in ``path`` is left out.
+    """
+    return f"{method}:{path.split('?', 1)[0]}:{timestamp}"
+
+
+def new_request_nonce() -> str:
+    """A fresh nonce for a nonce-signed request: 32 hex characters from 16
+    random bytes. The server accepts 16 to 128 characters of
+    ``A-Z a-z 0-9 - _``, and each (DID, nonce) once."""
+    return secrets.token_hex(16)
+
+
+def sign_request_with_nonce(
+    did: str,
+    private_key_hex: str,
+    public_key_id: str,
+    method: str,
+    path_and_query: str,
+    body: Optional[bytes] = None,
+    algorithm: SignatureAlgorithm = "Ed25519",
+) -> Dict[str, str]:
+    """Sign a request with a one-time nonce over the whole request.
+
+    Only this form carries the DID's read rights: a Reader permission on a
+    subgrove, or a place on a priced subgrove's free-reader list.
+
+    Args:
+        did: The DID to authenticate as
+        private_key_hex: Hex-encoded private key
+        public_key_id: Public key ID from the DID document (it must be listed
+            in the document's ``authentication``)
+        method: HTTP method, as sent (e.g. "POST")
+        path_and_query: The request target exactly as the server receives it,
+            query string included and URL-encoded as on the wire
+            (e.g. "/query/my-subgrove?x=1")
+        body: The exact body bytes sent (``None`` or ``b""`` for none)
+        algorithm: Signature algorithm of the identity
+
+    Returns:
+        Headers to send: X-DID, X-Public-Key-ID, X-Signature, X-Timestamp,
+        and X-Nonce. The server accepts the timestamp for 300 seconds and the
+        nonce once, so sign each attempt of a retried request anew.
+    """
+    return _sign_request_with_nonce_at(
+        did,
+        private_key_hex,
+        public_key_id,
+        method,
+        path_and_query,
+        body,
+        algorithm,
+        timestamp=int(time.time()),
+        nonce=new_request_nonce(),
+    )
+
+
+def _sign_request_with_nonce_at(
+    did: str,
+    private_key_hex: str,
+    public_key_id: str,
+    method: str,
+    path_and_query: str,
+    body: Optional[bytes],
+    algorithm: SignatureAlgorithm,
+    timestamp: Union[int, str],
+    nonce: str,
+) -> Dict[str, str]:
+    message = signed_request_message(
+        did, public_key_id, method, path_and_query, timestamp, nonce, body
+    )
+    return {
+        "X-DID": did,
+        "X-Public-Key-ID": public_key_id,
+        "X-Signature": _sign_request_message(message, private_key_hex, algorithm),
+        "X-Timestamp": str(timestamp),
+        "X-Nonce": nonce,
+    }
+
+
 def sign_request(
     did: str,
     private_key_hex: str,
@@ -389,10 +580,18 @@ def sign_request(
     algorithm: SignatureAlgorithm = "Ed25519",
 ) -> Dict[str, str]:
     """
-    Sign an HTTP request for per-request authentication.
+    Sign a request in the server's older ``{METHOD}:{PATH}:{TIMESTAMP}`` form.
 
-    Creates a timestamp-based signature over the request method and path,
-    returning headers that should be included in the HTTP request.
+    PATH is the path alone: the server verifies this form over the request's
+    path without its query, so any query string in ``path`` is left out of
+    the message (see ``legacy_request_message``).
+
+    This form proves the DID but carries none of its read rights, and anyone
+    who sees it can replay it with any body until the timestamp expires (300
+    seconds). ``WillowClient`` signs its ``GET /data``, ``GET /proof``, and
+    ``POST /query``, ``/sql``, and ``/graphql`` reads sent to the API with
+    ``sign_request_with_nonce``, and its other authenticated requests,
+    indexer reads included, with this form.
 
     Args:
         did: The DID to authenticate as
@@ -410,14 +609,34 @@ def sign_request(
         Dictionary of authentication headers to include in the request
     """
     timestamp = int(time.time())
-    message = f"{method}:{path}:{timestamp}"
-    signature = sign_challenge(message, private_key_hex, algorithm)
+    message = legacy_request_message(method, path, timestamp)
     return {
         "X-DID": did,
         "X-Public-Key-ID": public_key_id,
-        "X-Signature": signature,
+        "X-Signature": _sign_request_message(message, private_key_hex, algorithm),
         "X-Timestamp": str(timestamp),
     }
+
+
+def _sign_request_message(
+    message: str, private_key_hex: str, algorithm: SignatureAlgorithm
+) -> str:
+    """Sign a request message, encoded as the server decodes X-Signature:
+    Ed25519 as hex, secp256k1 as ``0x``-prefixed hex. The server reads an
+    unprefixed secp256k1 signature as base64 first, and most hex strings are
+    valid base64."""
+    signature = sign_challenge(message, private_key_hex, algorithm)
+    if algorithm == "secp256k1":
+        return "0x" + signature
+    return signature
+
+
+def _body_bytes(body: Optional[Union[bytes, bytearray, str]]) -> bytes:
+    if body is None:
+        return b""
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    return bytes(body)
 
 
 # Alias for sign_challenge - used by consensus client

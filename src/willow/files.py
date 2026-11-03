@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from .errors import TransactionError
+
 DEFAULT_CHUNK_SIZE = 262_144  # 256 KB
 
 
@@ -88,7 +90,8 @@ class FileOperations:
             message = f"store_file:{subgrove_id}:{file_key}:{content_hash}:{len(data)}"
             signature = signing["sign_function"](message, signing["private_key"])
 
-        # Submit StoreFileManifestTx to consensus
+        # Submit StoreFileManifestTx to consensus. /tx/submit reads byte
+        # fields ([u8; 32], Vec<u8>) as JSON arrays of numbers.
         manifest_tx = {
             "StoreFileManifest": {
                 "subgrove_id": subgrove_id,
@@ -96,23 +99,17 @@ class FileOperations:
                 "filename": filename,
                 "content_type": _guess_content_type(filename),
                 "total_size": len(data),
-                "content_hash": content_hash,
+                "content_hash": _byte_array(content_hash),
                 "chunk_count": chunk_count,
                 "chunk_size": chunk_size,
-                "chunk_merkle_root": chunk_merkle_root,
+                "chunk_merkle_root": _byte_array(chunk_merkle_root),
                 "owner_did": owner_did,
-                "signature": signature,
+                "signature": _byte_array(signature),
                 "public_key_id": public_key_id,
                 "nonce": nonce,
             }
         }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._api_url}/broadcast_tx",
-                json=manifest_tx,
-                headers=self._get_headers(),
-            )
-            resp.raise_for_status()
+        await self._submit_tx(manifest_tx)
 
         # Upload chunks to storage node
         async with httpx.AsyncClient() as client:
@@ -227,18 +224,12 @@ class FileOperations:
                 "subgrove_id": subgrove_id,
                 "file_key": file_key,
                 "owner_did": owner_did,
-                "signature": signature,
+                "signature": _byte_array(signature),
                 "public_key_id": public_key_id,
                 "nonce": nonce,
             }
         }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._api_url}/broadcast_tx",
-                json=delete_tx,
-                headers=self._get_headers(),
-            )
-            resp.raise_for_status()
+        await self._submit_tx(delete_tx)
 
 
     async def unregister_storage_node(
@@ -261,18 +252,62 @@ class FileOperations:
         tx = {
             "UnregisterStorageNode": {
                 "node_did": node_did,
-                "signature": signature,
+                "signature": _byte_array(signature),
                 "public_key_id": signing["public_key_id"],
                 "nonce": signing.get("nonce", 0),
             }
         }
+        await self._submit_tx(tx)
+
+    async def _submit_tx(self, tx: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit a JSON transaction to the API's ``POST /tx/submit``.
+
+        The API hands it to CheckTx and answers ``{success, data: {tx_hash,
+        code, log}}``; a CheckTx refusal is HTTP 200 with a nonzero ``code``.
+
+        Returns:
+            The ``{tx_hash, code, log}`` of an accepted transaction.
+
+        Raises:
+            TransactionError: Unless CheckTx accepted the transaction.
+        """
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self._api_url}/broadcast_tx",
+                f"{self._api_url}/tx/submit",
                 json=tx,
                 headers=self._get_headers(),
             )
-            resp.raise_for_status()
+        try:
+            envelope = resp.json()
+        except ValueError:
+            envelope = None
+        if not isinstance(envelope, dict):
+            envelope = {}
+        data = envelope.get("data")
+        if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
+            raise TransactionError(
+                envelope.get("error") or f"transaction submission failed: HTTP {resp.status_code}"
+            )
+        code = data.get("code", 0)
+        if code != 0:
+            raise TransactionError(
+                data.get("log") or f"transaction refused with code {code}",
+                tx_hash=data.get("tx_hash"),
+                error_code=code,
+                raw_log=data.get("log"),
+            )
+        return data
+
+
+def _byte_array(value: Any) -> List[int]:
+    """A byte field as /tx/submit reads it: a JSON array of numbers.
+
+    Takes hex (with or without ``0x``; how ``sign_function`` returns a
+    signature and how digests are kept here), bytes, or a list of ints.
+    """
+    if isinstance(value, str):
+        return list(bytes.fromhex(value[2:] if value.startswith("0x") else value))
+    return list(bytes(value))
 
 
 def _chunk_data(data: bytes, chunk_size: int) -> List[bytes]:
