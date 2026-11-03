@@ -6,6 +6,7 @@ the Willow decentralized data indexing protocol.
 
 import asyncio
 import httpx
+import json as _json
 import logging
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
@@ -20,6 +21,7 @@ from .types import (
     
     SubgroveRegistration,
     DidPermissions,
+    Permission,
     TokenInfo,
     BalanceInfo,
     FeeSchedule,
@@ -34,7 +36,7 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import sign_request, SignatureAlgorithm
+from .auth import sign_request, sign_request_with_nonce, SignatureAlgorithm
 from .errors import (
     WillowError,
     AuthenticationError,
@@ -66,6 +68,15 @@ if TYPE_CHECKING:
     from .light_client import LightClient
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_json_body(payload: Any) -> Optional[bytes]:
+    """Serialize a JSON request body once, so the bytes signed are the bytes sent."""
+    if payload is None:
+        return None
+    return _json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
 
 
 class DataOperations:
@@ -133,7 +144,8 @@ class DataOperations:
         data_response = await self.client._request(
             "GET",
             f"/data/{subgrove_id}/{key}",
-            authenticated=True
+            authenticated=True,
+            read=True,
         )
         data = data_response["data"]
 
@@ -142,7 +154,8 @@ class DataOperations:
             proof_response = await self.client._request(
                 "GET",
                 f"/proof/{subgrove_id}/{key}",
-                authenticated=True
+                authenticated=True,
+                read=True,
             )
 
             if proof_response.get("data") and proof_response["data"].get("proof"):
@@ -192,7 +205,8 @@ class DataOperations:
         response = await self.client._request(
             "GET",
             f"/data/{subgrove_id}/{key}",
-            authenticated=True
+            authenticated=True,
+            read=True,
         )
         return response["data"]
 
@@ -254,7 +268,8 @@ class DataOperations:
             "POST",
             f"/query/{subgrove_id}",
             json=query_dict,
-            authenticated=True
+            authenticated=True,
+            read=True,
         )
 
         query_response = QueryResponse(**response["data"])
@@ -278,7 +293,7 @@ class DataOperations:
                 logger.warning(f"Could not fetch consensus root hash for verification: {e}")
 
         # Apply computed fields if registered for this app/dataset
-        computed_fields = self.client._computed_fields.get(subgrove_id, subgrove_id)
+        computed_fields = self.client._computed_fields.get(subgrove_id)
         if computed_fields:
             query_response = apply_computed_fields_to_response(query_response, computed_fields)
 
@@ -310,12 +325,13 @@ class DataOperations:
             "POST",
             f"/query/{subgrove_id}",
             json=query_dict,
-            authenticated=True
+            authenticated=True,
+            read=True,
         )
         query_response = QueryResponse(**response["data"])
 
         # Apply computed fields if registered for this app/dataset
-        computed_fields = self.client._computed_fields.get(subgrove_id, subgrove_id)
+        computed_fields = self.client._computed_fields.get(subgrove_id)
         if computed_fields:
             query_response = apply_computed_fields_to_response(query_response, computed_fields)
 
@@ -488,10 +504,14 @@ class RegistrationOperations:
             did: DID to query permissions for
 
         Returns:
-            DID permissions including owned apps, admin access, etc.
+            DID permissions: the subgroves the DID owns, administers, writes,
+            and reads, and each grant as the API returns it.
         """
-        response = await self.client._request("GET", f"/permissions/{did}")
-        return DidPermissions(**response["data"])
+        # The API answers { success, data: [Permission, ...] }.
+        response = await self.client._request("GET", f"/did/{did}/permissions")
+        return DidPermissions.from_permissions(
+            did, [Permission(**p) for p in response.get("data") or []]
+        )
 
 
 class ProofOperations:
@@ -514,9 +534,11 @@ class ProofOperations:
         Returns:
             Proof data including proof hex and value
         """
+        # Nonce-signed when an identity is set, for the DID's read rights.
         response = await self.client._request(
             "GET",
-            f"/proof/{subgrove_id}/{key}"
+            f"/proof/{subgrove_id}/{key}",
+            read=True,
         )
         return ProofData(**response["data"]).model_dump()
 
@@ -560,7 +582,8 @@ class TokenOperations:
         Returns:
             Balance information
         """
-        response = await self.client._request("GET", f"/token/balance/subgrove/{subgrove_id}")
+        # The API answers { subgrove_id, balance, total_spent, last_funded }.
+        response = await self.client._request("GET", f"/token/subgrove/balance/{subgrove_id}")
         return BalanceInfo(**response["data"])
 
     async def get_fee_schedule(self) -> FeeSchedule:
@@ -569,7 +592,7 @@ class TokenOperations:
         Returns:
             Fee schedule with storage, query, and indexing fees
         """
-        response = await self.client._request("GET", "/token/fees")
+        response = await self.client._request("GET", "/fees/schedule")
         return FeeSchedule(**response["data"])
 
 
@@ -603,14 +626,19 @@ class ValidatorOperations:
         response = await self.client._request("GET", f"/validators/{validator_did}")
         return ValidatorInfo(**response["data"])
 
+    async def _active_validators(self) -> List[Dict[str, Any]]:
+        # GET /validators lists the active, unjailed validators, each with
+        # its total_stake. The API has no separate total or count route.
+        response = await self.client._request("GET", "/validators")
+        return list(response.get("data") or [])
+
     async def get_total_staked(self) -> int:
-        """Get total staked amount across all validators.
+        """Get the total stake of the active validators.
 
         Returns:
             Total staked amount
         """
-        response = await self.client._request("GET", "/validators/total-staked")
-        return response["data"]["total_staked"]
+        return sum(int(v.get("total_stake", 0)) for v in await self._active_validators())
 
     async def get_active_count(self) -> int:
         """Get count of active validators.
@@ -618,8 +646,7 @@ class ValidatorOperations:
         Returns:
             Number of active validators
         """
-        response = await self.client._request("GET", "/validators/active-count")
-        return response["data"]["count"]
+        return len(await self._active_validators())
 
 
 class IndexingOperations:
@@ -714,7 +741,8 @@ class IndexingOperations:
         Returns:
             List of subgrove information
         """
-        response = await self.client._request("GET", "/indexing/subgroves")
+        # The indexed subgroves, in the same shape as GET /subgroves/{id}.
+        response = await self.client._request("GET", "/subgroves/indexed")
         return [SubgroveInfo(**sg) for sg in response.get("data", [])]
 
     async def get_subgrove(self, subgrove_id: str) -> SubgroveInfo:
@@ -726,7 +754,7 @@ class IndexingOperations:
         Returns:
             Subgrove information
         """
-        response = await self.client._request("GET", f"/indexing/subgroves/{subgrove_id}")
+        response = await self.client._request("GET", f"/subgroves/{subgrove_id}")
         return SubgroveInfo(**response["data"])
 
     async def get_indexing_status(self, subgrove_id: str) -> SubgroveIndexingStatus:
@@ -736,9 +764,10 @@ class IndexingOperations:
             subgrove_id: Subgrove identifier
 
         Returns:
-            Indexing status with progress information
+            Indexing status: its status ("indexing" or "pending_indexers"),
+            active indexer count, deployment block, and query count
         """
-        response = await self.client._request("GET", f"/indexing/subgroves/{subgrove_id}/status")
+        response = await self.client._request("GET", f"/subgroves/{subgrove_id}/status")
         return SubgroveIndexingStatus(**response["data"])
 
     async def list_indexers(self) -> List[IndexerInfo]:
@@ -747,7 +776,7 @@ class IndexingOperations:
         Returns:
             List of indexer information
         """
-        response = await self.client._request("GET", "/indexing/indexers")
+        response = await self.client._request("GET", "/indexers")
         return [IndexerInfo(**idx) for idx in response.get("data", [])]
 
     async def get_indexer(self, indexer_did: str) -> IndexerInfo:
@@ -759,7 +788,7 @@ class IndexingOperations:
         Returns:
             Indexer information
         """
-        response = await self.client._request("GET", f"/indexing/indexers/{indexer_did}")
+        response = await self.client._request("GET", f"/indexers/{indexer_did}")
         return IndexerInfo(**response["data"])
 
     async def get_verification_stats(self) -> VerificationStats:
@@ -768,7 +797,7 @@ class IndexingOperations:
         Returns:
             Verification statistics
         """
-        response = await self.client._request("GET", "/indexing/verification-stats")
+        response = await self.client._request("GET", "/verification/stats")
         return VerificationStats(**response["data"])
 
 
@@ -976,14 +1005,14 @@ class WillowClient:
         path = f"/{path_prefix}/{subgrove_id}"
 
         async def _call_validator() -> Dict[str, Any]:
-            headers: Dict[str, str] = {}
-            if self.is_authenticated():
-                headers = sign_request(
-                    self._did, self._private_key, self._public_key_id,
-                    "POST", path, self._algorithm,
-                )
+            # A /sql or /graphql read sent to the API: nonce-signed, the only
+            # form that carries the identity's read rights, on the routes
+            # that check them.
             url = f"{self.api_url}{path}"
-            resp = await self._http.post(url, json=body, headers=headers)
+            payload = _encode_json_body(body)
+            headers = {"Content-Type": "application/json"}
+            headers.update(self._nonce_headers("POST", url, payload))
+            resp = await self._http.post(url, content=payload, headers=headers)
             if resp.status_code == 404 or resp.status_code == 403:
                 reason = "not available"
                 try:
@@ -1148,7 +1177,7 @@ class WillowClient:
             >>> from willow.computed_fields import UNISWAP_V2_PAIR_FIELDS
             >>> client.register_computed_fields('pairs', UNISWAP_V2_PAIR_FIELDS)
         """
-        self._computed_fields.register(dataset_id, dataset_id, fields)
+        self._computed_fields.register(dataset_id, fields)
 
     def unregister_computed_fields(self, dataset_id: str) -> bool:
         """Remove computed fields for a dataset.
@@ -1159,7 +1188,7 @@ class WillowClient:
         Returns:
             True if fields were removed, False if they weren't registered.
         """
-        return self._computed_fields.unregister(dataset_id, dataset_id)
+        return self._computed_fields.unregister(dataset_id)
 
     def has_computed_fields(self, dataset_id: str) -> bool:
         """Check if computed fields are registered for a dataset.
@@ -1170,7 +1199,7 @@ class WillowClient:
         Returns:
             True if fields are registered, False otherwise.
         """
-        return self._computed_fields.has(dataset_id, dataset_id)
+        return self._computed_fields.has(dataset_id)
 
     async def _get_or_create_light_client(self) -> "LightClient":
         """Get or create a light client for trustless verification.
@@ -1245,20 +1274,77 @@ class WillowClient:
             raise WillowError("No root hash in response")
         return response["data"]["root_hash"]
 
+    def _api_target(self, url: str) -> str:
+        """The path and query the API receives for ``url``.
+
+        That is the request target httpx sends (URL-encoded, query included),
+        less any path the API base URL carries: a proxy mounted under a path
+        strips it before the API sees the request.
+        """
+        target = httpx.URL(url).raw_path.decode("ascii")
+        base = httpx.URL(self.api_url).raw_path.decode("ascii").rstrip("/")
+        if base and target.startswith(base + "/"):
+            target = target[len(base):]
+        return target
+
+    def _nonce_headers(
+        self, method: str, url: str, body: Optional[bytes]
+    ) -> Dict[str, str]:
+        """Nonce-signed auth headers for one read sent to the API, or none
+        without an identity.
+
+        The signature is over the method, the path and query the API
+        receives, and ``body``, which must be the exact bytes sent. Each call
+        draws a fresh nonce, so call it for each attempt of a request.
+        """
+        if not self.is_authenticated():
+            return {}
+        return sign_request_with_nonce(
+            self._did or "",
+            self._private_key or "",
+            self._public_key_id or "",
+            method,
+            self._api_target(url),
+            body,
+            self._algorithm,
+        )
+
+    def _legacy_headers(self, method: str, url: str) -> Dict[str, str]:
+        """Auth headers in the older ``{METHOD}:{PATH}:{TIMESTAMP}`` form, over
+        the path the API receives for ``url``."""
+        return sign_request(
+            self._did or "",
+            self._private_key or "",
+            self._public_key_id or "",
+            method,
+            self._api_target(url),
+            self._algorithm,
+        )
+
     async def _request(
         self,
         method: str,
         path: str,
         json: Optional[Any] = None,
-        authenticated: bool = False
+        authenticated: bool = False,
+        read: bool = False,
     ) -> Dict[str, Any]:
         """Make HTTP request to Willow API.
+
+        With an identity set, a ``read`` request is signed with a one-time
+        nonce over its method, path and query, and body (see
+        ``sign_request_with_nonce``), the only form that carries the DID's
+        read rights. Any other authenticated request is signed in the older
+        ``{METHOD}:{PATH}:{TIMESTAMP}`` form (see ``sign_request``).
 
         Args:
             method: HTTP method
             path: API path
             json: JSON body
-            authenticated: Whether to include auth headers
+            authenticated: Require an identity, and sign the request with it
+            read: A read the DID's read rights apply to (``GET /data``,
+                ``GET /proof``, ``POST /query``): nonce-signed whenever an
+                identity is set
 
         Returns:
             Response data
@@ -1269,33 +1355,42 @@ class WillowClient:
             NotAuthenticatedError: If authentication required but not present
         """
         url = f"{self.api_url}{path}"
+        method = method.upper()
 
         # Check authentication if required
         if authenticated and not self.is_authenticated():
             raise NotAuthenticatedError()
 
-        # Sign request with identity if authenticated
-        headers = {}
-        if authenticated and self.is_authenticated():
-            headers = sign_request(
-                self._did, self._private_key, self._public_key_id, method, path,
-                self._algorithm,
-            )
-
         try:
+            body = _encode_json_body(json)
+            headers: Dict[str, str] = {}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            if read:
+                headers.update(self._nonce_headers(method, url, body))
+            elif authenticated:
+                headers.update(self._legacy_headers(method, url))
+
             response = await self._http.request(
                 method,
                 url,
-                json=json,
+                content=body,
                 headers=headers
             )
 
+            # Handle errors. The auth middleware refuses with a bare status
+            # (such as 401, 400, or 429) and no body.
+            if response.status_code >= 400:
+                try:
+                    error_data = response.json()
+                except ValueError:
+                    error_data = None
+                if not isinstance(error_data, dict):
+                    error_data = {"error": response.reason_phrase or f"HTTP {response.status_code}"}
+                raise parse_api_error(error_data, response.status_code)
+
             # Parse response
             response_data = response.json()
-
-            # Handle errors
-            if response.status_code >= 400:
-                raise parse_api_error(response_data, response.status_code)
 
             # Check success flag
             api_response = ApiResponse(**response_data)

@@ -116,17 +116,49 @@ There is no server-side session. Each authenticated request is signed locally wi
 
 ```python
 client.set_identity(
-    did="did:willow:ed25519:abc123",
-    private_key_hex="your_private_key_hex",
-    public_key_id="did:willow:ed25519:abc123#key-1",
+    did=did_info["did"],
+    private_key_hex=did_info["private_key"],
+    public_key_id=did_info["public_key_id"],
+    algorithm=did_info["algorithm"],  # "Ed25519" (default) or "secp256k1"
 )
 
 if client.is_authenticated():
     print("Identity is set")
 
-# To "log out", set an empty identity or simply construct a new client.
-client.set_identity("", "", "")
+# To "log out":
+client.clear_identity()
 ```
+
+### Request signing
+
+With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, and `POST /query`, `/sql`, and `/graphql`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, or a place on a priced subgrove's free-reader list. The client signs its other authenticated requests (writes, key-grant reads) in the older form described below.
+
+The headers are `X-DID`, `X-Public-Key-ID`, `X-Signature`, `X-Timestamp`, and `X-Nonce`. The signature is over eight lines:
+
+```
+willow-request-v2
+<DID>
+<public key id>
+<METHOD>
+<path and query, exactly as sent>
+<Unix timestamp>
+<nonce>
+<hex SHA-256 of the body>
+```
+
+- The server accepts a timestamp up to 300 s old and 30 s ahead, and each (DID, nonce) once. The client signs every request it sends anew, so a retried call carries a new nonce.
+- A nonce is 16 to 128 characters of `A-Z a-z 0-9 - _`. `new_request_nonce()` makes one of 32 hex characters.
+- Ed25519 signatures are sent as hex. secp256k1 signatures are over the Keccak-256 of the message and are sent as `0x`-prefixed hex.
+- Requests sent to an indexer (`indexer_url`, or one found through `GET /indexers`) are not signed this way.
+- A signed request is refused if its DID isn't registered on chain or its key isn't listed in the DID document's `authentication`, on public reads too. The server also refuses nonce-signed requests for about 30 s after it restarts.
+
+To sign a request you send yourself:
+
+```python
+headers = sign_request_with_nonce(did, private_key_hex, public_key_id, "POST", "/query/my-subgrove", body_bytes, algorithm)
+```
+
+`sign_request(did, private_key_hex, public_key_id, method, path, algorithm)` makes the older `{METHOD}:{PATH}:{TIMESTAMP}` form, over the path without its query string. It proves the DID but carries none of its read rights, and it can be replayed with any body until the timestamp expires.
 
 ### Data Operations (Secure by Default)
 
@@ -273,7 +305,7 @@ subgrove = await client.indexing.get_subgrove("my-subgrove")
 print(f"Status: {subgrove.status}, latest block: {subgrove.latest_block}")
 
 status = await client.indexing.get_indexing_status("my-subgrove")
-print(f"Progress: {status.progress_percentage:.1f}%")
+print(f"Status: {status.status}, active indexers: {status.active_indexers}")
 
 indexers = await client.indexing.list_indexers()
 stats = await client.indexing.get_verification_stats()

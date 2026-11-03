@@ -130,7 +130,7 @@ class TestWillowClient:
         mock_response.status_code = 200
         mock_response.json.return_value = {"success": True}
 
-        async def fake_request(method, url, json=None, headers=None):
+        async def fake_request(method, url, content=None, headers=None):
             captured["headers"] = headers
             return mock_response
 
@@ -140,6 +140,9 @@ class TestWillowClient:
 
         headers = captured["headers"]
         assert headers["X-DID"] == info["did"]
+        # A write: signed in the older form, secp256k1 sent 0x-prefixed.
+        assert "X-Nonce" not in headers
+        assert headers["X-Signature"].startswith("0x")
         message = f"POST:/data/my-subgrove:{headers['X-Timestamp']}"
         # The captured signature verifies under secp256k1 (the true algorithm)...
         assert verify_signature(
@@ -150,6 +153,16 @@ class TestWillowClient:
             message, headers["X-Signature"], info["public_key"], "Ed25519"
         )
         await client.close()
+
+    def test_computed_field_registration(self, client):
+        """The client's computed-field methods reach the registry."""
+        from willow.computed_fields import UNISWAP_V2_PAIR_FIELDS
+
+        assert not client.has_computed_fields("pairs")
+        client.register_computed_fields("pairs", UNISWAP_V2_PAIR_FIELDS)
+        assert client.has_computed_fields("pairs")
+        assert client.unregister_computed_fields("pairs")
+        assert not client.has_computed_fields("pairs")
 
     @pytest.mark.asyncio
     async def test_is_authenticated(self, client):
