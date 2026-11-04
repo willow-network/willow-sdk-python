@@ -89,37 +89,32 @@ def execute_ops(
             # Pop parent and child, attach child as LEFT of parent
             parent = pop()
             child = pop()
-            # Capture height before potential collapse
-            child_height = child.height
             child_to_attach = child.into_hash() if collapse else child
-            parent.attach_with_height(True, child_to_attach, child_height)
+            parent.attach_with_height(True, child_to_attach, child_to_attach.height)
             stack.append(parent)
 
         elif isinstance(op, ChildOp):
             # Pop child and parent, attach child as RIGHT of parent
             child = pop()
             parent = pop()
-            child_height = child.height
             child_to_attach = child.into_hash() if collapse else child
-            parent.attach_with_height(False, child_to_attach, child_height)
+            parent.attach_with_height(False, child_to_attach, child_to_attach.height)
             stack.append(parent)
 
         elif isinstance(op, ParentInvertedOp):
             # Pop parent and child, attach child as RIGHT of parent
             parent = pop()
             child = pop()
-            child_height = child.height
             child_to_attach = child.into_hash() if collapse else child
-            parent.attach_with_height(False, child_to_attach, child_height)
+            parent.attach_with_height(False, child_to_attach, child_to_attach.height)
             stack.append(parent)
 
         elif isinstance(op, ChildInvertedOp):
             # Pop child and parent, attach child as LEFT of parent
             child = pop()
             parent = pop()
-            child_height = child.height
             child_to_attach = child.into_hash() if collapse else child
-            parent.attach_with_height(True, child_to_attach, child_height)
+            parent.attach_with_height(True, child_to_attach, child_to_attach.height)
             stack.append(parent)
 
     if len(stack) != 1:
@@ -129,7 +124,10 @@ def execute_ops(
 
     tree = stack[0]
 
-    # Verify AVL tree property
+    # merk's balance check. Heights count as merk counts them: a child is
+    # attached at its height after any collapse (a collapsed subtree is one
+    # Hash node, height 1), so a partial proof that prunes deep siblings is
+    # not refused.
     height_diff = abs(tree.child_heights[0] - tree.child_heights[1])
     if height_diff > 1:
         raise GroveDBVerificationError("Expected proof to result in a valid AVL tree")
@@ -183,7 +181,8 @@ def execute_merk_proof_with_query(
             result_set.append(ProvedKeyValue(
                 key=node.key,
                 value=node.value,
-                proof=value_hash(node.value)
+                proof=value_hash(node.value),
+                node_type="KV",
             ))
             if current_limit is not None:
                 current_limit -= 1
@@ -192,7 +191,8 @@ def execute_merk_proof_with_query(
             result_set.append(ProvedKeyValue(
                 key=node.key,
                 value=node.value,
-                proof=node.value_hash
+                proof=node.value_hash,
+                node_type="KVValueHash" if isinstance(node, KVValueHashNode) else "KVValueHashFeatureType",
             ))
             if current_limit is not None:
                 current_limit -= 1
@@ -201,7 +201,8 @@ def execute_merk_proof_with_query(
             result_set.append(ProvedKeyValue(
                 key=node.key,
                 value=node.value,
-                proof=node.value_hash
+                proof=node.value_hash,
+                node_type="KVRefValueHash",
             ))
             if current_limit is not None:
                 current_limit -= 1
@@ -211,7 +212,8 @@ def execute_merk_proof_with_query(
             result_set.append(ProvedKeyValue(
                 key=node.key,
                 value=None,
-                proof=node.value_hash
+                proof=node.value_hash,
+                node_type="KVDigest",
             ))
         # Hash and KVHash don't contribute to results
 

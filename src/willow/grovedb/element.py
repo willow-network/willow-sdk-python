@@ -4,7 +4,7 @@ GroveDB Element Deserialization
 Deserializes GroveDB Element types from their binary encoding.
 """
 
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from .types import (
     Element,
     ItemElement,
@@ -34,6 +34,11 @@ def deserialize_element(data: bytes) -> Element:
     """
     Deserialize a GroveDB Element from bytes.
 
+    grovedb encodes an element with bincode 2's standard configuration,
+    big-endian: the variant, lengths, sums, and counts are variable-length
+    integers (signed ones zigzag-encoded). The whole input must be one
+    element: trailing bytes are refused, not ignored.
+
     Args:
         data: Binary-encoded element
 
@@ -41,12 +46,17 @@ def deserialize_element(data: bytes) -> Element:
         Deserialized Element
     """
     reader = BincodeReader(data)
-    return _read_element(reader)
+    element = _read_element(reader)
+    if reader.has_more():
+        raise GroveDBVerificationError(
+            f"Trailing bytes after element: {len(data) - reader.position()} at offset {reader.position()}"
+        )
+    return element
 
 
 def _read_element(reader: BincodeReader) -> Element:
     """Read an Element from a BincodeReader."""
-    element_type = reader.read_u8()
+    element_type = reader.read_varint(max_bytes=4)
 
     if element_type == ELEMENT_ITEM:
         value = reader.read_bytes()
@@ -54,9 +64,12 @@ def _read_element(reader: BincodeReader) -> Element:
         return ItemElement(value=value, flags=flags)
 
     elif element_type == ELEMENT_REFERENCE:
-        path = _read_reference_path(reader)
+        reference_type, height, path = _read_reference_path_type(reader)
+        max_hop = reader.read_u8() if reader.read_option_tag() else None
         flags = _read_option_bytes(reader)
-        return ReferenceElement(path=path, flags=flags)
+        return ReferenceElement(
+            path=path, flags=flags, reference_type=reference_type, height=height, max_hop=max_hop
+        )
 
     elif element_type == ELEMENT_TREE:
         root_key = _read_option_bytes(reader)
@@ -64,32 +77,32 @@ def _read_element(reader: BincodeReader) -> Element:
         return TreeElement(root_key=root_key, flags=flags)
 
     elif element_type == ELEMENT_SUM_ITEM:
-        value = _read_i64(reader)
+        value = reader.read_signed_varint()
         flags = _read_option_bytes(reader)
         return SumItemElement(value=value, flags=flags)
 
     elif element_type == ELEMENT_SUM_TREE:
         root_key = _read_option_bytes(reader)
-        sum_value = _read_i64(reader)
+        sum_value = reader.read_signed_varint()
         flags = _read_option_bytes(reader)
         return SumTreeElement(root_key=root_key, sum_value=sum_value, flags=flags)
 
     elif element_type == ELEMENT_BIG_SUM_TREE:
         root_key = _read_option_bytes(reader)
-        sum_value = _read_i128(reader)
+        sum_value = reader.read_signed_varint(max_bytes=16)
         flags = _read_option_bytes(reader)
         return BigSumTreeElement(root_key=root_key, sum_value=sum_value, flags=flags)
 
     elif element_type == ELEMENT_COUNT_TREE:
         root_key = _read_option_bytes(reader)
-        count = _read_u64(reader)
+        count = reader.read_varint()
         flags = _read_option_bytes(reader)
         return CountTreeElement(root_key=root_key, count=count, flags=flags)
 
     elif element_type == ELEMENT_COUNT_SUM_TREE:
         root_key = _read_option_bytes(reader)
-        count = _read_u64(reader)
-        sum_val = _read_i64(reader)
+        count = reader.read_varint()
+        sum_val = reader.read_signed_varint()
         flags = _read_option_bytes(reader)
         return CountSumTreeElement(root_key=root_key, count=count, sum=sum_val, flags=flags)
 
@@ -99,43 +112,34 @@ def _read_element(reader: BincodeReader) -> Element:
 
 def _read_option_bytes(reader: BincodeReader) -> Optional[bytes]:
     """Read Option<Vec<u8>>."""
-    has_value = reader.read_bool()
-    if has_value:
+    if reader.read_option_tag():
         return reader.read_bytes()
     return None
 
 
-def _read_reference_path(reader: BincodeReader) -> List[List[bytes]]:
-    """Read reference path (Vec<Vec<u8>>)."""
-    length = reader.read_u64()
-    path: List[List[bytes]] = []
-
-    for _ in range(length):
-        segment_length = reader.read_u64()
-        segment: List[bytes] = []
-        for _ in range(segment_length):
-            segment.append(reader.read_bytes())
-        path.append(segment)
-
-    return path
+def _read_segments(reader: BincodeReader) -> List[bytes]:
+    """Read Vec<Vec<u8>>."""
+    return [reader.read_bytes() for _ in range(reader.read_varint())]
 
 
-def _read_i64(reader: BincodeReader) -> int:
-    """Read i64 (big-endian)."""
-    raw = reader.read_raw_bytes(8)
-    return int.from_bytes(raw, byteorder='big', signed=True)
+# ReferencePathType variants, in grovedb's order: those with a u8 height
+# before their path segments, and those with one key instead of a path.
+_REFERENCE_WITH_HEIGHT = (1, 2, 3)
+_REFERENCE_WITH_KEY = (4, 6)
+_REFERENCE_TYPES = 7
 
 
-def _read_u64(reader: BincodeReader) -> int:
-    """Read u64 (big-endian)."""
-    raw = reader.read_raw_bytes(8)
-    return int.from_bytes(raw, byteorder='big', signed=False)
-
-
-def _read_i128(reader: BincodeReader) -> int:
-    """Read i128 (big-endian)."""
-    raw = reader.read_raw_bytes(16)
-    return int.from_bytes(raw, byteorder='big', signed=True)
+def _read_reference_path_type(reader: BincodeReader) -> Tuple[int, Optional[int], List[bytes]]:
+    """Read a ReferencePathType: its variant, its u8 height (for the variants
+    that carry one), and its path segments (one key for a cousin or sibling
+    reference)."""
+    variant = reader.read_varint(max_bytes=4)
+    if variant >= _REFERENCE_TYPES:
+        raise GroveDBVerificationError(f"Unknown reference path type: {variant}")
+    height = reader.read_u8() if variant in _REFERENCE_WITH_HEIGHT else None
+    if variant in _REFERENCE_WITH_KEY:
+        return variant, height, [reader.read_bytes()]
+    return variant, height, _read_segments(reader)
 
 
 def is_tree_element(element: Element) -> bool:

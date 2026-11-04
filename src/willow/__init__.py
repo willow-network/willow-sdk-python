@@ -23,8 +23,12 @@ Example usage:
             # Store a JSON object under a key (a StoreData transaction)
             await client.data.store("my-data", {"key": {"value": 1}})
 
-            # Query with automatic proof verification
-            result = await client.data.query("my-data", {
+            # Read it back, verified against its proof and a trusted root
+            # (raises ProofVerificationError when it can't be verified)
+            value = await client.data.get("my-data", "key")
+
+            # Query (the documents are not verified)
+            result = await client.data.query_unverified("my-data", {
                 "filters": {"value": {"$eq": 1}}
             })
     ```
@@ -91,6 +95,7 @@ from .errors import (
     NotFoundError,
     PermissionDeniedError,
     ProofVerificationError,
+    UnsupportedError,
     LightClientError,
     CryptoError,
     InvalidSignatureError,
@@ -204,6 +209,7 @@ from .proof import (
     extract_root_hash_from_proof,
     verify_proof_quick,
     verify_proof_with_expected_root,
+    subgrove_data_path,
 )
 # GroveDB module for low-level proof verification
 from . import grovedb
@@ -366,6 +372,7 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "ProofVerificationError",
+    "UnsupportedError",
     "LightClientError",
     "CryptoError",
     "InvalidSignatureError",
@@ -471,6 +478,7 @@ __all__ = [
     "extract_root_hash_from_proof",
     "verify_proof_quick",
     "verify_proof_with_expected_root",
+    "subgrove_data_path",
     # Completeness Verification
     "Log",
     "CompletenessError",

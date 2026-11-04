@@ -138,6 +138,16 @@ class ProofVerificationError(WillowError):
     pass
 
 
+class UnsupportedError(WillowError):
+    """The SDK does not support this operation.
+
+    Raised, without a request, by operations the SDK can't perform
+    correctly, such as verifying data no proof binds, instead of returning
+    a result that would look verified.
+    """
+    pass
+
+
 class LightClientError(WillowError):
     """Light client errors.
 

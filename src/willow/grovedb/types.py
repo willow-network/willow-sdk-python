@@ -220,10 +220,16 @@ class GroveDBProof:
 
 @dataclass
 class ProvedKeyValue:
-    """Proved key-value pair from verification."""
+    """Proved key-value pair from verification.
+
+    ``proof`` is the value hash the node commits to; ``node_type`` the merk
+    node it came from (``"KV"``, ``"KVValueHash"``,
+    ``"KVValueHashFeatureType"``, ``"KVRefValueHash"``, or ``"KVDigest"``).
+    """
     key: bytes
     value: Optional[bytes]
     proof: CryptoHash
+    node_type: str = ""
 
 
 @dataclass
@@ -254,9 +260,18 @@ class ItemElement:
 
 @dataclass
 class ReferenceElement:
-    """Reference element pointing to another location."""
-    path: List[List[bytes]]
+    """Reference element pointing to another location.
+
+    ``path`` holds the reference's path segments (one key for a cousin or
+    sibling reference), ``reference_type`` grovedb's ReferencePathType
+    variant, ``height`` the u8 the upstream variants carry, and ``max_hop``
+    its MaxReferenceHop.
+    """
+    path: List[bytes]
     flags: Optional[bytes]
+    reference_type: int = 0
+    height: Optional[int] = None
+    max_hop: Optional[int] = None
 
 
 @dataclass

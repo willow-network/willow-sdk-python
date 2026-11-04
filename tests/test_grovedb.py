@@ -430,11 +430,14 @@ class TestBincode:
 
     def test_bincode_reader_read_bytes(self):
         """Test reading length-prefixed bytes."""
-        # u64 length (3) + 3 bytes
-        data = b"\x00\x00\x00\x00\x00\x00\x00\x03abc"
+        # varint length (3) + 3 bytes, as bincode's standard config writes it
+        data = b"\x03abc"
         reader = BincodeReader(data)
         result = reader.read_bytes()
         assert result == b"abc"
+        # a length of 251 or more takes the u16 form
+        reader = BincodeReader(b"\xfb\x01\x00" + b"x" * 256)
+        assert reader.read_bytes() == b"x" * 256
 
     def test_bincode_reader_position(self):
         """Test position tracking."""

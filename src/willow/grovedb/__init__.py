@@ -132,6 +132,9 @@ from .executor import (
 from .verifier import (
     verify_grovedb_proof,
     verify_proof_against_root,
+    verify_items_at_path,
+    verify_item_at_path,
+    ProvenItem,
     check_envelope,
     quick_verify,
     VerifyOptions,
@@ -228,6 +231,9 @@ __all__ = [
     # Main verifier functions
     "verify_grovedb_proof",
     "verify_proof_against_root",
+    "verify_items_at_path",
+    "verify_item_at_path",
+    "ProvenItem",
     "check_envelope",
     "quick_verify",
     "VerifyOptions",

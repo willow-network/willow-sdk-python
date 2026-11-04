@@ -15,7 +15,10 @@ from .types import (
     LightBlock, Header, Commit, ValidatorSet, Validator, CommitSig,
     TrustThreshold, VerificationResult, LightClientError, QueryProof
 )
-from ..grovedb import quick_verify, verify_proof_against_root, hash_equals, GroveDBVerificationError
+from ..errors import UnsupportedError
+from ..grovedb import (
+    quick_verify, verify_items_at_path, verify_item_at_path, hash_equals, GroveDBVerificationError,
+)
 
 
 class HeaderVerifier:
@@ -205,12 +208,19 @@ class ProofVerifier:
     ) -> VerificationResult:
         """
         Verify a GroveDB query proof against a trusted app hash.
-        
+
+        Succeeds when the proof reproduces ``trusted_app_hash`` and, for each
+        entry of ``query_result`` (``proof.query_result`` when not given),
+        the proof proves an Item with that payload at the query's path
+        (``proof.path_query["path"]``), each Item matched once. With no
+        ``query_result`` it binds no value: it shows only that the proof's
+        root is the trusted one.
+
         Args:
             proof: Query proof containing proof bytes and metadata
             trusted_app_hash: Trusted app hash from verified header
-            query_result: Expected query result (optional)
-            
+            query_result: Item payloads the proof must prove at the path
+
         Returns:
             VerificationResult indicating success/failure
         """
@@ -218,38 +228,57 @@ class ProofVerifier:
             # Extract query result from proof if not provided
             if query_result is None:
                 query_result = proof.query_result
-            
+
+            if query_result:
+                path = _query_path(proof.path_query)
+                if not path:
+                    return VerificationResult(
+                        success=False,
+                        error="The query result can't be bound to the proof without the query's path "
+                              "(path_query['path'])",
+                        height=proof.height
+                    )
+                _, items = verify_items_at_path(proof.proof, path, trusted_app_hash)
+                unmatched = [item.value for item in items]
+                for index, payload in enumerate(query_result):
+                    if bytes(payload) not in unmatched:
+                        return VerificationResult(
+                            success=False,
+                            error=f"Query result {index} is not an Item the proof proves at the path",
+                            height=proof.height
+                        )
+                    unmatched.remove(bytes(payload))
+                return VerificationResult(success=True, height=proof.height)
+
             # Verify the proof reconstructs to the trusted app hash
             computed_root = self._verify_grovedb_proof(proof.proof, query_result)
-            
+
             if computed_root != trusted_app_hash:
                 return VerificationResult(
                     success=False,
                     error=f"Root hash mismatch: computed {computed_root.hex()} != trusted {trusted_app_hash.hex()}",
                     height=proof.height
                 )
-            
+
             return VerificationResult(
                 success=True,
                 height=proof.height
             )
-            
+
         except Exception as e:
             return VerificationResult(
                 success=False,
                 error=f"Proof verification failed: {str(e)}",
                 height=proof.height
             )
-    
+
     def _verify_grovedb_proof(self, proof_bytes: bytes, query_result: List[bytes]) -> bytes:
         """
-        Verify GroveDB proof and return computed root hash.
-
-        Uses the pure Python GroveDB implementation for trustless verification.
+        Compute the root hash a GroveDB proof reproduces. It binds no value.
 
         Args:
             proof_bytes: Raw proof bytes
-            query_result: Query result data (unused, verification is self-contained in proof)
+            query_result: Unused
 
         Returns:
             Computed root hash (32 bytes)
@@ -261,31 +290,37 @@ class ProofVerifier:
             return quick_verify(proof_bytes)
         except GroveDBVerificationError as e:
             raise LightClientError(f"GroveDB proof verification failed: {e}")
-    
+
     def verify_inclusion_proof(
         self,
         key: bytes,
         value: bytes,
         proof_bytes: bytes,
-        trusted_root: bytes
+        trusted_root: bytes,
+        path: List[Any],
     ) -> bool:
         """
-        Verify that a key-value pair is included in the tree.
+        Verify that ``key`` holds the Item ``value`` at ``path``.
+
+        True only when the proof reproduces ``trusted_root`` and proves an
+        Item at exactly ``path`` and ``key`` whose payload is ``value``.
 
         Args:
             key: Key to verify
-            value: Expected value
+            value: The Item's expected payload
             proof_bytes: GroveDB proof bytes
             trusted_root: Trusted root hash from light client
+            path: The key's path (``str`` or ``bytes`` segments)
 
         Returns:
-            True if proof is valid and matches trusted root
+            True if the proof proves ``value`` at ``path`` and ``key`` under
+            ``trusted_root``
         """
         try:
-            verify_proof_against_root(proof_bytes, trusted_root)
-            return True
+            _, item = verify_item_at_path(proof_bytes, path, key, trusted_root)
         except GroveDBVerificationError:
             return False
+        return item.value == bytes(value)
 
     def verify_absence_proof(
         self,
@@ -294,18 +329,27 @@ class ProofVerifier:
         trusted_root: bytes
     ) -> bool:
         """
-        Verify that a key is absent from the tree.
+        Not supported: raises ``UnsupportedError``.
 
-        Args:
-            key: Key to verify absence of
-            proof_bytes: GroveDB proof bytes
-            trusted_root: Trusted root hash from light client
-
-        Returns:
-            True if proof is valid and matches trusted root
+        A proof's root matching proves nothing about one key; the SDK does
+        not check that a proof shows where a key would be with nothing there.
         """
-        try:
-            verify_proof_against_root(proof_bytes, trusted_root)
-            return True
-        except GroveDBVerificationError:
-            return False
+        raise UnsupportedError("Checking that a key is absent is not supported")
+
+
+def _query_path(path_query: Any) -> Optional[List[bytes]]:
+    """A query's path from ``path_query["path"]``: segments as ``str``
+    (UTF-8), ``bytes``, or lists of byte values."""
+    if not isinstance(path_query, dict) or not isinstance(path_query.get("path"), list):
+        return None
+    segments = []
+    for seg in path_query["path"]:
+        if isinstance(seg, str):
+            segments.append(seg.encode("utf-8"))
+        elif isinstance(seg, (bytes, bytearray)):
+            segments.append(bytes(seg))
+        elif isinstance(seg, list) and all(isinstance(b, int) and 0 <= b <= 255 for b in seg):
+            segments.append(bytes(seg))
+        else:
+            return None
+    return segments
