@@ -203,16 +203,21 @@ class CompletenessOperations:
         http: "httpx.AsyncClient",
         cometbft_rpc_url: str,
         indexer_url: Optional[str],
+        rpc_http: Optional["httpx.AsyncClient"] = None,
     ):
         """
         Args:
-            http: shared httpx client (carries any ``X-API-Key`` default header).
+            http: shared httpx client (carries any ``X-API-Key`` default
+                header), for the configured indexer.
             cometbft_rpc_url: validator CometBFT RPC base (e.g. ``:26657``), used
                 for the ``abci_query`` that reads the on-chain anchor.
             indexer_url: indexer base URL serving ``/completeness/...``. ``None``
                 until configured; the wrapper raises if it's needed unset.
+            rpc_http: httpx client for the CometBFT RPC (``WillowClient``
+                passes one without the API key); ``http`` when not given.
         """
         self._http = http
+        self._rpc_http = rpc_http if rpc_http is not None else http
         self._rpc_url = cometbft_rpc_url.rstrip("/")
         self._indexer_url = indexer_url.rstrip("/") if indexer_url else None
 
@@ -229,7 +234,7 @@ class CompletenessOperations:
             "method": "abci_query",
             "params": {"path": path, "data": "", "height": "0", "prove": False},
         }
-        resp = await self._http.post(self._rpc_url, json=rpc_request)
+        resp = await self._rpc_http.post(self._rpc_url, json=rpc_request)
         resp.raise_for_status()
         envelope = resp.json()
         if "error" in envelope and envelope["error"]:

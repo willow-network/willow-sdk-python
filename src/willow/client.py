@@ -1018,10 +1018,17 @@ class WillowClient:
             api_url: Base URL for Willow API
             timeout: Request timeout in seconds
             retry_config: Optional retry configuration
-            proof_verification_options: Optional proof verification configuration
-            indexer_url: Optional indexer node URL for routing GraphQL/SQL queries
+            proof_verification_options: Optional configuration of the global
+                proof verifier (``ProofVerifier``, ``verify_item_proof``,
+                ``verify_query_proof``). ``data.get`` checks its proof
+                against the light client's header instead.
+            indexer_url: Optional indexer node URL for routing GraphQL/SQL
+                queries. Requests to it carry the API key; requests to
+                indexers found through discovery do not.
             api_key: Managed-tier API key (``wk_...``). When set, the SDK
-                sends ``X-API-Key`` on every request. Mint a key at
+                sends ``X-API-Key`` on its HTTP requests to the API (and to
+                ``indexer_url``), never to a discovered indexer or the
+                consensus RPC. Mint a key at
                 https://dashboard.willow.tech/account. Required for queries
                 and writes against managed ``api.willow.tech`` /
                 ``indexer.willow.tech``.
@@ -1084,15 +1091,20 @@ class WillowClient:
         self._http = httpx.AsyncClient(timeout=timeout, headers=default_headers)
         # The consensus RPC is another host: its requests carry no API key.
         self._rpc_http = httpx.AsyncClient(timeout=timeout)
+        # Indexers found through discovery are hosts their operators choose:
+        # their requests carry no API key either. Only an indexer_url the
+        # caller configures gets it (see _route_query).
+        self._indexer_http = httpx.AsyncClient(timeout=timeout)
 
         # Client-side completeness checks. The on-chain anchor is read from the
         # validator's CometBFT RPC (derived from api_url, typically :3031 ->
-        # :26657, matching the light client); the matched-log preimage comes
-        # from the configured indexer.
+        # :26657, matching the light client) without the API key; the
+        # matched-log preimage comes from the configured indexer.
         self.completeness = CompletenessOperations(
             self._http,
             self.api_url.replace(":3031", ":26657"),
             self.indexer_url,
+            rpc_http=self._rpc_http,
         )
 
         # Indexer discovery client. When ``indexer_url`` is set, discovery
@@ -1130,6 +1142,7 @@ class WillowClient:
         """Close HTTP client."""
         await self._http.aclose()
         await self._rpc_http.aclose()
+        await self._indexer_http.aclose()
 
     async def health(self) -> HealthStatus:
         """Check API health status.
@@ -1203,7 +1216,10 @@ class WillowClient:
                 )
             endpoint = info.effective_query_endpoint().rstrip("/")
             url = f"{endpoint}{path}"
-            resp = await self._http.post(url, json=body, headers=headers)
+            # The API key goes only to an indexer_url the caller configured,
+            # never to an indexer discovery found.
+            http = self._http if self.indexers.has_explicit_override() else self._indexer_http
+            resp = await http.post(url, json=body, headers=headers)
             resp.raise_for_status()
             return _envelope_data(resp.json()) or {}
 
