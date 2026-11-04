@@ -280,7 +280,9 @@ class DataOperations:
         header at the proof's ``height + 1`` (the state after block
         ``height``), as the light client gives it (see ``get_root_hash``).
         It returns the value the proof proves. Anything missing or
-        different raises; nothing is returned unverified.
+        different raises; nothing is returned unverified. A value whose
+        Item is 63 bytes (a 60-byte JSON text) raises: a proof can't tell
+        an element of that length from a subtree.
 
         Args:
 

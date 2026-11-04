@@ -260,6 +260,35 @@ def test_a_subtree_carried_beside_its_value_hash_is_not_an_item():
     _assert_no_item_at_p_t(tampered, payload, root, "beside a value hash")
 
 
+def test_a_subtree_carried_as_a_kv_node_is_not_an_item():
+    # A KV node's hash is computed from its bytes, and these 63 bytes hash
+    # to the subtree's value hash.
+    tampered, payload, root = _tree_as_item(lambda key, element, _vh: _kv_op(key, element))
+    _assert_no_item_at_p_t(tampered, payload, root, "63 bytes long")
+
+
+def _single_item_proof(element):
+    """A proof of key "k" holding ``element`` in the subtree at "d"."""
+    data = _tree(b"k")
+    data_vh = combine_hash(value_hash(data), node_hash(kv_hash(b"k", element), NULL_HASH, NULL_HASH))
+    return b"\x00" + _layer(_kv_value_hash_op(b"d", data, data_vh), [(b"d", _layer(_kv_op(b"k", element)))]) + b"\x01"
+
+
+def test_a_63_byte_element_is_not_proven_as_an_item():
+    # An Item with a 60-byte payload and no flags is 63 bytes: a proof can't
+    # tell it from a subtree. One byte either side is proven.
+    for size in (59, 61):
+        payload = b"x" * size
+        _, item = verify_item_at_path(_single_item_proof(_item(payload)), ["d"], "k")
+        assert item.value == payload
+    element = _item(b"x" * 60)
+    assert len(element) == 63
+    proof = _single_item_proof(element)
+    with pytest.raises(GroveDBVerificationError, match="63 bytes long"):
+        verify_item_at_path(proof, ["d"], "k")
+    assert verify_items_at_path(proof, ["d"])[1] == []
+
+
 def test_tampered_envelopes_are_refused():
     fx = FX["envelope_tampering"]
     root, item = verify_item_at_path(bytes.fromhex(fx["proof_hex"]), fx["path"], fx["key"])

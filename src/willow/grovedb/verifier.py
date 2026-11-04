@@ -233,6 +233,14 @@ def _try_deserialize(value: bytes) -> Optional[Element]:
 
 _VALUE_HASH_NODES = ("KVValueHash", "KVValueHashFeatureType")
 
+# ``value_hash(b)`` is blake3 over ``b``'s length (a varint) and ``b``; a
+# subtree's value hash is ``combine_hash(value_hash(element), root)``,
+# blake3 over 64 bytes. For a 63-byte ``b`` (one length byte, 63 bytes) the
+# two inputs are the same length, so a non-empty subtree's value hash is the
+# value hash of the 63 bytes after its first input byte. A proof can't tell
+# a 63-byte element from a subtree whose hashes are ground to match.
+AMBIGUOUS_ELEMENT_LENGTH = 63
+
 
 def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: List[bytes]) -> bool:
     """Bind a leaf's bytes to the value hash its merk node commits to;
@@ -242,8 +250,11 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
     ``KVRefValueHash`` node, and a subtree (or a sum item) as a
     ``KVValueHash`` node. A ``KV`` node's hash is computed from its bytes,
     and a ``KVRefValueHash`` node's from the referenced bytes it carries, so
-    both are bound. A ``KVValueHash`` node carries its value hash beside its
-    bytes, and only the hash enters the root:
+    both are bound, except a ``KV`` node's bytes of exactly
+    ``AMBIGUOUS_ELEMENT_LENGTH`` (63): their value hash has the form of a
+    subtree's, so they may stand for a subtree (``False``). A
+    ``KVValueHash`` node carries its value hash beside its bytes, and only
+    the hash enters the root:
 
     - a tree element's value hash is
       ``combine_hash(value_hash(bytes), subtree root)``. An empty subtree's
@@ -254,6 +265,8 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
       element, so the node's bytes may stand for a subtree. Bytes that do
       not hash to the node's value hash are refused.
     """
+    if proved.node_type == "KV":
+        return len(proved.value) != AMBIGUOUS_ELEMENT_LENGTH
     if proved.node_type not in _VALUE_HASH_NODES:
         return True
     tree = element is not None and is_tree_element(element)
@@ -282,6 +295,12 @@ def _unbound_reason(entry: Dict[str, Any]) -> Optional[str]:
         return (
             f"its node ({entry['node_type']}) carries its bytes beside a value hash, which does "
             "not bind them; grovedb proves an Item as a KV node"
+        )
+    if entry["node_type"] == "KV":
+        return (
+            f"its element is {AMBIGUOUS_ELEMENT_LENGTH} bytes long, and the value hash of "
+            f"{AMBIGUOUS_ELEMENT_LENGTH} bytes has the form of a subtree's, so the proof does not "
+            "tell it from a subtree"
         )
     return None
 
@@ -325,7 +344,10 @@ def verify_items_at_path(
     The proof must descend to ``path`` with no lower layer off it (see
     ``check_envelope``). An Item is returned only from the ``KV`` node
     grovedb proves it in, whose hash is computed from its bytes (see
-    ``_bind_leaf_value``): bytes carried beside a value hash are not.
+    ``_bind_leaf_value``): bytes carried beside a value hash are not, nor is
+    an element of exactly ``AMBIGUOUS_ELEMENT_LENGTH`` (63) bytes, which a
+    proof can't tell from a subtree (an Item with a 60-byte payload and no
+    flags is 63 bytes).
     Entries proven at another path, subtrees, references, and sum items are
     not returned. This proves each returned
     Item is stored at ``path`` under the returned root; it does not prove
