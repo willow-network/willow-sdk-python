@@ -5,10 +5,11 @@ the Willow decentralized data indexing protocol.
 """
 
 import asyncio
+import base64
 import httpx
 import json as _json
 import logging
-from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from typing import Optional, Dict, Any, FrozenSet, List, Set, Tuple, TYPE_CHECKING
 
 from .types import (
     DidDocument,
@@ -36,7 +37,7 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import _KEY_TYPES, sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
+from .auth import _key_algorithm, sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
 from .errors import (
     WillowError,
     AuthenticationError,
@@ -48,7 +49,7 @@ from .errors import (
     TransactionError,
     parse_api_error,
 )
-from .nonces import USED, WINDOW, NonceTracker, refusal_outcome
+from .nonces import UNKNOWN, WINDOW, NonceTracker, parse_nonce_state, refusal_outcome
 from .consensus.types import (
     DataStoreTx,
     RegisterDidTx,
@@ -56,7 +57,7 @@ from .consensus.types import (
     create_sign_message,
     create_transaction_wrapper,
 )
-from .signed_messages import did_document_body
+from .signed_messages import SCHEMA_FIELD_TYPES as _SCHEMA_FIELD_TYPES, did_document_body
 from .indexers import (
     WillowIndexers,
     QuerySource,
@@ -91,17 +92,8 @@ def _encode_json_body(payload: Any) -> Optional[bytes]:
     ).encode("utf-8")
 
 
-def _key_algorithm(body: Dict[str, Any], public_key_id: str) -> Optional[SignatureAlgorithm]:
-    """The algorithm of the key ``public_key_id`` in a DID document body, from
-    its key type; ``None`` if the document has no such key or names another
-    type."""
-    for key in body["public_keys"]:
-        if key["id"] == public_key_id:
-            for algorithm, key_type in _KEY_TYPES.items():
-                if key["type"] == key_type:
-                    return algorithm
-            return None
-    return None
+# Transport failures that leave before a request is sent: it never reached the API.
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol)
 
 
 def _envelope_data(body: Any) -> Any:
@@ -122,17 +114,15 @@ def _unsupported_data_write(operation: str, route: str, kind: str) -> WillowErro
     )
 
 
-# The field types the node's subgrove schema takes.
-_SCHEMA_FIELD_TYPES = ("string", "number", "boolean", "array", "object", "bytes")
-
-
 def _schema_json(schema: Any) -> str:
-    """A ``SchemaDefinition`` as the node's schema JSON text.
+    """A ``SchemaDefinition`` as the node's schema JSON text (the node's
+    ``SchemaDefinition``).
 
     The node maps each field to its type name and lists required fields in
     ``required_fields``; a field's ``required`` flag joins that list. The node
     supports no schema indexes, so a schema with ``indexes`` or a field
-    flagged ``indexed`` is refused (``ValueError``).
+    flagged ``indexed`` is refused (``ValueError``), as is a ``version``
+    outside u32 (when the transaction is signed).
     """
     if schema.indexes:
         raise ValueError("Schema indexes are not supported: the node refuses a schema that declares indexes")
@@ -605,8 +595,8 @@ class RegistrationOperations:
         Raises:
             ValueError: ``owner_did`` is not the client's identity, the
                 subgrove ID is not one the node takes, or the schema is
-                missing, declares indexes, or has a type the node does not
-                take. Nothing is sent.
+                missing, declares indexes, has a type the node does not
+                take, or has a version outside u32. Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         request = dict(request)
@@ -981,6 +971,7 @@ class WillowClientBuilder:
         self._retry_config: Optional[RetryConfig] = None
         self._proof_options: Optional[ProofVerificationOptions] = None
         self._light_client_config: Optional[Dict[str, Any]] = None
+        self._consensus_rpc_url: Optional[str] = None
 
     def timeout(self, timeout: float) -> "WillowClientBuilder":
         """Set request timeout in seconds."""
@@ -1007,6 +998,11 @@ class WillowClientBuilder:
         self._indexer_url = url
         return self
 
+    def consensus_rpc_url(self, url: str) -> "WillowClientBuilder":
+        """Set a validator's CometBFT RPC URL, to read which nonces are used."""
+        self._consensus_rpc_url = url
+        return self
+
     def build(self) -> "WillowClient":
         """Build and return the WillowClient instance."""
         return WillowClient(
@@ -1015,6 +1011,7 @@ class WillowClientBuilder:
             retry_config=self._retry_config,
             proof_verification_options=self._proof_options,
             indexer_url=self._indexer_url,
+            consensus_rpc_url=self._consensus_rpc_url,
         )
 
 
@@ -1054,6 +1051,7 @@ class WillowClient:
         proof_verification_options: Optional[ProofVerificationOptions] = None,
         indexer_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        consensus_rpc_url: Optional[str] = None,
     ):
         """Initialize Willow client.
 
@@ -1068,12 +1066,20 @@ class WillowClient:
                 https://dashboard.willow.tech/account. Required for queries
                 and writes against managed ``api.willow.tech`` /
                 ``indexer.willow.tech``.
+            consensus_rpc_url: Optional CometBFT RPC URL of a validator
+                (typically port 26657). With it, the client reads which of
+                the nonces above an account's base are used (ABCI query
+                ``/store/account_nonce_state/{did}``), so
+                ``wait_until_landed`` sees a write land even while a lower
+                nonce is unused. Without it, the client reads only the base
+                (``GET /account/{did}/nonce``).
         """
         self.api_url = api_url.rstrip("/")
         self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
         self.timeout = timeout
         self.retry_config = retry_config or RetryConfig()
         self.api_key = api_key
+        self.consensus_rpc_url = consensus_rpc_url.rstrip("/") if consensus_rpc_url else None
         self._did: Optional[str] = None
         self._private_key: Optional[str] = None
         self._public_key_id: Optional[str] = None
@@ -1328,6 +1334,9 @@ class WillowClient:
         Raises:
             NotAuthenticatedError: No key given and no identity set for this DID.
             TransactionError: CheckTx refused the transaction.
+            NetworkError: The submission failed in transit. As for any write
+                (see ``resubmit``), its ``transaction`` is set when it may
+                have reached the node.
         """
         body = did_document_body(did_document)
         fallback_algorithm: SignatureAlgorithm = "Ed25519"
@@ -1351,13 +1360,7 @@ class WillowClient:
             create_sign_message("RegisterDid", tx), private_key_hex or "", algorithm
         )
         self._nonces.hold(did, 1)
-        response = await self._post_transaction(create_transaction_wrapper("RegisterDid", tx))
-        try:
-            result = _tx_submit_result(response)
-        except TransactionError as e:
-            self._nonces.settle(did, 1, refusal_outcome(e, response.status_code))
-            raise
-        return dict(result, did=did, nonce=1)
+        return await self._submit_signed(did, 1, create_transaction_wrapper("RegisterDid", tx))
 
     def set_identity(
         self,
@@ -1570,6 +1573,48 @@ class WillowClient:
             raise WillowError(f"The API answered no nonce for {did}")
         return nonce
 
+    async def _nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
+        """``did``'s base and the nonces above it the node reports used.
+
+        With ``consensus_rpc_url``, from the ABCI query
+        ``/store/account_nonce_state/{did}``; without it, or when that query
+        fails, the base alone from ``GET /account/{did}/nonce``.
+        """
+        if self.consensus_rpc_url:
+            try:
+                return await self._query_nonce_state(did)
+            except (WillowError, httpx.HTTPError, ValueError) as e:
+                logger.warning(f"Could not read the nonce state of {did} over RPC, reading the base: {e}")
+        return await self._account_nonce(did), frozenset()
+
+    async def _query_nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
+        """The ABCI query ``/store/account_nonce_state/{did}`` (see
+        ``parse_nonce_state``)."""
+        response = await self._http.post(
+            self.consensus_rpc_url or "",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "abci_query",
+                "params": {
+                    "path": f"/store/account_nonce_state/{did}",
+                    "data": "",
+                    "height": "0",
+                    "prove": False,
+                },
+            },
+        )
+        if response.status_code != 200:
+            raise WillowError(f"nonce state query: HTTP {response.status_code}")
+        body = response.json()
+        result = body.get("result") if isinstance(body, dict) else None
+        answer = result.get("response") if isinstance(result, dict) else None
+        if not isinstance(answer, dict):
+            raise WillowError(f"nonce state query: malformed answer {body!r}")
+        if answer.get("code", 0) != 0:
+            raise WillowError(f"nonce state query: {answer.get('log') or 'code ' + str(answer.get('code'))}")
+        return parse_nonce_state(base64.b64decode(answer.get("value") or "", validate=True))
+
     def _sign_transaction(self, tx_type: str, tx: Any) -> Dict[str, Any]:
         """``tx`` signed by the identity set on the client over the message
         built from its own fields (``create_sign_message``), as ``/tx/submit``
@@ -1598,7 +1643,7 @@ class WillowClient:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._nonce_wait_timeout
         while True:
-            nonce = self._nonces.take(did, await self._account_nonce(did))
+            nonce = self._nonces.take(did, *await self._nonce_state(did))
             if nonce is not None:
                 return nonce
             if loop.time() >= deadline:
@@ -1616,10 +1661,8 @@ class WillowClient:
         A transaction CheckTx refuses gives its nonce back, unless the
         refusal says the nonce is held by a pending transaction or already
         used. When it is already used, no transaction under it can run, so
-        ``tx`` is signed again under a fresh nonce. A submission that fails in
-        transit keeps its nonce until its lease runs out, since it may have
-        reached the node; its ``NetworkError`` carries the ``did`` and
-        ``nonce`` it was signed under.
+        ``tx`` is signed again under a fresh nonce. See ``_submit_signed`` for
+        a submission that may have reached the node.
 
         Returns:
             The ``{tx_hash, code, log, did, nonce}`` of the accepted
@@ -1637,27 +1680,112 @@ class WillowClient:
                 self._nonces.release(did, tx.nonce)
                 raise
             try:
-                response = await self._post_transaction(signed)
-            except NetworkError as e:
-                # It may have reached the node: say under which nonce.
-                e.did, e.nonce = did, tx.nonce  # type: ignore[attr-defined]
-                raise
-            try:
-                return dict(_tx_submit_result(response), did=did, nonce=tx.nonce)
+                return await self._submit_signed(did, tx.nonce, signed)
             except TransactionError as e:
-                outcome = refusal_outcome(e, response.status_code)
-                self._nonces.settle(did, tx.nonce, outcome)
-                if outcome != USED:
+                # Signed under a nonce some other transaction used: it can't run.
+                if e.transaction is not None or not self._nonces.is_used(did, tx.nonce):
                     raise
                 error = e
         assert error is not None
         raise error
 
+    async def _submit_signed(
+        self, did: str, nonce: int, transaction: Dict[str, Any], resubmission: bool = False
+    ) -> Dict[str, Any]:
+        """Submit a transaction signed under ``nonce`` of ``did``, and record
+        what its answer leaves the nonce as.
+
+        A submission that never left (the connection was refused or timed
+        out) gives its nonce back, unless it is a ``resubmission``, whose
+        earlier copy may have reached the node. One that may have reached
+        the node (it failed in transit after connecting, or the API answered
+        a gateway error with no CheckTx answer) keeps its nonce until its
+        lease runs out, and its error carries the signed ``transaction`` for
+        ``resubmit``. Every error carries the ``did`` and ``nonce``.
+        """
+        try:
+            response = await self._post_transaction(transaction)
+        except NetworkError as e:
+            e.did, e.nonce = did, nonce
+            if getattr(e, "_sent", True) or resubmission:
+                e.transaction = transaction
+                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+            else:
+                self._nonces.release(did, nonce)
+            raise
+        try:
+            return dict(_tx_submit_result(response), did=did, nonce=nonce)
+        except TransactionError as e:
+            e.did, e.nonce = did, nonce
+            outcome = refusal_outcome(e, response.status_code, nonce)
+            self._nonces.settle(did, nonce, outcome)
+            if outcome == UNKNOWN:
+                e.transaction = transaction
+                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+            raise
+
+    async def resubmit(self, failed: BaseException) -> Dict[str, Any]:
+        """Send again, under its own nonce, a write that may have reached the node.
+
+        ``failed`` is the ``NetworkError`` or ``TransactionError`` a write
+        raised with its ``transaction`` set: it failed in transit after
+        connecting, or the API answered a gateway error, so the transaction
+        may have reached the node. This sends those exact bytes again, as the
+        node's retry rule asks: whichever copy lands first spends the nonce,
+        and the other is refused, so the write runs at most once. Don't send
+        it again as a new write: under another nonce both copies could run.
+
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` once CheckTx accepts
+            it. When the node already holds an identical copy ("tx already
+            exists in cache"), that counts as accepted: ``code`` 0 and no
+            ``tx_hash``. Wait for it with ``wait_until_landed``.
+
+        Raises:
+            ValueError: ``failed`` carries no ``transaction`` (a write that
+                never left: call it again instead).
+            WillowError: This client has since handed the nonce to another
+                write (``resubmit`` came after the 120 s lease ran out).
+                Read what the write wrote to learn whether it took effect.
+            TransactionError: CheckTx refused it. A refusal that its nonce
+                is already used, or at or below the base, means a transaction
+                under that nonce landed: the earlier copy, since this client
+                handed the nonce to no other write. A copy refused in its
+                block spends its nonce too, so read what it wrote to know it
+                took effect. CheckTx checks some rules (a subgrove that
+                exists, a funded balance) before the nonce, so another
+                refusal can also follow from the earlier copy having landed.
+            NetworkError: It failed in transit again; ``resubmit`` it again.
+        """
+        transaction = getattr(failed, "transaction", None)
+        did = getattr(failed, "did", None)
+        nonce = getattr(failed, "nonce", None)
+        if (
+            not isinstance(transaction, dict)
+            or not isinstance(did, str)
+            or isinstance(nonce, bool)
+            or not isinstance(nonce, int)
+        ):
+            raise ValueError(
+                "resubmit takes the error of a write that may have reached the node "
+                "(its transaction set); a write that never left is sent by calling it again"
+            )
+        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handed_at", None)):
+            raise WillowError(
+                f"nonce {nonce} of {did} was handed to another write after this one's "
+                f"lease ran out, so it can't be resubmitted under it; read what the write "
+                f"wrote to learn whether it took effect"
+            )
+        failed._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+        return await self._submit_signed(did, nonce, transaction, resubmission=True)
+
     async def _post_transaction(self, tx: Dict[str, Any]) -> httpx.Response:
         """POST a JSON transaction to the API's ``/tx/submit``.
 
         Raises:
-            NetworkError: On network errors.
+            NetworkError: On network errors. Its ``_sent`` is ``False`` when
+                the request never left (the connection was refused or timed
+                out, or no pooled connection came free), else ``True``.
         """
         try:
             return await self._http.request(
@@ -1666,10 +1794,13 @@ class WillowClient:
                 content=_encode_json_body(tx),
                 headers={"Content-Type": "application/json"},
             )
-        except httpx.NetworkError as e:
-            raise NetworkError(f"Network error: {str(e)}")
-        except httpx.TimeoutException:
-            raise NetworkError("Request timed out")
+        except httpx.RequestError as e:
+            if isinstance(e, httpx.TimeoutException):
+                error = NetworkError(f"Request timed out: {e}" if str(e) else "Request timed out")
+            else:
+                error = NetworkError(f"Network error: {str(e)}")
+            error._sent = not isinstance(e, _NEVER_SENT)  # type: ignore[attr-defined]
+            raise error from e
 
     async def _submit_transaction(self, tx: Dict[str, Any]) -> Dict[str, Any]:
         """Submit a JSON transaction to the API's ``POST /tx/submit``.
@@ -1693,46 +1824,61 @@ class WillowClient:
 
         Each of ``writes`` is what a write returned: a ``{..., did, nonce}``
         dict (``register_did``, ``data.store_item``,
-        ``registration.register_subgrove``, the ``privacy`` grants) or a list
-        of them (``data.store``, ``data.batch_store``). A write returns once
-        CheckTx accepts it; send one that depends on it (a write after the
-        DID's registration, a store into a subgrove just registered) only
-        after it lands. Writes in flight together may land in any order.
+        ``registration.register_subgrove``, the ``privacy`` grants,
+        ``resubmit``) or a list of them (``data.store``,
+        ``data.batch_store``); or the error a write raised, which carries its
+        ``did`` and ``nonce``. A write returns once CheckTx accepts it; send
+        one that depends on it (a write after the DID's registration, a store
+        into a subgrove just registered) only after it lands. Writes in
+        flight together may land in any order.
 
-        This polls ``GET /account/{did}/nonce`` until the account's base
-        reaches each write's nonce. The base advances only over used nonces
-        with no gap below them, so it also waits for every earlier write from
-        that DID. A write refused in its block uses its nonce too: read what
-        it wrote to know it took effect. A RegisterDid uses its nonce only
-        when it succeeds.
+        A nonce counts as used once it is at or below the account's base, or
+        the node reports it used above the base. Only with
+        ``consensus_rpc_url`` does the client read the nonces used above the
+        base (otherwise only those CheckTx has refused as already used): the
+        base advances only over used nonces with no gap below them, so
+        without it a write counts as landed only once every lower nonce of
+        its DID is used too. A nonce no transaction uses (one given back
+        after CheckTx refused its write, or one whose write failed in transit
+        and was never resubmitted) then holds back every write above it,
+        until this client hands that nonce to a later write and that write
+        lands.
+
+        A write refused in its block uses its nonce too: read what it wrote
+        to know it took effect. A RegisterDid uses its nonce only when it
+        succeeds.
 
         Raises:
             NotLandedError: A nonce wasn't used within ``timeout`` seconds.
             ValueError: A write carries no ``did`` and ``nonce``.
         """
-        targets: Dict[str, int] = {}
+        targets: Dict[str, Set[int]] = {}
         pending: List[Any] = list(writes)
         while pending:
             write = pending.pop()
             if isinstance(write, (list, tuple)):
                 pending.extend(write)
                 continue
-            did = write.get("did") if isinstance(write, dict) else None
-            nonce = write.get("nonce") if isinstance(write, dict) else None
+            if isinstance(write, dict):
+                did, nonce = write.get("did"), write.get("nonce")
+            else:
+                did, nonce = getattr(write, "did", None), getattr(write, "nonce", None)
             if not isinstance(did, str) or isinstance(nonce, bool) or not isinstance(nonce, int):
                 raise ValueError("each write must be the {..., did, nonce} result a write returned")
-            targets[did] = max(targets.get(did, 0), nonce)
+            targets.setdefault(did, set()).add(nonce)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        for did, nonce in targets.items():
+        for did, nonces in targets.items():
             while True:
-                base = self._nonces.observe(did, await self._account_nonce(did))
-                if base >= nonce:
+                base, used = await self._nonce_state(did)
+                base = self._nonces.observe(did, base, used)
+                waiting = sorted(n for n in nonces if not self._nonces.is_used(did, n))
+                if not waiting:
                     break
                 if loop.time() >= deadline:
                     raise NotLandedError(
-                        f"nonce {nonce} of {did} was not used within {timeout} s: the "
-                        f"account's base nonce is {base}"
+                        f"nonce {', '.join(map(str, waiting))} of {did} was not used within "
+                        f"{timeout} s: the account's base nonce is {base}"
                     )
                 await asyncio.sleep(poll_interval)
 

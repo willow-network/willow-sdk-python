@@ -743,6 +743,118 @@ async def test_consensus_register_subgrove_refuses_indexes_and_bad_ids_before_re
     assert client._session.read_nonces == 0
 
 
+# The node parses a data or file subgrove's schema as its SchemaDefinition
+# (serde): `version` u32 (default 1), `fields` a map of name -> FieldType, a
+# lowercase unit enum (string, number, boolean, array, object, bytes),
+# `indexes` (default empty), `required_fields` a list of names (default
+# empty); other keys are ignored. A schema it can't parse is refused in its
+# block, spending the nonce, so the SDK refuses one before signing.
+NODE_FIELD_TYPES = {"string", "number", "boolean", "array", "object", "bytes"}
+
+
+def _parses_as_node_schema(text):
+    schema = json.loads(text)
+    return (
+        isinstance(schema, dict)
+        and (type(schema.get("version", 1)) is int and 0 <= schema.get("version", 1) < 2**32)
+        and isinstance(schema.get("fields", {}), dict)
+        and all(isinstance(t, str) and t in NODE_FIELD_TYPES for t in schema.get("fields", {}).values())
+        and schema.get("indexes", []) == []
+        and isinstance(schema.get("required_fields", []), list)
+        and all(isinstance(f, str) for f in schema.get("required_fields", []))
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_subgrove_sends_a_schema_the_node_parses():
+    client, seen = _willow_client(0)
+    schema = {
+        "version": 3,
+        "fields": {t: {"type": t, "required": t == "bytes"} for t in sorted(NODE_FIELD_TYPES)},
+        "required_fields": ["string"],
+    }
+    await client.registration.register_subgrove(
+        {"subgrove_id": "sg-1", "name": "n", "owner_did": "did:willow:a", "schema": schema}
+    )
+    sent = _sent(seen, "RegisterSubgrove")["schema"]
+    assert _parses_as_node_schema(sent)
+    assert json.loads(sent) == {
+        "version": 3,
+        "fields": {t: t for t in NODE_FIELD_TYPES},
+        "indexes": [],
+        "required_fields": ["string", "bytes"],
+    }
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_register_subgrove_refuses_a_schema_version_outside_u32():
+    client, seen = _willow_client(0)
+    with pytest.raises(ValueError, match="version"):
+        await client.registration.register_subgrove({
+            "subgrove_id": "sg-1", "name": "n", "owner_did": "did:willow:a",
+            "schema": {"version": 2**32, "fields": {}},
+        })
+    assert seen == []
+    await client.close()
+
+
+@pytest.mark.parametrize("schema", [
+    "{}",
+    '{"version":0}',
+    '{"version":4294967295,"fields":{"a":"bytes"},"indexes":[],"required_fields":["a"]}',
+    '{"version":1,"fields":{},"description":"ignored by the node"}',
+])
+def test_a_schema_the_node_parses_is_signed(schema):
+    _, tx = _transaction("RegisterSubgrove (data)")
+    assert _parses_as_node_schema(schema)
+    register_subgrove_message(dict(tx, schema=schema))
+
+
+@pytest.mark.parametrize("schema,match", [
+    ("not json", "not JSON"),
+    ("[]", "JSON object"),
+    ('{"version":-1}', "version"),
+    ('{"version":4294967296}', "version"),
+    ('{"version":1.0}', "version"),
+    ('{"version":true}', "version"),
+    ('{"version":null}', "version"),
+    ('{"version":1,"version":2}', "repeats"),
+    ('{"fields":{"a":{"type":"string"}}}', "type"),  # the SDK model's shape, not the node's
+    ('{"fields":{"a":"String"}}', "type"),
+    ('{"fields":{"a":"text"}}', "type"),
+    ('{"fields":["a"]}', "fields"),
+    ('{"indexes":{}}', "indexes"),
+    ('{"required_fields":"a"}', "required_fields"),
+    ('{"required_fields":[1]}', "required_fields"),
+])
+@pytest.mark.parametrize("name", ["RegisterSubgrove (data)", "RegisterSubgrove (file)"])
+def test_a_schema_the_node_cannot_parse_is_not_signed(name, schema, match):
+    _, tx = _transaction(name)
+    with pytest.raises(ValueError, match=match):
+        register_subgrove_message(dict(tx, schema=schema))
+
+
+@pytest.mark.asyncio
+async def test_consensus_register_subgrove_refuses_a_schema_the_node_cannot_parse_before_reading_the_nonce():
+    client = _consensus_client(0)
+    with pytest.raises(ValueError, match="type"):
+        await client.register_subgrove(
+            "sg-1", '{"version":1,"fields":{"a":{"type":"string"}}}', "did:willow:a", SEED, PUBLIC_KEY_ID
+        )
+    assert client._session.submitted == []
+    assert client._session.read_nonces == 0
+
+
+def test_every_kat_registration_schema_parses_as_the_nodes():
+    schemas = [
+        json.loads(v["transaction_json"])["RegisterSubgrove"]["schema"]
+        for name, v in VECTORS.items() if name.startswith("RegisterSubgrove")
+    ]
+    assert len(schemas) == 5
+    assert all(_parses_as_node_schema(schema) for schema in schemas)
+
+
 # ---------------------------------------------------------------------------
 # File and storage-node transactions take the nonce the caller chose; the node
 # refuses nonce 0, so there is no default.

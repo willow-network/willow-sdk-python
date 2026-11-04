@@ -25,8 +25,17 @@ from ..signed_messages import (
 
 
 class ConsensusError(Exception):
-    """Base exception for consensus client operations."""
-    pass
+    """Base exception for consensus client operations.
+
+    Raised by a write that failed after its nonce was chosen, it carries the
+    ``did`` and ``nonce`` the transaction was signed under, and, when it may
+    have reached the node, the signed ``transaction`` as sent (see
+    ``ConsensusClient.resubmit``).
+    """
+
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Dict[str, Any]] = None
 
 
 class TransactionStatus(Enum):
@@ -54,13 +63,25 @@ class ConsensusConfig:
 
 @dataclass
 class BroadcastResult:
-    """Result of transaction broadcast."""
+    """Result of transaction broadcast.
+
+    ``http_status`` is the API's HTTP status. ``resent`` is true when an
+    earlier attempt of the same bytes failed in transit and may have reached
+    the node. A write's result carries the ``did`` and ``nonce`` it was signed
+    under, and, when it failed in a way that leaves open whether it reached
+    the node (a gateway error), the signed ``transaction`` to resubmit.
+    """
     success: bool
     tx_hash: Optional[str] = None
     height: Optional[int] = None
     error_code: Optional[int] = None
     error_message: Optional[str] = None
     raw_log: Optional[str] = None
+    http_status: Optional[int] = None
+    resent: bool = False
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Dict[str, Any]] = None
     
     @classmethod
     def from_response(cls, data: Dict[str, Any]) -> 'BroadcastResult':

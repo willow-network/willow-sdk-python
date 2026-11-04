@@ -11,9 +11,10 @@ import time
 from typing import Optional, Dict, Any, List, Tuple
 import logging
 
-from ..auth import sign_message, SignatureAlgorithm
+from ..auth import _key_algorithm, sign_message, SignatureAlgorithm
 from ..errors import NonceWindowFullError, TransactionError
-from ..nonces import USED, WINDOW, NonceTracker, refusal_outcome
+from ..nonces import UNKNOWN, WINDOW, NonceTracker, already_in_cache, refusal_outcome
+from ..signed_messages import did_document_body
 from .types import (
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
@@ -22,6 +23,15 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Transport failures before a request is sent: it never reached the API.
+_NEVER_SENT = tuple(
+    t for t in (
+        aiohttp.ClientConnectorError,
+        getattr(aiohttp, "ConnectionTimeoutError", None),
+        aiohttp.InvalidURL,
+    ) if t is not None
+)
 
 
 class ConsensusClient:
@@ -67,7 +77,7 @@ class ConsensusClient:
         did_document: Dict[str, Any],
         private_key: str,
         public_key_id: str,
-        algorithm: SignatureAlgorithm = "Ed25519",
+        algorithm: Optional[SignatureAlgorithm] = None,
     ) -> BroadcastResult:
         """
         Register a DID on the blockchain.
@@ -86,10 +96,14 @@ class ConsensusClient:
             did_document: DID document to register (self-certifying ``id``)
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
+            algorithm: The key's algorithm. Defaults to the one the
+                document's key type names (``Ed25519VerificationKey2018`` or
+                ``EcdsaSecp256k1VerificationKey2019``), else "Ed25519".
 
         Returns:
             BroadcastResult with transaction status
         """
+        algorithm = algorithm or _key_algorithm(did_document_body(did_document), public_key_id) or "Ed25519"
         tx = RegisterDidTx(
             did_document=did_document,
             signature="",  # Will be filled by signing
@@ -131,7 +145,11 @@ class ConsensusClient:
 
         Args:
             subgrove_id: Unique subgrove identifier
-            schema: The subgrove's schema, as JSON text
+            schema: The subgrove's schema, as JSON text: for a data or file
+                subgrove, the node's ``SchemaDefinition`` (``version``,
+                ``fields`` mapping each name to "string", "number",
+                "boolean", "array", "object", or "bytes", and
+                ``required_fields``)
             owner_did: DID of the subgrove owner
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
@@ -149,8 +167,11 @@ class ConsensusClient:
             BroadcastResult with transaction status
 
         Raises:
-            ValueError, TypeError: A field is missing or out of range, or the
-                subgrove ID or owner DID holds a line break; nothing is sent.
+            ValueError, TypeError: A field is missing or out of range, the
+                subgrove ID or owner DID holds a line break, or, for a data or
+                file subgrove, the subgrove ID is not one the node takes or
+                the schema does not parse as the node's ``SchemaDefinition``
+                (or declares indexes); nothing is sent.
         """
         tx = RegisterSubgroveTx(
             subgrove_id=subgrove_id,
@@ -462,11 +483,20 @@ class ConsensusClient:
         transaction CheckTx refuses gives its nonce back, unless the refusal
         says the nonce is held by a pending transaction or already used. When
         it is already used, no transaction under it can run, so it is signed
-        again under a fresh nonce.
+        again under a fresh nonce, unless an earlier attempt of these bytes
+        failed in transit: that attempt may be what used it, so this raises
+        rather than run the write twice. See ``_broadcast_signed`` for a
+        submission that may have reached the node.
 
         ``algorithm`` selects the signing algorithm. It must be supplied by the
         caller because the self-certifying DID no longer encodes it; it cannot
         be recovered from the transaction's ``owner_did``.
+
+        Raises:
+            ConsensusError: The submission failed in transit, or a resent
+                copy was refused because its nonce is used (the write may
+                have landed). It carries the ``did`` and ``nonce``, and the
+                signed ``transaction`` when it may have reached the node.
         """
         # Refuse what can't be signed (a line break, a field out of range)
         # before taking a nonce.
@@ -486,18 +516,107 @@ class ConsensusClient:
             except BaseException:
                 self._nonces.release(signer, transaction.nonce)
                 raise
-            # A submission that raises may have reached the node: its nonce
-            # stays taken until its lease runs out.
-            result = await self._broadcast_transaction(tx_wrapper)
-            if result.success:
+            result = await self._broadcast_signed(signer, transaction.nonce, tx_wrapper)
+            if result.success or not self._nonces.is_used(signer, transaction.nonce):
                 return result
-            outcome = refusal_outcome(TransactionError(
-                result.error_message or "", error_code=result.error_code, raw_log=result.raw_log
-            ))
-            self._nonces.settle(signer, transaction.nonce, outcome)
-            if outcome != USED or fixed_nonce:
+            if result.resent:
+                error = ConsensusError(
+                    f"nonce {transaction.nonce} of {signer} is used, and an earlier attempt of "
+                    f"this transaction failed in transit, so it may have landed under it "
+                    f"({result.raw_log}); read what it wrote before sending it again"
+                )
+                error.did, error.nonce, error.transaction = signer, transaction.nonce, tx_wrapper
+                raise error
+            if fixed_nonce:
                 return result
         return result
+
+    async def _broadcast_signed(
+        self, did: str, nonce: int, transaction: Dict[str, Any], resubmission: bool = False
+    ) -> BroadcastResult:
+        """Broadcast a transaction signed under ``nonce`` of ``did``, and
+        record what its answer leaves the nonce as.
+
+        Its retries send the same bytes. When every attempt fails in transit,
+        the nonce is given back if none can have left (the connection was
+        refused or timed out) and this is not a ``resubmission``; otherwise it
+        stays taken until its lease runs out, and the ``ConsensusError``
+        carries the signed ``transaction``. A gateway error with no CheckTx
+        answer keeps the nonce too, and its result carries ``transaction``.
+        """
+        try:
+            result = await self._broadcast_transaction(transaction)
+        except ConsensusError as e:
+            e.did, e.nonce = did, nonce
+            if getattr(e, "_sent", True) or resubmission:
+                e.transaction = transaction
+                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+            else:
+                self._nonces.release(did, nonce)
+            raise
+        result.did, result.nonce = did, nonce
+        if result.success:
+            return result
+        outcome = refusal_outcome(
+            TransactionError(result.error_message or "", error_code=result.error_code, raw_log=result.raw_log),
+            result.http_status,
+            nonce,
+        )
+        self._nonces.settle(did, nonce, outcome)
+        if outcome == UNKNOWN:
+            result.transaction = transaction
+            result._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+        return result
+
+    async def resubmit(self, failed: Any) -> BroadcastResult:
+        """Send again, under its own nonce, a write that may have reached the node.
+
+        ``failed`` is the ``ConsensusError`` a write raised, or the
+        ``BroadcastResult`` it returned, with its ``transaction`` set: it
+        failed in transit, or the API answered a gateway error, so the
+        transaction may have reached the node. This sends those exact bytes
+        again: whichever copy lands first spends the nonce, and the other is
+        refused, so the write runs at most once. Don't send it again as a new
+        write: under another nonce both copies could run.
+
+        Returns:
+            The ``BroadcastResult``. When the node already holds an identical
+            copy ("tx already exists in cache"), that counts as success, with
+            no ``tx_hash``. A refusal that its nonce is already used, or at or
+            below the base, means a transaction under that nonce landed: the
+            earlier copy, since this client handed the nonce to no other
+            write. A copy refused in its block spends its nonce too, so read
+            what it wrote to know it took effect. CheckTx checks some rules
+            before the nonce, so another refusal can also follow from the
+            earlier copy having landed.
+
+        Raises:
+            ValueError: ``failed`` carries no ``transaction``.
+            ConsensusError: This client has since handed the nonce to another
+                write (``resubmit`` came after the 120 s lease ran out), or
+                it failed in transit again (``resubmit`` it again).
+        """
+        transaction = getattr(failed, "transaction", None)
+        did = getattr(failed, "did", None)
+        nonce = getattr(failed, "nonce", None)
+        if (
+            not isinstance(transaction, dict)
+            or not isinstance(did, str)
+            or isinstance(nonce, bool)
+            or not isinstance(nonce, int)
+        ):
+            raise ValueError(
+                "resubmit takes the error or result of a write that may have reached "
+                "the node (its transaction set)"
+            )
+        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handed_at", None)):
+            raise ConsensusError(
+                f"nonce {nonce} of {did} was handed to another write after this one's "
+                f"lease ran out, so it can't be resubmitted under it; read what the write "
+                f"wrote to learn whether it took effect"
+            )
+        failed._handed_at = self._nonces.handed_at(did, nonce)
+        return await self._broadcast_signed(did, nonce, transaction, resubmission=True)
 
     async def _broadcast_transaction(self, transaction: Dict[str, Any]) -> BroadcastResult:
         """Submit a transaction via the API server's /tx/submit endpoint.
@@ -506,6 +625,16 @@ class ConsensusClient:
         JSON, bincode-encodes it, and forwards to CometBFT's
         broadcast_tx_sync — so SDKs can keep sending JSON without a
         per-language bincode encoder.
+
+        An attempt that fails in transit is retried with the same bytes, up to
+        ``max_retries`` times. CometBFT's "tx already exists in cache" (it
+        holds these exact bytes, which CheckTx admitted) counts as success.
+        The result's ``resent`` says whether an earlier attempt failed after
+        it may have reached the node.
+
+        Raises:
+            ConsensusError: Every attempt failed in transit. Its ``_sent`` is
+                whether any attempt may have reached the node.
         """
         if not self.config.api_url:
             raise ConsensusError(
@@ -513,10 +642,11 @@ class ConsensusClient:
             )
 
         url = f"{self.config.api_url.rstrip('/')}/tx/submit"
-        last_error: Optional[str] = None
+        maybe_sent = False
         for attempt in range(self.config.max_retries + 1):
             try:
                 async with self._session.post(url, json=transaction) as response:
+                    status = response.status
                     try:
                         body = await response.json(content_type=None)
                     except ValueError:
@@ -524,11 +654,20 @@ class ConsensusClient:
                         body = None
                     if not isinstance(body, dict):
                         text = (await response.text()).strip()
-                        msg = text or f"HTTP {response.status}"
-                        return BroadcastResult(success=False, error_message=msg, raw_log=msg)
-                    if not response.status == 200 or not body.get('success') or 'data' not in body:
-                        msg = body.get('error') or f"HTTP {response.status}"
-                        return BroadcastResult(success=False, error_message=msg, raw_log=msg)
+                        msg = text or f"HTTP {status}"
+                        return BroadcastResult(
+                            success=False, error_message=msg, raw_log=msg,
+                            http_status=status, resent=maybe_sent,
+                        )
+                    if not status == 200 or not body.get('success') or 'data' not in body:
+                        msg = body.get('error') or f"HTTP {status}"
+                        return BroadcastResult(
+                            success=already_in_cache(msg),
+                            error_message=None if already_in_cache(msg) else msg,
+                            raw_log=msg,
+                            http_status=status,
+                            resent=maybe_sent,
+                        )
 
                     data = body['data']
                     code = data.get('code', 0)
@@ -538,16 +677,20 @@ class ConsensusClient:
                         error_code=code if code != 0 else None,
                         error_message=data.get('log') if code != 0 else None,
                         raw_log=data.get('log'),
+                        http_status=status,
+                        resent=maybe_sent,
                     )
             except Exception as e:
-                last_error = str(e)
+                maybe_sent = maybe_sent or not isinstance(e, _NEVER_SENT)
                 if attempt == self.config.max_retries:
-                    raise ConsensusError(
+                    error = ConsensusError(
                         f"tx submit failed after {self.config.max_retries + 1} attempts: {e}"
                     )
+                    error._sent = maybe_sent  # type: ignore[attr-defined]
+                    raise error from e
                 logger.warning(f"tx submit attempt {attempt + 1} failed: {e}")
 
-        raise ConsensusError(f"tx submit exhausted retries: {last_error}")
+        raise ConsensusError("tx submit made no attempt: max_retries is negative")
     
     async def _rpc_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Make a JSON-RPC request to CometBFT."""

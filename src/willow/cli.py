@@ -139,7 +139,7 @@ def auth():
     "--algorithm",
     "algorithm_arg",
     type=click.Choice(["Ed25519", "secp256k1"]),
-    help="The key's algorithm (default: the saved one, else Ed25519)",
+    help="The key's algorithm (default: the saved identity's when the DID and key are the saved ones, else Ed25519)",
 )
 def login(did_arg, key_arg, key_id_arg, algorithm_arg):
     """Save identity (DID + key + key-id + algorithm) to ~/.willow/config.json."""
@@ -149,7 +149,10 @@ def login(did_arg, key_arg, key_id_arg, algorithm_arg):
     did_val = did_arg or existing.get("did")
     key_val = key_arg or existing.get("private_key")
     key_id_val = key_id_arg or existing.get("public_key_id")
-    algorithm_val = algorithm_arg or existing.get("algorithm", "Ed25519")
+    # The saved algorithm belongs to the saved key: another DID or key
+    # doesn't inherit it.
+    same_identity = did_val == existing.get("did") and key_val == existing.get("private_key")
+    algorithm_val = algorithm_arg or (existing.get("algorithm", "Ed25519") if same_identity else "Ed25519")
 
     if not (did_val and key_val and key_id_val):
         click.echo("Need --did, --key, and --key-id (or run `willow-cli did generate --save` first).")

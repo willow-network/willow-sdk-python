@@ -47,8 +47,18 @@ class NetworkError(WillowError):
 
     Raised when network-level issues occur, such as connection failures,
     timeouts, or DNS resolution errors.
+
+    Raised by a write, it carries the ``did`` and ``nonce`` the transaction
+    was signed under. ``transaction`` is the signed transaction as sent when
+    the request may have reached the node (it failed after the connection
+    was made): its nonce stays taken, and ``WillowClient.resubmit`` sends it
+    again. It is ``None`` when the request never left (the connection was
+    refused or timed out): its nonce is free again.
     """
-    pass
+
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Any] = None
 
 
 class HttpError(WillowError):
@@ -210,8 +220,15 @@ class ConsensusError(WillowError):
 class TransactionError(ConsensusError):
     """Transaction-related errors.
 
-    Raised when transaction operations fail.
+    Raised when transaction operations fail. Raised by a write, it carries
+    the ``did`` and ``nonce`` the transaction was signed under, and, when
+    the answer leaves open whether it reached the node (a gateway error
+    with no CheckTx answer), the signed ``transaction`` to resubmit.
     """
+
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Any] = None
 
     def __init__(
         self,
@@ -255,10 +272,11 @@ class NonceWindowFullError(ConsensusError):
 class NotLandedError(ConsensusError):
     """A write's nonce wasn't used in a block within the time waited.
 
-    Raised by ``WillowClient.wait_until_landed``. The account's base only
-    advances over used nonces with no gap below them, so this also means an
-    earlier write from the identity, or one refused at CheckTx whose nonce no
-    later write has taken, has not landed.
+    Raised by ``WillowClient.wait_until_landed``. Without a consensus RPC
+    URL the client sees only the account's base, which advances only over
+    used nonces with no gap below them, so this can also mean a lower nonce
+    of the identity is unused: an earlier write that hasn't landed, or a
+    nonce no transaction has used yet.
     """
 
 

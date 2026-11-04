@@ -730,10 +730,68 @@ def register_subgrove_unsigned_bincode(tx: Any) -> bytes:
 _STORAGE_SUBGROVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
+# The field types of the node's ``SchemaDefinition`` (``FieldType``, lowercase).
+SCHEMA_FIELD_TYPES = ("string", "number", "boolean", "array", "object", "bytes")
+
+
+class _JsonObject(dict):
+    duplicates: Tuple[str, ...] = ()
+
+
+def _json_object(pairs: List[Tuple[str, Any]]) -> "_JsonObject":
+    obj = _JsonObject(pairs)
+    if len(obj) != len(pairs):
+        seen: set = set()
+        obj.duplicates = tuple(k for k, _ in pairs if k in seen or seen.add(k))
+    return obj
+
+
+def _schema_definition_rules(text: str) -> None:
+    """Refuse a schema the node can't parse as its ``SchemaDefinition``:
+    a JSON object of ``version`` (u32, default 1), ``fields`` (an object
+    mapping each name to one of ``SCHEMA_FIELD_TYPES``, default empty),
+    ``indexes`` (default empty), and ``required_fields`` (a list of names,
+    default empty). Other keys are ignored, as the node ignores them. The
+    node refuses one in its block (spending the nonce); this SDK also
+    refuses any ``indexes``."""
+    try:
+        schema = json.loads(text, object_pairs_hook=_json_object)
+    except ValueError as e:
+        raise ValueError(f"schema is not JSON the node can parse: {e}") from None
+    if not isinstance(schema, dict):
+        raise ValueError("schema must be a JSON object: the node's SchemaDefinition")
+    duplicates = [k for k in schema.duplicates if k in ("version", "fields", "indexes", "required_fields")]
+    if duplicates:
+        raise ValueError(f"schema repeats {duplicates[0]!r}: the node refuses a duplicate field")
+    if "version" in schema:
+        version = schema["version"]
+        if type(version) is not int or not 0 <= version <= _U32_MAX:
+            raise ValueError(f"schema version must be an integer from 0 to {_U32_MAX}, not {version!r}")
+    fields = schema.get("fields", {})
+    if not isinstance(fields, dict):
+        raise ValueError("schema fields must be an object mapping each field name to its type")
+    for name, field_type in fields.items():
+        if not isinstance(field_type, str) or field_type not in SCHEMA_FIELD_TYPES:
+            raise ValueError(
+                f"schema field {name!r} has type {field_type!r}; the node takes "
+                + ", ".join(SCHEMA_FIELD_TYPES)
+            )
+    indexes = schema.get("indexes", [])
+    if not isinstance(indexes, list):
+        raise ValueError("schema indexes must be a list")
+    if indexes:
+        raise ValueError("Schema indexes are not supported: this SDK refuses a schema that declares indexes")
+    required = schema.get("required_fields", [])
+    if not isinstance(required, list) or not all(isinstance(r, str) for r in required):
+        raise ValueError("schema required_fields must be a list of field names")
+
+
 def _storage_registration_rules(t: Dict[str, Any]) -> None:
     """Refuse a DataStorage or FileStorage registration the node refuses: a
     subgrove ID that isn't 1 to 64 ASCII letters, digits, ``-``, or ``_``
-    starting with a letter or digit, or a schema that declares indexes."""
+    starting with a letter or digit, or a schema that doesn't parse as the
+    node's ``SchemaDefinition`` (see ``_schema_definition_rules``) or that
+    declares indexes."""
     if "BlockchainIndexing" in t["mode"]:
         return
     if not _STORAGE_SUBGROVE_ID.fullmatch(t["subgrove_id"]):
@@ -741,12 +799,7 @@ def _storage_registration_rules(t: Dict[str, Any]) -> None:
             f"subgrove_id {t['subgrove_id']!r} is not one the node takes: 1 to 64 ASCII "
             "letters, digits, '-', or '_', starting with a letter or digit"
         )
-    try:
-        schema = json.loads(t["schema"])
-    except ValueError:
-        return  # the node refuses a schema it can't parse itself
-    if isinstance(schema, dict) and schema.get("indexes"):
-        raise ValueError("Schema indexes are not supported: the node refuses a schema that declares indexes")
+    _schema_definition_rules(t["schema"])
 
 
 def register_subgrove_message(tx: Any) -> str:
@@ -766,8 +819,8 @@ def register_subgrove_message(tx: Any) -> str:
         ValueError: A field is out of range or a line holds a line break, or
             a DataStorage or FileStorage registration has a subgrove ID the
             node refuses (not 1 to 64 ASCII letters, digits, ``-``, or ``_``
-            starting with a letter or digit) or a schema that declares
-            indexes.
+            starting with a letter or digit), or a schema that doesn't parse
+            as the node's ``SchemaDefinition`` or declares indexes.
     """
     t = normalize_register_subgrove(tx)
     lines = [

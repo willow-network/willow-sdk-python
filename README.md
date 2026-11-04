@@ -84,6 +84,9 @@ client = WillowClient("http://localhost:3031")
 # With custom timeout
 client = WillowClient(api_url="http://localhost:3031", timeout=60.0)
 
+# With a validator's CometBFT RPC, to read which nonces are used (see Nonces)
+client = WillowClient("http://localhost:3031", consensus_rpc_url="http://localhost:26657")
+
 # Builder pattern
 client = (
     WillowClient.builder("http://localhost:3031")
@@ -261,7 +264,7 @@ Nonce: <nonce>
 - RevokeSubgroveKey signs `RevokeSubgroveKey:<subgrove_id>:<revokee_did>:<sender_did>:<nonce>`, which binds every field it carries.
 - RegisterDid signs the node's compact JSON of the DID document, its fields in the node's order (`id`, `public_keys`, `authentication`, `service`, `created`, `updated`, `proof`; each key `id`, `type`, `controller`, `public_key_base58`, `public_key_hex`), always under nonce 1. The SDK sends that same document (`did_document_body`).
 - A subgrove ID, owner, sender, grantee, grantee key ID, granter, or node DID holding a line break is refused with `ValueError` before anything is signed.
-- The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). `register_subgrove_message`, and every flow that signs a registration, refuses both with `ValueError` before anything is signed.
+- The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"), and refuses one in its block whose schema doesn't parse as its `SchemaDefinition` (`version` a u32, `fields` mapping each name to `"string"`, `"number"`, `"boolean"`, `"array"`, `"object"`, or `"bytes"`, `required_fields` a list of names). `register_subgrove_message`, and every flow that signs a registration, refuses all three with `ValueError` before anything is signed.
 
 `ConsensusClient`, `client.files`, `client.data`, `client.registration`, `client.privacy`, and `client.register_did` build these messages. `store_data_message`, `store_file_manifest_message`, `delete_file_manifest_message`, `register_subgrove_message`, `grant_subgrove_key_message`, `rotate_subgrove_key_message`, `revoke_subgrove_key_message`, `unregister_storage_node_message`, and `register_did_message` return the exact text for a transaction you sign yourself.
 
@@ -270,14 +273,40 @@ Nonce: <nonce>
 The node accepts a transaction under a nonce among the 24 above the account's nonce (its base, `GET /account/{did}/nonce`) that is not used yet. The base advances only over used nonces with no gap below them, so a nonce taken and never used blocks the window until something uses it. `WillowClient` and `ConsensusClient` hand out nonces per signing DID:
 
 - Each write takes the lowest nonce in the window the client hasn't handed out, so writes sent before earlier ones land, or concurrently, each get their own.
-- A write CheckTx refuses gives its nonce back, leaving no gap, unless the refusal says the nonce is held by a pending transaction or already used. When it is already used, no transaction under it can run, so the write is signed again under a fresh nonce.
-- A nonce handed out more than 120 s ago whose write hasn't landed is free again. A write that failed in transit keeps its nonce until then, since it may have reached the node; its `NetworkError` carries the `did` and `nonce` it was signed under. Before sending it again, wait for that nonce: `await client.wait_until_landed({"did": error.did, "nonce": error.nonce})`.
+- A write CheckTx refuses gives its nonce back, leaving no gap, unless the refusal is the node's own refusal of that nonce: held by a pending transaction, already used, or at or below the base. When it is already used, no transaction under it can run, so the write is signed again under a fresh nonce.
+- A nonce handed out more than 120 s ago whose write hasn't landed is free again.
 - While all 24 are taken, the next write waits for earlier ones to land, and raises `NonceWindowFullError` if none does within 60 s. `client.data.store` with more than 24 keys sends the rest as earlier ones land.
 - RegisterDid always signs nonce 1.
 
 Nonces are tracked per client object, so send one identity's writes through one client. `client.files` signs under the nonce you pass in `signing["nonce"]`, which is required.
 
-Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, or lists of them, and returns once the account's base reaches each nonce:
+#### When a write fails
+
+An error a write raises after choosing its nonce carries the `did` and `nonce` it was signed under. What to do depends on whether the transaction may have reached the node:
+
+- It never left: a `NetworkError` whose `transaction` is `None` (the connection was refused, or timed out before connecting). Its nonce is free again. Call the write again.
+- It may have reached the node: a `NetworkError` after connecting (a read timeout, a dropped connection), or a `TransactionError` for a gateway error with no CheckTx answer. Its `transaction` holds the signed transaction as sent, and its nonce stays taken. Send the same transaction again under the same nonce with `await client.resubmit(error)`: whichever copy lands first spends the nonce and the other is refused, so the write runs at most once. Don't call the write again: under another nonce, both copies could run.
+- `resubmit` returns `{tx_hash, code, log, did, nonce}` once CheckTx accepts the copy. If the node already holds an identical copy ("tx already exists in cache"), that counts as accepted, with `code` 0 and no `tx_hash`. A `TransactionError` saying the nonce is already used, or at or below the base, means a transaction under it landed: the earlier copy. CheckTx checks some rules (a subgrove that exists, a funded balance) before the nonce, so a refusal of a copy can also follow from the earlier copy having landed: read what the write wrote to know whether it took effect.
+- If `resubmit` comes after the 120 s lease and this client has handed the nonce to another write, it raises `WillowError` and sends nothing. Read what the write wrote to learn whether it took effect.
+- A write CheckTx refused (a `TransactionError` whose `transaction` is `None`) never ran: fix what the refusal says and call the write again.
+
+```python
+from willow import NetworkError, TransactionError
+
+try:
+    result = await client.data.store_item("my-data", "k", {"v": 1})
+except (NetworkError, TransactionError) as error:
+    if error.transaction is None:
+        raise  # never left, or refused at CheckTx: fix it and call the write again
+    result = await client.resubmit(error)
+await client.wait_until_landed(result)
+```
+
+`ConsensusClient` does the same: a `ConsensusError` raised after every retry failed in transit, or a `BroadcastResult` for a gateway error, carries `did`, `nonce`, and, when it may have reached the node, `transaction`; `await consensus.resubmit(error_or_result)` returns a `BroadcastResult`. Its own retries send the same bytes, and a retry refused because its nonce is used raises `ConsensusError` (the first attempt may have landed) instead of signing the write again under another nonce. Each `BroadcastResult` carries `http_status`, `did`, and `nonce`.
+
+#### Waiting for writes to land
+
+Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, lists of them, or a write's error, and returns once each nonce is used:
 
 ```python
 registration = await client.register_did(did_info["did_document"])
@@ -287,7 +316,9 @@ results = await client.data.store("my-data", {"a": {"n": 1}, "b": {"n": 2}})
 await client.wait_until_landed(results, timeout=60.0)  # NotLandedError after 60 s
 ```
 
-The base reaching a write's nonce also means every earlier write from that DID landed. A write refused in its block uses its nonce too, so read what it wrote to know it took effect.
+A nonce counts as used once it is at or below the account's base, or the node reports it used above the base. With `consensus_rpc_url`, the client reads which nonces above the base are used (the ABCI query `/store/account_nonce_state/{did}`), so each write counts as landed when its own nonce is used. Without it, the client reads only the base (and the nonces CheckTx has refused as already used). The base advances only over used nonces with no gap below them, so a write counts as landed only once every lower nonce of its DID is used too. A nonce no transaction uses (one given back after CheckTx refused its write, or one whose write failed in transit and was never resubmitted) then holds back every write above it, until the client hands that nonce to a later write and that write lands.
+
+A write refused in its block uses its nonce too, so read what it wrote to know it took effect. A RegisterDid uses its nonce only when it succeeds.
 
 ### Data Operations (Secure by Default)
 
@@ -348,7 +379,7 @@ print(f"Total: {result.total}")
 
 `register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. `dataset_path` has no on-chain counterpart and is not sent. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
 
-The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). Both raise `ValueError` before anything is signed, as does a field flagged `indexed`.
+The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). Both raise `ValueError` before anything is signed, as does a field flagged `indexed` or a schema `version` outside u32. `ConsensusClient.register_subgrove` takes the schema as JSON text, which for a data or file subgrove must parse as the node's `SchemaDefinition`: `{"version": 1, "fields": {"name": "string"}, "indexes": [], "required_fields": ["name"]}`, each field's type one of `string`, `number`, `boolean`, `array`, `object`, or `bytes`.
 
 ```python
 registration = await client.registration.register_subgrove({
@@ -571,7 +602,7 @@ willow-cli did generate --save
 willow-cli did generate --algorithm secp256k1 --save
 
 # Or save an existing identity (DID + private key + public key ID + algorithm,
-# Ed25519 unless given)
+# Ed25519 unless given; a login that keeps the saved DID and key keeps its algorithm)
 willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id> --algorithm secp256k1
 
 # Status / clear

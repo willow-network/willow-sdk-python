@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from .errors import TransactionError, parse_api_error
+from .nonces import already_in_cache
 from .signed_messages import (
     delete_file_manifest_message,
     store_file_manifest_message,
@@ -353,7 +354,10 @@ def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:
 
     The API answers ``{success, data: {tx_hash, code, log}, error}``; a CheckTx
     refusal is HTTP 200 with a nonzero ``code``. A body it can't decode is
-    refused in plain text.
+    refused in plain text. CometBFT answers a transaction whose exact bytes
+    it already holds (an identical copy CheckTx admitted) with "tx already
+    exists in cache": that counts as accepted, with code 0, no ``tx_hash``,
+    and that answer as the ``log``.
 
     Raises:
         TransactionError: Unless CheckTx accepted the transaction.
@@ -367,9 +371,10 @@ def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:
         raise TransactionError(text or f"transaction submission failed: HTTP {resp.status_code}")
     data = envelope.get("data")
     if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
-        raise TransactionError(
-            envelope.get("error") or f"transaction submission failed: HTTP {resp.status_code}"
-        )
+        error = envelope.get("error")
+        if already_in_cache(error):
+            return {"tx_hash": None, "code": 0, "log": error}
+        raise TransactionError(error or f"transaction submission failed: HTTP {resp.status_code}")
     code = data.get("code", 0)
     if code != 0:
         raise TransactionError(

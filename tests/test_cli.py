@@ -36,6 +36,23 @@ def test_login_saves_the_algorithm_and_an_older_identity_is_ed25519(config_file)
     )
 
 
+@pytest.mark.parametrize("args", [["--did", "did:willow:b"], ["--key", "04" * 32], ["--did", "did:willow:b", "--key", "04" * 32]])
+def test_login_with_another_did_or_key_does_not_inherit_the_saved_algorithm(config_file, args):
+    CliRunner().invoke(cli.cli, ["did", "generate", "--algorithm", "secp256k1", "--save"])
+    result = CliRunner().invoke(cli.cli, ["auth", "login", *args])
+    assert result.exit_code == 0, result.output
+    assert cli.get_identity_or_exit()[3] == "Ed25519"
+
+
+def test_login_keeping_the_did_and_key_keeps_the_saved_algorithm(config_file):
+    CliRunner().invoke(cli.cli, ["did", "generate", "--algorithm", "secp256k1", "--save"])
+    did, key, _, _ = cli.get_identity_or_exit()
+    for args in (["--key-id", f"{did}#key-2"], ["--did", did, "--key", key]):
+        result = CliRunner().invoke(cli.cli, ["auth", "login", *args])
+        assert result.exit_code == 0, result.output
+        assert cli.get_identity_or_exit()[3] == "secp256k1"
+
+
 def test_data_commands_sign_with_the_saved_algorithm(config_file, monkeypatch):
     CliRunner().invoke(cli.cli, ["did", "generate", "--algorithm", "secp256k1", "--save"])
     identities = []
