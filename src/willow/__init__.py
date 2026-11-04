@@ -67,6 +67,11 @@ from .auth import (
     legacy_request_message,
     new_request_nonce,
 )
+from .signed_messages import (
+    store_data_message,
+    store_file_manifest_message,
+    delete_file_manifest_message,
+)
 from .errors import (
     WillowError,
     NetworkError,
@@ -326,6 +331,10 @@ __all__ = [
     "signed_request_message",
     "legacy_request_message",
     "new_request_nonce",
+    # Signed transaction messages
+    "store_data_message",
+    "store_file_manifest_message",
+    "delete_file_manifest_message",
     # Errors
     "WillowError",
     "NetworkError",

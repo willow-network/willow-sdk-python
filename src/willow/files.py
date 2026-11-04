@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from .errors import TransactionError
+from .signed_messages import delete_file_manifest_message, store_file_manifest_message
 
 DEFAULT_CHUNK_SIZE = 262_144  # 256 KB
 
@@ -68,11 +69,19 @@ class FileOperations:
             signing: Optional signing parameters dict with keys:
                 owner_did, private_key, public_key_id, sign_function, nonce.
                 sign_function should accept (message: str, private_key: str)
-                and return a hex-encoded signature string.
+                and return a hex-encoded signature string. The message is
+                ``store_file_manifest_message`` over the manifest sent,
+                including ``nonce``. A write refused in its block after its
+                signature verifies spends its nonce: retry under the next
+                free nonce, which signs anew.
+
+        Raises:
+            ValueError: If a signed text field holds a line break.
         """
         chunk_size = DEFAULT_CHUNK_SIZE
         chunks = _chunk_data(data, chunk_size)
         chunk_count = len(chunks)
+        content_type = _guess_content_type(filename)
 
         content_hash = hashlib.sha256(data).hexdigest()
         chunk_hashes = [hashlib.sha256(c).digest() for c in chunks]
@@ -87,7 +96,19 @@ class FileOperations:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
             nonce = signing.get("nonce", 0)
-            message = f"store_file:{subgrove_id}:{file_key}:{content_hash}:{len(data)}"
+            message = store_file_manifest_message(
+                subgrove_id,
+                file_key,
+                owner_did,
+                filename,
+                content_type,
+                len(data),
+                content_hash,
+                chunk_count,
+                chunk_size,
+                chunk_merkle_root,
+                nonce,
+            )
             signature = signing["sign_function"](message, signing["private_key"])
 
         # Submit StoreFileManifestTx to consensus. /tx/submit reads byte
@@ -97,7 +118,7 @@ class FileOperations:
                 "subgrove_id": subgrove_id,
                 "file_key": file_key,
                 "filename": filename,
-                "content_type": _guess_content_type(filename),
+                "content_type": content_type,
                 "total_size": len(data),
                 "content_hash": _byte_array(content_hash),
                 "chunk_count": chunk_count,
@@ -123,7 +144,7 @@ class FileOperations:
         return FileManifest(
             file_key=file_key,
             filename=filename,
-            content_type=_guess_content_type(filename),
+            content_type=content_type,
             total_size=len(data),
             content_hash=content_hash,
             chunk_count=chunk_count,
@@ -206,7 +227,14 @@ class FileOperations:
             signing: Optional signing parameters dict with keys:
                 owner_did, private_key, public_key_id, sign_function, nonce.
                 sign_function should accept (message: str, private_key: str)
-                and return a hex-encoded signature string.
+                and return a hex-encoded signature string. The message is
+                ``delete_file_manifest_message`` over the transaction sent,
+                including ``nonce``. A write refused in its block after its
+                signature verifies spends its nonce: retry under the next
+                free nonce, which signs anew.
+
+        Raises:
+            ValueError: If a signed text field holds a line break.
         """
         owner_did = ""
         signature: Any = []
@@ -216,7 +244,7 @@ class FileOperations:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
             nonce = signing.get("nonce", 0)
-            message = f"delete_file:{subgrove_id}:{file_key}"
+            message = delete_file_manifest_message(subgrove_id, file_key, owner_did, nonce)
             signature = signing["sign_function"](message, signing["private_key"])
 
         delete_tx = {

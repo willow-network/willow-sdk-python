@@ -2,12 +2,21 @@
 shape that route answers."""
 
 import hashlib
+import json
+from pathlib import Path
 
 import httpx
 import pytest
 
-from willow import WillowClient
+from willow import (
+    WillowClient,
+    delete_file_manifest_message,
+    sign_challenge,
+    store_file_manifest_message,
+    verify_signature,
+)
 from willow.errors import TransactionError
+from willow.files import DEFAULT_CHUNK_SIZE
 from willow.types import SubgroveStatus
 
 API = "http://api.test"
@@ -164,6 +173,39 @@ def _signing():
     }
 
 
+_KAT = json.loads(
+    (Path(__file__).parent / "fixtures" / "signed_messages_kat.json").read_text(encoding="utf-8")
+)
+
+
+def _ed25519_signing(nonce):
+    """Signs for real with the known-answer key, recording each message."""
+    signed = []
+
+    def sign(message, key):
+        signed.append(message)
+        return sign_challenge(message, key, "Ed25519")
+
+    return signed, {
+        "owner_did": "did:willow:a",
+        "private_key": _KAT["private_key_seed_hex"],
+        "public_key_id": _KAT["public_key_id"],
+        "sign_function": sign,
+        "nonce": nonce,
+    }
+
+
+def _submitted(state, kind):
+    tx = httpx.Response(200, content=state["requests"][0].content).json()
+    assert list(tx) == [kind]
+    return tx[kind]
+
+
+def _verifies(message, body):
+    signature = bytes(body["signature"]).hex()
+    return verify_signature(message, signature, _KAT["ed25519_public_key_hex"], "Ed25519")
+
+
 @pytest.mark.asyncio
 async def test_file_upload_submits_the_manifest_to_tx_submit(tx_submit):
     client = WillowClient(API)
@@ -205,3 +247,50 @@ async def test_file_delete_and_unregister_go_to_tx_submit(tx_submit):
         await client.files.delete("sg", "f", _signing())
     with pytest.raises(TransactionError):
         await client.files.unregister_storage_node("did:willow:node", _signing())
+
+
+@pytest.mark.asyncio
+async def test_file_upload_signs_every_field_and_the_nonce_it_sends(tx_submit):
+    data = bytes(range(256)) * (DEFAULT_CHUNK_SIZE // 256) + b"tail"
+    signed, signing = _ed25519_signing(9)
+    client = WillowClient(API)
+    await client.files.upload("files-1", "photo.png", "photo.png", data, "http://storage.test", signing)
+
+    body = _submitted(tx_submit, "StoreFileManifest")
+    assert (body["nonce"], body["chunk_count"], body["content_type"]) == (9, 2, "image/png")
+    assert "encryption" not in body
+    message = store_file_manifest_message(
+        body["subgrove_id"], body["file_key"], body["owner_did"], body["filename"],
+        body["content_type"], body["total_size"], body["content_hash"], body["chunk_count"],
+        body["chunk_size"], body["chunk_merkle_root"], body["nonce"],
+    )
+    assert signed == [message]
+    assert message.startswith("StoreFileManifest\nSubgrove: files-1\nKey: photo.png\n")
+    assert message.endswith("\nEncryption: none\nNonce: 9")
+    assert _verifies(message, body)
+
+
+@pytest.mark.asyncio
+async def test_file_upload_with_a_line_break_is_not_sent(tx_submit):
+    _, signing = _ed25519_signing(9)
+    client = WillowClient(API)
+    with pytest.raises(ValueError, match="line break"):
+        await client.files.upload("files-1", "photo.png", "a\nb.png", b"x", "http://storage.test", signing)
+    assert tx_submit["requests"] == []
+
+
+@pytest.mark.asyncio
+async def test_file_delete_signs_the_nonce_it_sends(tx_submit):
+    vector = next(v for v in _KAT["vectors"] if v["name"] == "DeleteFileManifest")
+    i = vector["inputs"]
+    signed, signing = _ed25519_signing(i["nonce"])
+    client = WillowClient(API)
+    await client.files.delete(i["subgrove_id"], i["file_key"], signing)
+
+    body = _submitted(tx_submit, "DeleteFileManifest")
+    message = delete_file_manifest_message(
+        body["subgrove_id"], body["file_key"], body["owner_did"], body["nonce"]
+    )
+    assert signed == [message] == [vector["message"]]
+    assert bytes(body["signature"]).hex() == vector["ed25519_signature_hex"]
+    assert _verifies(message, body)

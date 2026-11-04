@@ -19,6 +19,11 @@ from .types import (
     ConsensusError,
 )
 from .config import ConsensusConfigBuilder
+from ..signed_messages import (
+    store_data_message,
+    store_file_manifest_message,
+    delete_file_manifest_message,
+)
 
 __all__ = [
     "ConsensusClient",
@@ -33,4 +38,7 @@ __all__ = [
     "ConsensusConfig",
     "ConsensusError",
     "ConsensusConfigBuilder",
+    "store_data_message",
+    "store_file_manifest_message",
+    "delete_file_manifest_message",
 ]
