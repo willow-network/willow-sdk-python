@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any, List, Tuple
 import logging
 
 from ..auth import sign_message, SignatureAlgorithm
+from ..errors import NonceWindowFullError, TransactionError
+from ..nonces import USED, WINDOW, NonceTracker, refusal_outcome
 from .types import (
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
@@ -33,7 +35,10 @@ class ConsensusClient:
         """Initialize consensus client with configuration."""
         self.config = config
         self._session: Optional[aiohttp.ClientSession] = None
-        self._nonce_cache: Dict[str, int] = {}
+        # The nonces handed out per signing DID (see ``willow.nonces``).
+        self._nonces = NonceTracker()
+        self._nonce_poll_interval = 1.0
+        self._nonce_wait_timeout = 60.0
     
     async def __aenter__(self):
         """Async context manager entry."""
@@ -74,6 +79,9 @@ class ConsensusClient:
         registration fee to the derived id first (see ``transfer``), then call
         this method so the fee is paid from that balance.
 
+        The node takes a registration only under nonce 1, so it is signed
+        under nonce 1.
+
         Args:
             did_document: DID document to register (self-certifying ``id``)
             private_key: Private key for signing (hex-encoded)
@@ -82,16 +90,15 @@ class ConsensusClient:
         Returns:
             BroadcastResult with transaction status
         """
-        # Create transaction
         tx = RegisterDidTx(
             did_document=did_document,
             signature="",  # Will be filled by signing
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(did_document.get('id', ''))
+            nonce=1,
         )
-        
-        # Sign and broadcast
-        return await self._sign_and_broadcast("RegisterDid", tx, private_key, algorithm)
+        return await self._sign_and_broadcast(
+            "RegisterDid", tx, private_key, algorithm, signer=did_document.get('id', '')
+        )
     
     async def register_subgrove(
         self,
@@ -163,11 +170,9 @@ class ConsensusClient:
             confirmation_depth=confirmation_depth,
             cryptographic_completeness=cryptographic_completeness,
         )
-        # Refuse what the node can't decode, or a line break, before reading the nonce.
-        create_sign_message("RegisterSubgrove", tx)
-        tx.nonce = await self._get_next_nonce(owner_did)
-
-        return await self._sign_and_broadcast("RegisterSubgrove", tx, private_key, algorithm)
+        return await self._sign_and_broadcast(
+            "RegisterSubgrove", tx, private_key, algorithm, signer=owner_did
+        )
     
     async def transfer(
         self,
@@ -200,10 +205,9 @@ class ConsensusClient:
             memo=memo,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(from_did)
         )
-        
-        return await self._sign_and_broadcast("Transfer", tx, private_key, algorithm)
+
+        return await self._sign_and_broadcast("Transfer", tx, private_key, algorithm, signer=from_did)
     
     async def store_data(
         self,
@@ -238,14 +242,13 @@ class ConsensusClient:
         tx = DataStoreTx(
             subgrove_id=subgrove_id,
             key=key,
-            data=json.dumps(data, separators=(',', ':'), sort_keys=True),
+            data=json.dumps(data, separators=(',', ':'), sort_keys=True, allow_nan=False),
             owner_did=owner_did,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did)
         )
-        
-        return await self._sign_and_broadcast("DataStore", tx, private_key, algorithm)
+
+        return await self._sign_and_broadcast("DataStore", tx, private_key, algorithm, signer=owner_did)
 
     async def store_file_manifest(
         self,
@@ -296,10 +299,11 @@ class ConsensusClient:
             owner_did=owner_did,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("StoreFileManifest", tx, private_key, algorithm)
+        return await self._sign_and_broadcast(
+            "StoreFileManifest", tx, private_key, algorithm, signer=owner_did
+        )
 
     async def delete_file_manifest(
         self,
@@ -329,10 +333,11 @@ class ConsensusClient:
             owner_did=owner_did,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("DeleteFileManifest", tx, private_key, algorithm)
+        return await self._sign_and_broadcast(
+            "DeleteFileManifest", tx, private_key, algorithm, signer=owner_did
+        )
 
     async def deregister_subgrove(
         self,
@@ -359,10 +364,11 @@ class ConsensusClient:
             owner_did=owner_did,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did),
         )
 
-        return await self._sign_and_broadcast("DeregisterSubgrove", tx, private_key, algorithm)
+        return await self._sign_and_broadcast(
+            "DeregisterSubgrove", tx, private_key, algorithm, signer=owner_did
+        )
 
     async def get_transaction_status(self, tx_hash: str) -> TransactionStatus:
         """
@@ -446,28 +452,53 @@ class ConsensusClient:
         transaction: Transaction,
         private_key: str,
         algorithm: SignatureAlgorithm = "Ed25519",
+        *,
+        signer: str,
     ) -> BroadcastResult:
-        """Sign a transaction and broadcast it.
+        """Sign a transaction under a nonce of ``signer``'s and broadcast it.
+
+        The nonce is the lowest one in the node's window this client hasn't
+        handed out (see ``willow.nonces``); RegisterDid signs nonce 1. A
+        transaction CheckTx refuses gives its nonce back, unless the refusal
+        says the nonce is held by a pending transaction or already used. When
+        it is already used, no transaction under it can run, so it is signed
+        again under a fresh nonce.
 
         ``algorithm`` selects the signing algorithm. It must be supplied by the
         caller because the self-certifying DID no longer encodes it; it cannot
         be recovered from the transaction's ``owner_did``.
         """
-        # Create canonical message for signing
-        sign_message_text = create_sign_message(tx_type, transaction)
+        # Refuse what can't be signed (a line break, a field out of range)
+        # before taking a nonce.
+        create_sign_message(tx_type, transaction)
+        fixed_nonce = tx_type == "RegisterDid"
+        result: Optional[BroadcastResult] = None
+        for _ in range(WINDOW):
+            if fixed_nonce:
+                self._nonces.hold(signer, transaction.nonce)
+            else:
+                transaction.nonce = await self._take_nonce(signer)
+            try:
+                transaction.signature = sign_message(
+                    create_sign_message(tx_type, transaction), private_key, algorithm
+                )
+                tx_wrapper = create_transaction_wrapper(tx_type, transaction)
+            except BaseException:
+                self._nonces.release(signer, transaction.nonce)
+                raise
+            # A submission that raises may have reached the node: its nonce
+            # stays taken until its lease runs out.
+            result = await self._broadcast_transaction(tx_wrapper)
+            if result.success:
+                return result
+            outcome = refusal_outcome(TransactionError(
+                result.error_message or "", error_code=result.error_code, raw_log=result.raw_log
+            ))
+            self._nonces.settle(signer, transaction.nonce, outcome)
+            if outcome != USED or fixed_nonce:
+                return result
+        return result
 
-        # Sign with the identity's algorithm
-        signature_hex = sign_message(sign_message_text, private_key, algorithm)
-        
-        # Update transaction with signature
-        transaction.signature = signature_hex
-        
-        # Create transaction wrapper
-        tx_wrapper = create_transaction_wrapper(tx_type, transaction)
-        
-        # Broadcast transaction
-        return await self._broadcast_transaction(tx_wrapper)
-    
     async def _broadcast_transaction(self, transaction: Dict[str, Any]) -> BroadcastResult:
         """Submit a transaction via the API server's /tx/submit endpoint.
 
@@ -559,25 +590,27 @@ class ConsensusClient:
         except Exception:
             return None
     
-    async def _get_next_nonce(self, did: str) -> int:
-        """
-        Get the next nonce for a DID.
+    async def _take_nonce(self, did: str) -> int:
+        """A nonce for ``did``'s next transaction: the lowest one in the
+        node's window this client hasn't handed out. While every one is
+        taken, waits for the account's base to advance.
 
-        Fetches the current nonce from the blockchain and returns the next value.
-        Falls back to in-memory cache if API is unavailable.
+        Raises:
+            NonceWindowFullError: The window stayed full for
+                ``_nonce_wait_timeout`` seconds.
         """
-        try:
-            current_nonce = await self._get_account_nonce(did)
-            next_nonce = current_nonce + 1
-            self._nonce_cache[did] = next_nonce
-            return next_nonce
-        except Exception as e:
-            # Fall back to cache if API unavailable
-            logger.warning(f"Failed to fetch nonce from API, using cache: {e}")
-            current_nonce = self._nonce_cache.get(did, 0)
-            next_nonce = current_nonce + 1
-            self._nonce_cache[did] = next_nonce
-            return next_nonce
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._nonce_wait_timeout
+        while True:
+            nonce = self._nonces.take(did, await self._get_account_nonce(did))
+            if nonce is not None:
+                return nonce
+            if loop.time() >= deadline:
+                raise NonceWindowFullError(
+                    f"every nonce the node accepts for {did} is taken by a transaction "
+                    f"that hasn't landed; wait for earlier ones to land"
+                )
+            await asyncio.sleep(self._nonce_poll_interval)
 
     async def _get_account_nonce(self, did: str) -> int:
         """
@@ -593,8 +626,9 @@ class ConsensusClient:
             ConsensusError: If nonce cannot be fetched
         """
         if not self.config.api_url:
-            # No API URL configured, use cache
-            return self._nonce_cache.get(did, 0)
+            raise ConsensusError(
+                "api_url is required to read the account nonce. Set it in the SDK config."
+            )
 
         from urllib.parse import quote
         url = f"{self.config.api_url}/account/{quote(did, safe='')}/nonce"
@@ -609,6 +643,9 @@ class ConsensusClient:
                 if not data.get('success') or 'data' not in data:
                     raise ConsensusError(data.get('error', 'Failed to fetch nonce'))
 
-                return data['data'].get('nonce', 0)
+                nonce = data['data'].get('nonce') if isinstance(data['data'], dict) else None
+                if isinstance(nonce, bool) or not isinstance(nonce, int):
+                    raise ConsensusError(f"The API answered no nonce for {did}")
+                return nonce
         except aiohttp.ClientError as e:
             raise ConsensusError(f"Failed to fetch nonce: {e}")

@@ -2,7 +2,7 @@
 Willow Python SDK - Subgrove Registration Example
 
 Demonstrates:
-1. Define a schema with multiple index types
+1. Define a schema
 2. Register a subgrove
 3. List subgroves
 4. Get a subgrove
@@ -22,7 +22,6 @@ from willow import (
     RegisterSubgroveRequest,
     SchemaDefinition,
     FieldType,
-    IndexDefinition,
 )
 
 
@@ -40,62 +39,48 @@ async def main():
             did_info["private_key"],
             did_info["public_key_id"],
         )
-        await client.register_did(did_info["did_document"])
+        # A write returns once CheckTx accepts it: wait for the registration
+        # to land before the DID signs anything else.
+        await client.wait_until_landed(await client.register_did(did_info["did_document"]))
 
-        # 1. Define a schema with indexes
-        print("\n1. Define Schema with Indexes")
+        # 1. Define a schema. Each field has a type; required fields must be
+        # present in every item. The node supports no schema indexes: a schema
+        # with indexes, or a field flagged indexed, is refused before signing.
+        print("\n1. Define Schema")
         print("-" * 40)
         product_schema = SchemaDefinition(
             version=1,
             fields={
-                "sku": FieldType(type="string", indexed=True, required=True),
-                "name": FieldType(type="string", indexed=True, required=True),
-                "description": FieldType(type="string", indexed=True),
-                "category": FieldType(type="string", indexed=True, required=True),
-                "price": FieldType(type="number", indexed=True, required=True),
-                "stock": FieldType(type="number", indexed=True),
+                "sku": FieldType(type="string", required=True),
+                "name": FieldType(type="string", required=True),
+                "description": FieldType(type="string"),
+                "category": FieldType(type="string", required=True),
+                "price": FieldType(type="number", required=True),
+                "stock": FieldType(type="number"),
                 "tags": FieldType(type="array"),
                 "specifications": FieldType(type="object"),
             },
-            indexes=[
-                IndexDefinition(name="unique_sku", fields=["sku"], unique=True, type="unique"),
-                IndexDefinition(name="by_category", fields=["category"], unique=False, type="hash"),
-                IndexDefinition(name="by_price", fields=["price"], unique=False, type="range"),
-                IndexDefinition(
-                    name="product_search",
-                    fields=["name", "description"],
-                    unique=False,
-                    type="fulltext",
-                ),
-                IndexDefinition(
-                    name="category_price",
-                    fields=["category", "price"],
-                    unique=False,
-                    type="compound",
-                ),
-            ],
         )
-        print("Schema defined with indexes:")
-        print("  - unique_sku: Unique constraint on SKU")
-        print("  - by_category: Hash index for category")
-        print("  - by_price: Range index for price queries")
-        print("  - product_search: Fulltext on name/description")
-        print("  - category_price: Compound index")
+        print("Schema defined: sku, name, category, and price required")
 
-        # 2. Register the subgrove
+        # 2. Register the subgrove. Its ID is 1 to 64 ASCII letters, digits,
+        # '-', or '_', starting with a letter or digit.
         print("\n2. Register Subgrove")
         print("-" * 40)
         try:
             subgrove_request = RegisterSubgroveRequest(
                 dataset_id="products",
                 name="Product Catalog",
-                dataset_path=["collections"],
                 schema=product_schema,
                 owner_did=did_info["did"],
                 writers=[did_info["did"]],
                 readers=[],
             )
-            await client.registration.register_subgrove(subgrove_request.model_dump(by_alias=True))
+            registration = await client.registration.register_subgrove(
+                subgrove_request.model_dump(by_alias=True)
+            )
+            # Wait for it to land before reading it or storing into it.
+            await client.wait_until_landed(registration)
             print("Created subgrove: products")
         except WillowError as e:
             print(f"Error (may already exist): {e}")
@@ -140,7 +125,6 @@ async def main():
     print("\nData Organization:")
     print("  Subgrove (products)")
     print("    -> Items (with schema validation)")
-    print("    -> Indexes (for fast queries)")
 
 
 if __name__ == "__main__":

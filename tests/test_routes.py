@@ -325,7 +325,7 @@ async def test_data_store_is_the_store_data_known_answer():
 
     result = await client.data.store_item(i["subgrove_id"], i["key"], json.loads(i["data_utf8"]))
 
-    assert result == {"tx_hash": "AB", "code": 0, "log": ""}
+    assert result == {"tx_hash": "AB", "code": 0, "log": "", "did": i["owner_did"], "nonce": i["nonce"]}
     assert [r.url.path for r in seen] == [f"/account/{i['owner_did']}/nonce", "/tx/submit"]
     body = json.loads(seen[1].content)["StoreData"]
     assert bytes(body["data"]).decode("utf-8") == i["data_utf8"]

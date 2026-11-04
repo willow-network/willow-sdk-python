@@ -36,14 +36,20 @@ def save_config(config: dict):
         json.dump(config, f, indent=2)
 
 
-def get_identity_or_exit() -> Tuple[str, str, str]:
-    """Return (did, private_key, public_key_id) from config, or exit."""
+def get_identity_or_exit() -> Tuple[str, str, str, str]:
+    """Return (did, private_key, public_key_id, algorithm) from config, or
+    exit. An identity saved without an algorithm is Ed25519."""
     config = load_config()
     identity = config.get("identity")
     if not identity:
         click.echo("Not authenticated. Run: willow-cli auth login")
         sys.exit(1)
-    return identity["did"], identity["private_key"], identity["public_key_id"]
+    return (
+        identity["did"],
+        identity["private_key"],
+        identity["public_key_id"],
+        identity.get("algorithm", "Ed25519"),
+    )
 
 
 @click.group()
@@ -82,6 +88,7 @@ def generate(algorithm, save):
             "did": output["did"],
             "private_key": output["private_key"],
             "public_key_id": output["public_key_id"],
+            "algorithm": output["algorithm"],
         }
         save_config(config)
         click.echo("Identity saved to config file")
@@ -95,17 +102,18 @@ def generate(algorithm, save):
 def register(ctx, did_file):
     """Register a DID document (a RegisterDid transaction).
 
-    Signed with the saved identity's key, which must be the document's DID.
-    Pre-fund that DID with the registration fee first.
+    Signed with the saved identity's key, which must be the document's DID,
+    in the algorithm the document's key type names. Pre-fund that DID with
+    the registration fee first.
     """
 
     async def _register():
-        did_val, key_val, key_id_val = get_identity_or_exit()
+        did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         did_doc_data = json.load(did_file)
         did_doc = DidDocument(**did_doc_data)
 
         async with WillowClient(ctx.obj["api_url"]) as client:
-            client.set_identity(did_val, key_val, key_id_val)
+            client.set_identity(did_val, key_val, key_id_val, algorithm)
             result = await client.register_did(did_doc)
             click.echo(f"DID registration submitted: {did_doc.id} (tx {result.get('tx_hash')})")
 
@@ -127,14 +135,21 @@ def auth():
 @click.option("--did", "did_arg", help="DID to authenticate with")
 @click.option("--key", "key_arg", help="Private key hex")
 @click.option("--key-id", "key_id_arg", help="Public key ID")
-def login(did_arg, key_arg, key_id_arg):
-    """Save identity (DID + key + key-id) to ~/.willow/config.json."""
+@click.option(
+    "--algorithm",
+    "algorithm_arg",
+    type=click.Choice(["Ed25519", "secp256k1"]),
+    help="The key's algorithm (default: the saved one, else Ed25519)",
+)
+def login(did_arg, key_arg, key_id_arg, algorithm_arg):
+    """Save identity (DID + key + key-id + algorithm) to ~/.willow/config.json."""
     config = load_config()
     existing = config.get("identity") or {}
 
     did_val = did_arg or existing.get("did")
     key_val = key_arg or existing.get("private_key")
     key_id_val = key_id_arg or existing.get("public_key_id")
+    algorithm_val = algorithm_arg or existing.get("algorithm", "Ed25519")
 
     if not (did_val and key_val and key_id_val):
         click.echo("Need --did, --key, and --key-id (or run `willow-cli did generate --save` first).")
@@ -144,6 +159,7 @@ def login(did_arg, key_arg, key_id_arg):
         "did": did_val,
         "private_key": key_val,
         "public_key_id": key_id_val,
+        "algorithm": algorithm_val,
     }
     save_config(config)
     click.echo(f"Identity saved: {did_val}")
@@ -188,11 +204,11 @@ def store(ctx, subgrove_id, data_file):
     """
 
     async def _store():
-        did_val, key_val, key_id_val = get_identity_or_exit()
+        did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         data_dict = json.load(data_file)
 
         async with WillowClient(ctx.obj["api_url"]) as client:
-            client.set_identity(did_val, key_val, key_id_val)
+            client.set_identity(did_val, key_val, key_id_val, algorithm)
             await client.data.store(subgrove_id, data_dict)
             click.echo(f"Stored {len(data_dict)} items in {subgrove_id}")
 
@@ -207,10 +223,10 @@ def get(ctx, subgrove_id, key):
     """Get a single item from a subgrove (with proof verification)."""
 
     async def _get():
-        did_val, key_val, key_id_val = get_identity_or_exit()
+        did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
 
         async with WillowClient(ctx.obj["api_url"]) as client:
-            client.set_identity(did_val, key_val, key_id_val)
+            client.set_identity(did_val, key_val, key_id_val, algorithm)
             result = await client.data.get(subgrove_id, key)
             click.echo(json.dumps(result, indent=2))
 
@@ -226,11 +242,11 @@ def update(ctx, subgrove_id, key, data_file):
     """Update an item in a subgrove (not supported: the SDK builds no UpdateData)."""
 
     async def _update():
-        did_val, key_val, key_id_val = get_identity_or_exit()
+        did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         data_dict = json.load(data_file)
 
         async with WillowClient(ctx.obj["api_url"]) as client:
-            client.set_identity(did_val, key_val, key_id_val)
+            client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 await client.data.update(subgrove_id, key, data_dict)
             except WillowError as e:
@@ -249,10 +265,10 @@ def delete(ctx, subgrove_id, key):
     """Delete an item from a subgrove (not supported: the SDK builds no DeleteData)."""
 
     async def _delete():
-        did_val, key_val, key_id_val = get_identity_or_exit()
+        did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
 
         async with WillowClient(ctx.obj["api_url"]) as client:
-            client.set_identity(did_val, key_val, key_id_val)
+            client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 await client.data.delete(subgrove_id, key)
             except WillowError as e:

@@ -40,8 +40,10 @@ async def main():
             did_info["public_key_id"],
         )
 
-        # 3. Register the DID (pre-fund it with the registration fee first)
-        await client.register_did(did_info["did_document"])
+        # 3. Register the DID (pre-fund it with the registration fee first),
+        #    and wait for it to land: the DID can sign nothing before it does
+        registration = await client.register_did(did_info["did_document"])
+        await client.wait_until_landed(registration)
 
         # 4. Store data: one StoreData transaction per key
         await client.data.store("users", {
@@ -113,8 +115,11 @@ A DID's id is derived from its key, so it can be funded before it exists: transf
 
 ```python
 client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"], did_info["algorithm"])
-result = await client.register_did(did_info["did_document"])  # {"tx_hash", "code", "log"}
+result = await client.register_did(did_info["did_document"])  # {"tx_hash", "code", "log", "did", "nonce"}
+await client.wait_until_landed(result)
 ```
+
+It signs in the algorithm the document's key type names (`Ed25519VerificationKey2018` or `EcdsaSecp256k1VerificationKey2019`) unless you pass `algorithm`. It returns once CheckTx accepts the transaction; the DID can sign other transactions and requests only after it lands.
 
 ### Authentication (per-request signing)
 
@@ -256,14 +261,39 @@ Nonce: <nonce>
 - RevokeSubgroveKey signs `RevokeSubgroveKey:<subgrove_id>:<revokee_did>:<sender_did>:<nonce>`, which binds every field it carries.
 - RegisterDid signs the node's compact JSON of the DID document, its fields in the node's order (`id`, `public_keys`, `authentication`, `service`, `created`, `updated`, `proof`; each key `id`, `type`, `controller`, `public_key_base58`, `public_key_hex`), always under nonce 1. The SDK sends that same document (`did_document_body`).
 - A subgrove ID, owner, sender, grantee, grantee key ID, granter, or node DID holding a line break is refused with `ValueError` before anything is signed.
+- The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). `register_subgrove_message`, and every flow that signs a registration, refuses both with `ValueError` before anything is signed.
 
 `ConsensusClient`, `client.files`, `client.data`, `client.registration`, `client.privacy`, and `client.register_did` build these messages. `store_data_message`, `store_file_manifest_message`, `delete_file_manifest_message`, `register_subgrove_message`, `grant_subgrove_key_message`, `rotate_subgrove_key_message`, `revoke_subgrove_key_message`, `unregister_storage_node_message`, and `register_did_message` return the exact text for a transaction you sign yourself.
+
+### Nonces
+
+The node accepts a transaction under a nonce among the 24 above the account's nonce (its base, `GET /account/{did}/nonce`) that is not used yet. The base advances only over used nonces with no gap below them, so a nonce taken and never used blocks the window until something uses it. `WillowClient` and `ConsensusClient` hand out nonces per signing DID:
+
+- Each write takes the lowest nonce in the window the client hasn't handed out, so writes sent before earlier ones land, or concurrently, each get their own.
+- A write CheckTx refuses gives its nonce back, leaving no gap, unless the refusal says the nonce is held by a pending transaction or already used. When it is already used, no transaction under it can run, so the write is signed again under a fresh nonce.
+- A nonce handed out more than 120 s ago whose write hasn't landed is free again. A write that failed in transit keeps its nonce until then, since it may have reached the node; its `NetworkError` carries the `did` and `nonce` it was signed under. Before sending it again, wait for that nonce: `await client.wait_until_landed({"did": error.did, "nonce": error.nonce})`.
+- While all 24 are taken, the next write waits for earlier ones to land, and raises `NonceWindowFullError` if none does within 60 s. `client.data.store` with more than 24 keys sends the rest as earlier ones land.
+- RegisterDid always signs nonce 1.
+
+Nonces are tracked per client object, so send one identity's writes through one client. `client.files` signs under the nonce you pass in `signing["nonce"]`, which is required.
+
+Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, or lists of them, and returns once the account's base reaches each nonce:
+
+```python
+registration = await client.register_did(did_info["did_document"])
+await client.wait_until_landed(registration)
+
+results = await client.data.store("my-data", {"a": {"n": 1}, "b": {"n": 2}})
+await client.wait_until_landed(results, timeout=60.0)  # NotLandedError after 60 s
+```
+
+The base reaching a write's nonce also means every earlier write from that DID landed. A write refused in its block uses its nonce too, so read what it wrote to know it took effect.
 
 ### Data Operations (Secure by Default)
 
 ```python
 # Store a whole dict of key -> JSON object in a subgrove: one StoreData
-# transaction per key, under consecutive nonces
+# transaction per key, each under its own nonce
 await client.data.store("subgrove_id", {
     "key1": {"field": "value"},
     "key2": {"field": "value2"},
@@ -285,8 +315,9 @@ item = await client.data.get("subgrove_id", "key1")
 item = await client.data.get_unverified("subgrove_id", "key1")
 ```
 
-- Each value must be a JSON object (a `dict`); anything else raises `TypeError` before anything is sent. The data sent is `json.dumps(value, separators=(",", ":"), sort_keys=True)`.
-- Each store returns the `{tx_hash, code, log}` of its transaction, or raises `TransactionError` if CheckTx refuses it. StoreData writes a new key: it is refused in its block for a key that already exists.
+- Each value must be a JSON object (a `dict`); anything else raises `TypeError` before anything is sent. The data sent is `json.dumps(value, separators=(",", ":"), sort_keys=True, allow_nan=False)`: a value holding NaN or an infinity raises `ValueError` before anything is sent.
+- Each store returns the `{tx_hash, code, log, did, nonce}` of its transaction, or raises `TransactionError` if CheckTx refuses it. StoreData writes a new key: it is refused in its block for a key that already exists.
+- `store` and `batch_store` send their keys one at a time. If one fails (`TransactionError`, `NonceWindowFullError`, or `NetworkError`), the error's `submitted` holds the results of the keys sent before it and `failed_key` the key that failed; the keys after it are not sent.
 - `client.data.update` and `client.data.delete` raise `WillowError`: the node changes and deletes data only through UpdateData and DeleteData transactions, which this SDK does not build.
 
 ### Query Operations
@@ -315,29 +346,27 @@ print(f"Total: {result.total}")
 
 ### Registration Operations
 
-`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. A field's `indexed` flag, an index's `type`, and `dataset_path` have no on-chain counterpart and are not sent. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
+`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. `dataset_path` has no on-chain counterpart and is not sent. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
+
+The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). Both raise `ValueError` before anything is signed, as does a field flagged `indexed`.
 
 ```python
-await client.registration.register_subgrove({
+registration = await client.registration.register_subgrove({
     "dataset_id": "my-data",
     "name": "My Data",
-    "dataset_path": ["collections"],
     "schema": {
         "version": 1,
         "fields": {
-            "name": {"type": "string", "indexed": True},
-            "email": {"type": "string", "indexed": True},
-            "age": {"type": "number", "indexed": True},
+            "name": {"type": "string", "required": True},
+            "email": {"type": "string"},
+            "age": {"type": "number"},
         },
-        "indexes": [
-            {"name": "by_name", "fields": ["name"], "unique": False, "type": "hash"},
-            {"name": "by_age", "fields": ["age"], "unique": False, "type": "range"},
-        ],
     },
     "owner_did": did,
     "writers": [did],
     "readers": [],
 })
+await client.wait_until_landed(registration)  # before storing into it
 
 subgroves = await client.registration.list_subgroves()
 subgrove = await client.registration.get_subgrove("my-data")
@@ -537,11 +566,13 @@ isort src/willow --check
 ## CLI Usage
 
 ```bash
-# Generate a new DID and save it locally
+# Generate a new DID and save it locally, with its algorithm
 willow-cli did generate --save
+willow-cli did generate --algorithm secp256k1 --save
 
-# Or save an existing identity (DID + private key + public key ID)
-willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id>
+# Or save an existing identity (DID + private key + public key ID + algorithm,
+# Ed25519 unless given)
+willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id> --algorithm secp256k1
 
 # Status / clear
 willow-cli auth status

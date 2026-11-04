@@ -101,6 +101,8 @@ from .errors import (
     ConsensusError,
     TransactionError,
     InsufficientFundsError,
+    NonceWindowFullError,
+    NotLandedError,
     parse_api_error,
 )
 from .types import (
@@ -373,6 +375,8 @@ __all__ = [
     "ConsensusError",
     "TransactionError",
     "InsufficientFundsError",
+    "NonceWindowFullError",
+    "NotLandedError",
     "parse_api_error",
     # Enums
     "SignatureAlgorithm",

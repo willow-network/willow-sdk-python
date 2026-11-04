@@ -243,6 +243,25 @@ class InsufficientFundsError(TransactionError):
         self.available = available
 
 
+class NonceWindowFullError(ConsensusError):
+    """Every nonce the node accepts for a DID is taken.
+
+    Raised when each of the 24 nonces above the account's base is handed out
+    to a transaction that hasn't landed, and the base didn't advance while
+    the client waited for it.
+    """
+
+
+class NotLandedError(ConsensusError):
+    """A write's nonce wasn't used in a block within the time waited.
+
+    Raised by ``WillowClient.wait_until_landed``. The account's base only
+    advances over used nonces with no gap below them, so this also means an
+    earlier write from the identity, or one refused at CheckTx whose nonce no
+    later write has taken, has not landed.
+    """
+
+
 def parse_api_error(response_data: dict, status_code: int) -> WillowError:
     """Parse API error response into appropriate WillowError subclass.
 

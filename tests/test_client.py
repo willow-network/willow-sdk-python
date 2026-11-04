@@ -101,7 +101,7 @@ class TestWillowClient:
 
         result = await client.register_did(info["did_document"])
 
-        assert result == {"tx_hash": "AB", "code": 0, "log": ""}
+        assert result == {"tx_hash": "AB", "code": 0, "log": "", "did": info["did"], "nonce": 1}
         assert [(r.method, r.url.path) for r in seen] == [("POST", "/tx/submit")]
         ((kind, body),) = _submitted(seen)[0].items()
         assert kind == "RegisterDid"
@@ -134,6 +134,24 @@ class TestWillowClient:
             info["public_key"],
             "Ed25519",
         )
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_register_did_signs_in_the_algorithm_the_documents_key_names(self):
+        # No algorithm passed: a secp256k1 key signs secp256k1, both with an
+        # explicit key and with an identity set without its algorithm.
+        info = generate_did("secp256k1")
+        client, seen = _tx_client()
+        await client.register_did(info["did_document"], private_key_hex=info["private_key"])
+        client.set_identity(info["did"], info["private_key"], info["public_key_id"])  # Ed25519 default
+        await client.register_did(info["did_document"])
+        for body in (tx["RegisterDid"] for tx in _submitted(seen)):
+            assert verify_signature(
+                register_did_message(info["did_document"]),
+                bytes(body["signature"]).hex(),
+                info["public_key"],
+                "secp256k1",
+            )
         await client.close()
 
     @pytest.mark.asyncio
@@ -359,6 +377,10 @@ class TestDataOperations:
             await client.data.store_item("dataset1", "key1", "not an object")
         with pytest.raises(ValueError, match="line break"):
             await client.data.store("dataset1", {"ok": {}, "bad\nkey": {}})
+        # NaN and the infinities are not JSON: the node would refuse the data.
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError):
+                await client.data.store("dataset1", {"ok": {}, "bad": {"x": value}})
         assert seen == []
         await client.close()
 
@@ -431,8 +453,7 @@ class TestRegistrationOperations:
             "dataset_path": ["collections"],
             "schema": {
                 "version": 1,
-                "fields": {"name": {"type": "string", "indexed": True, "required": True}},
-                "indexes": [{"name": "by_name", "fields": ["name"], "unique": False, "type": "hash"}],
+                "fields": {"name": {"type": "string", "required": True}},
                 "required_fields": [],
             },
             "owner_did": info["did"],
@@ -442,7 +463,7 @@ class TestRegistrationOperations:
 
         result = await client.registration.register_dataset(dataset_request)
 
-        assert result == {"tx_hash": "AB", "code": 0, "log": ""}
+        assert result == {"tx_hash": "AB", "code": 0, "log": "", "did": info["did"], "nonce": 3}
         assert [(r.method, r.url.path) for r in seen] == [
             ("GET", f"/account/{info['did']}/nonce"),
             ("POST", "/tx/submit"),
@@ -459,7 +480,7 @@ class TestRegistrationOperations:
         assert json.loads(body["schema"]) == {
             "version": 1,
             "fields": {"name": "string"},
-            "indexes": [{"name": "by_name", "fields": ["name"], "unique": False}],
+            "indexes": [],
             "required_fields": ["name"],
         }
         assert verify_signature(

@@ -75,12 +75,15 @@ class FileOperations:
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``store_file_manifest_message`` over the manifest sent,
-                including ``nonce``. A write refused in its block after its
-                signature verifies spends its nonce: retry under the next
-                free nonce, which signs anew.
+                including ``nonce``. The nonce is required: one of the 24
+                above the signer's account nonce (``GET /account/{did}/nonce``)
+                not used yet, distinct for each write in flight. A write
+                refused in its block after its signature verifies spends its
+                nonce: retry under the next free nonce, which signs anew.
 
         Raises:
-            ValueError: If a signed text field holds a line break.
+            ValueError: A signed text field holds a line break, or ``signing``
+                has no nonce of at least 1. Nothing is sent.
         """
         chunk_size = DEFAULT_CHUNK_SIZE
         chunks = _chunk_data(data, chunk_size)
@@ -99,7 +102,7 @@ class FileOperations:
         if signing:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
-            nonce = signing.get("nonce", 0)
+            nonce = _signing_nonce(signing)
             message = store_file_manifest_message(
                 subgrove_id,
                 file_key,
@@ -237,12 +240,15 @@ class FileOperations:
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``delete_file_manifest_message`` over the transaction sent,
-                including ``nonce``. A write refused in its block after its
-                signature verifies spends its nonce: retry under the next
-                free nonce, which signs anew.
+                including ``nonce``. The nonce is required: one of the 24
+                above the signer's account nonce (``GET /account/{did}/nonce``)
+                not used yet, distinct for each write in flight. A write
+                refused in its block after its signature verifies spends its
+                nonce: retry under the next free nonce, which signs anew.
 
         Raises:
-            ValueError: If a signed text field holds a line break.
+            ValueError: A signed text field holds a line break, or ``signing``
+                has no nonce of at least 1. Nothing is sent.
         """
         owner_did = ""
         signature: Any = []
@@ -251,7 +257,7 @@ class FileOperations:
         if signing:
             owner_did = signing["owner_did"]
             public_key_id = signing["public_key_id"]
-            nonce = signing.get("nonce", 0)
+            nonce = _signing_nonce(signing)
             message = delete_file_manifest_message(subgrove_id, file_key, owner_did, nonce)
             signature = signing["sign_function"](message, signing["private_key"])
 
@@ -282,12 +288,15 @@ class FileOperations:
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``unregister_storage_node_message`` over the node DID and
-                ``nonce`` sent.
+                ``nonce`` sent. The nonce is required: one of the 24 above
+                the signer's account nonce (``GET /account/{did}/nonce``) not
+                used yet.
 
         Raises:
-            ValueError: If the node DID holds a line break.
+            ValueError: The node DID holds a line break, or ``signing`` has no
+                nonce of at least 1. Nothing is sent.
         """
-        nonce = signing.get("nonce", 0)
+        nonce = _signing_nonce(signing)
         message = unregister_storage_node_message(node_did, nonce)
         signature = signing["sign_function"](message, signing["private_key"])
 
@@ -320,6 +329,23 @@ class FileOperations:
                 headers=self._get_headers(),
             )
         return _tx_submit_result(resp)
+
+
+_NONCE_HELP = (
+    "the node accepts a nonce in the 24 above the signer's account nonce "
+    "(GET /account/{did}/nonce) that is not used yet, never 0; writes in "
+    "flight from one signer each need their own"
+)
+
+
+def _signing_nonce(signing: Dict[str, Any]) -> int:
+    """The ``nonce`` of a ``signing`` dict: required, an integer of at least 1."""
+    if "nonce" not in signing:
+        raise ValueError(f"signing needs a nonce: {_NONCE_HELP}")
+    nonce = signing["nonce"]
+    if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 1:
+        raise ValueError(f"signing nonce must be an integer of at least 1: {_NONCE_HELP}")
+    return nonce
 
 
 def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:

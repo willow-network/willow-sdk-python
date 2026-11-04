@@ -36,15 +36,19 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
+from .auth import _KEY_TYPES, sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
 from .errors import (
     WillowError,
     AuthenticationError,
     NetworkError,
+    NonceWindowFullError,
     NotAuthenticatedError,
+    NotLandedError,
     ProofVerificationError,
+    TransactionError,
     parse_api_error,
 )
+from .nonces import USED, WINDOW, NonceTracker, refusal_outcome
 from .consensus.types import (
     DataStoreTx,
     RegisterDidTx,
@@ -87,6 +91,19 @@ def _encode_json_body(payload: Any) -> Optional[bytes]:
     ).encode("utf-8")
 
 
+def _key_algorithm(body: Dict[str, Any], public_key_id: str) -> Optional[SignatureAlgorithm]:
+    """The algorithm of the key ``public_key_id`` in a DID document body, from
+    its key type; ``None`` if the document has no such key or names another
+    type."""
+    for key in body["public_keys"]:
+        if key["id"] == public_key_id:
+            for algorithm, key_type in _KEY_TYPES.items():
+                if key["type"] == key_type:
+                    return algorithm
+            return None
+    return None
+
+
 def _envelope_data(body: Any) -> Any:
     """``data`` of an API envelope (``{success, data, error}``), raising its
     ``error`` when ``success`` is false; any other body as it is."""
@@ -113,10 +130,12 @@ def _schema_json(schema: Any) -> str:
     """A ``SchemaDefinition`` as the node's schema JSON text.
 
     The node maps each field to its type name and lists required fields in
-    ``required_fields``; a field's ``required`` flag joins that list. A
-    field's ``indexed`` flag and an index's ``type`` have no on-chain
-    counterpart: declare indexes in ``indexes``.
+    ``required_fields``; a field's ``required`` flag joins that list. The node
+    supports no schema indexes, so a schema with ``indexes`` or a field
+    flagged ``indexed`` is refused (``ValueError``).
     """
+    if schema.indexes:
+        raise ValueError("Schema indexes are not supported: the node refuses a schema that declares indexes")
     fields: Dict[str, str] = {}
     required = list(schema.required_fields)
     for name, definition in schema.fields.items():
@@ -127,15 +146,15 @@ def _schema_json(schema: Any) -> str:
                 f"schema field {name!r} has type {field_type!r}; the node takes "
                 + ", ".join(_SCHEMA_FIELD_TYPES)
             )
+        if getattr(definition, "indexed", False):
+            raise ValueError(
+                f"schema field {name!r} is flagged indexed: schema indexes are not supported"
+            )
         fields[name] = field_type
         if definition.required and name not in required:
             required.append(name)
-    indexes = [
-        {"name": index.name, "fields": list(index.fields), "unique": index.unique}
-        for index in schema.indexes or []
-    ]
     return _json.dumps(
-        {"version": schema.version, "fields": fields, "indexes": indexes, "required_fields": required},
+        {"version": schema.version, "fields": fields, "indexes": [], "required_fields": required},
         separators=(",", ":"),
     )
 
@@ -157,13 +176,17 @@ class DataOperations:
         Each value must be a JSON object (a ``dict``): the node stores only
         objects. Each transaction is signed by the identity set on the client
         over ``store_data_message`` (its data the value's JSON text,
-        ``json.dumps(value, separators=(",", ":"), sort_keys=True)``) and
-        submitted to ``POST /tx/submit``, under consecutive nonces from the
-        account's next one. All are signed before any is sent.
+        ``json.dumps(value, separators=(",", ":"), sort_keys=True,
+        allow_nan=False)``) and submitted to ``POST /tx/submit``, one at a
+        time, each under a nonce the client hands out (see
+        ``WillowClient.wait_until_landed``). The node accepts at most 24
+        nonces above the account's base, so past 24 writes in flight the next
+        waits for earlier ones to land.
 
         StoreData writes a new key; it is refused in its block for a key that
         already exists, and a write refused in its block still spends its
-        nonce. Writes sent together may land in any order.
+        nonce. Writes in flight may land in any order: wait for a write to
+        land before sending one that depends on it.
 
         Args:
 
@@ -171,15 +194,20 @@ class DataOperations:
             data: Key -> JSON object to store under it
 
         Returns:
-            For each key, in order, the ``{tx_hash, code, log}`` of the
-            accepted transaction
+            For each key, in order, the ``{tx_hash, code, log, did, nonce}``
+            of the accepted transaction
 
         Raises:
             TypeError: A value is not a ``dict``. Nothing is sent.
-            ValueError: The subgrove ID, a key, or the DID holds a line break.
-                Nothing is sent.
-            TransactionError: CheckTx refused a transaction; those before it
-                were submitted.
+            ValueError: The subgrove ID, a key, or the DID holds a line break,
+                or a value holds NaN or an infinity. Nothing is sent.
+            TransactionError: CheckTx refused a transaction.
+            NonceWindowFullError: Every nonce the node accepts stayed taken.
+            NetworkError: A submission failed in transit.
+
+            On any of the last three, ``error.submitted`` holds the results
+            of the keys submitted before it and ``error.failed_key`` the key
+            that wasn't; the keys after it were not sent.
         """
         if not isinstance(data, dict):
             raise TypeError("data must map each key to a JSON object (a dict)")
@@ -189,26 +217,29 @@ class DataOperations:
         client = self.client
         did = client._did or ""
         writes = [
-            DataStoreTx(
+            (key, DataStoreTx(
                 subgrove_id=subgrove_id,
                 key=key,
-                data=_json.dumps(value, separators=(",", ":"), sort_keys=True),
+                data=_json.dumps(value, separators=(",", ":"), sort_keys=True, allow_nan=False),
                 owner_did=did,
                 public_key_id=client._public_key_id or "",
-            )
+            ))
             for key, value in data.items()
         ]
-        for tx in writes:
-            create_sign_message("DataStore", tx)  # refuse a line break before reading the nonce
-        if not writes:
-            return []
-        nonce = await client._account_nonce(did)
-        signed = []
-        for tx in writes:
-            nonce += 1
-            tx.nonce = nonce
-            signed.append(client._sign_transaction("DataStore", tx))
-        return [await client._submit_transaction(tx) for tx in signed]
+        for _, tx in writes:
+            create_sign_message("DataStore", tx)  # refuse a line break before sending any
+        submitted: List[Dict[str, Any]] = []
+        for key, tx in writes:
+            try:
+                # The account's base is read for the first write only.
+                submitted.append(
+                    await client._sign_and_submit("DataStore", tx, read_base=not submitted)
+                )
+            except Exception as e:
+                e.submitted = submitted  # type: ignore[attr-defined]
+                e.failed_key = key  # type: ignore[attr-defined]
+                raise
+        return submitted
 
     @require_auth
     async def store_item(
@@ -226,7 +257,8 @@ class DataOperations:
             value: Item value, a JSON object (``dict``)
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction
         """
         (result,) = await self.store(subgrove_id, {key: value})
         return result
@@ -446,7 +478,8 @@ class DataOperations:
             items: List of items with "key" and "value" fields
 
         Returns:
-            For each item, the ``{tx_hash, code, log}`` of its transaction
+            For each item, the ``{tx_hash, code, log, did, nonce}`` of its
+            transaction
         """
         # Convert list of {key, value} to dict
         data = {item["key"]: item["value"] for item in items}
@@ -555,19 +588,25 @@ class RegistrationOperations:
         submitted to ``POST /tx/submit``. ``owner_did`` must be that identity.
         ``readers`` become the mode's free readers. The schema is sent as the
         node's schema JSON: each field's type, with required fields listed in
-        ``required_fields``; ``indexed`` flags, index types, and
-        ``dataset_path`` have no on-chain counterpart and are not sent. For
-        other modes and fields, use ``ConsensusClient.register_subgrove``.
+        ``required_fields``; ``dataset_path`` has no on-chain counterpart and
+        is not sent. The subgrove ID must be 1 to 64 ASCII letters, digits,
+        ``-``, or ``_``, starting with a letter or digit, and the schema can
+        declare no indexes (no ``indexes``, no field flagged ``indexed``):
+        the node refuses either. For other modes and fields, use
+        ``ConsensusClient.register_subgrove``.
 
         Args:
             request: Subgrove registration request data
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction
 
         Raises:
-            ValueError: ``owner_did`` is not the client's identity, or the
-                schema is missing or has a type the node does not take.
+            ValueError: ``owner_did`` is not the client's identity, the
+                subgrove ID is not one the node takes, or the schema is
+                missing, declares indexes, or has a type the node does not
+                take. Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         request = dict(request)
@@ -996,8 +1035,11 @@ class WillowClient:
                 did_info["public_key_id"]
             )
 
-            # Register it (pre-fund the derived DID with the fee first)
-            await client.register_did(did_info["did_document"])
+            # Register it (pre-fund the derived DID with the fee first), and
+            # wait for the registration to land before the DID signs anything
+            await client.wait_until_landed(
+                await client.register_did(did_info["did_document"])
+            )
 
             # Store a JSON object under a key (a StoreData transaction)
             await client.data.store("my-data", {"key": {"value": 1}})
@@ -1036,6 +1078,11 @@ class WillowClient:
         self._private_key: Optional[str] = None
         self._public_key_id: Optional[str] = None
         self._algorithm: SignatureAlgorithm = "Ed25519"
+
+        # The nonces handed out per signing DID (see ``willow.nonces``).
+        self._nonces = NonceTracker()
+        self._nonce_poll_interval = 1.0
+        self._nonce_wait_timeout = 60.0
 
         # Configure proof verification if options provided
         if proof_verification_options:
@@ -1258,7 +1305,9 @@ class WillowClient:
 
         The transaction is signed with the document's own key over the node's
         compact JSON of the document (``register_did_message``), under nonce
-        1, and submitted to ``POST /tx/submit``.
+        1, and submitted to ``POST /tx/submit``. It returns once CheckTx
+        accepts it; the DID can sign other transactions and requests only
+        after it lands, so ``await client.wait_until_landed(result)`` first.
 
         Args:
             did_document: DID document to register (its ``id`` must be the
@@ -1267,17 +1316,21 @@ class WillowClient:
                 set on the client, which must then be ``did_document.id``.
             public_key_id: The signing key's id in the document. Defaults to
                 the identity's, or the document's first authentication key.
-            algorithm: The key's algorithm. Defaults to the identity's, or
-                "Ed25519".
+            algorithm: The key's algorithm. Defaults to the one the
+                document's key type names (``Ed25519VerificationKey2018`` or
+                ``EcdsaSecp256k1VerificationKey2019``), else the identity's,
+                else "Ed25519".
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction
 
         Raises:
             NotAuthenticatedError: No key given and no identity set for this DID.
             TransactionError: CheckTx refused the transaction.
         """
         body = did_document_body(did_document)
+        fallback_algorithm: SignatureAlgorithm = "Ed25519"
         if private_key_hex is None:
             if not self.is_authenticated() or self._did != body["id"]:
                 raise NotAuthenticatedError(
@@ -1286,16 +1339,25 @@ class WillowClient:
                 )
             private_key_hex = self._private_key
             public_key_id = public_key_id or self._public_key_id
-            algorithm = algorithm or self._algorithm
+            fallback_algorithm = self._algorithm
         if public_key_id is None:
             if not body["authentication"]:
                 raise ValueError("did_document lists no authentication key")
             public_key_id = body["authentication"][0]
+        algorithm = algorithm or _key_algorithm(body, public_key_id) or fallback_algorithm
+        did = body["id"]
         tx = RegisterDidTx(did_document=body, signature="", public_key_id=public_key_id, nonce=1)
         tx.signature = sign_challenge(
-            create_sign_message("RegisterDid", tx), private_key_hex or "", algorithm or "Ed25519"
+            create_sign_message("RegisterDid", tx), private_key_hex or "", algorithm
         )
-        return await self._submit_transaction(create_transaction_wrapper("RegisterDid", tx))
+        self._nonces.hold(did, 1)
+        response = await self._post_transaction(create_transaction_wrapper("RegisterDid", tx))
+        try:
+            result = _tx_submit_result(response)
+        except TransactionError as e:
+            self._nonces.settle(did, 1, refusal_outcome(e, response.status_code))
+            raise
+        return dict(result, did=did, nonce=1)
 
     def set_identity(
         self,
@@ -1516,11 +1578,98 @@ class WillowClient:
         tx.signature = sign_challenge(message, self._private_key or "", self._algorithm)
         return create_transaction_wrapper(tx_type, tx)
 
-    async def _sign_and_submit(self, tx_type: str, tx: Any) -> Dict[str, Any]:
-        """Sign ``tx`` under the account's next nonce and submit it."""
-        create_sign_message(tx_type, tx)  # refuse what can't be signed before reading the nonce
-        tx.nonce = await self._account_nonce(self._did or "") + 1
-        return await self._submit_transaction(self._sign_transaction(tx_type, tx))
+    async def _take_nonce(self, did: str, read_base: bool = True) -> int:
+        """A nonce for ``did``'s next transaction: the lowest one in the
+        node's window this client hasn't handed out (see ``willow.nonces``).
+        While every one is taken, waits for the account's base to advance.
+
+        ``read_base=False`` takes one above the base last read, when one is
+        free, without reading it again: for the writes after the first of a
+        batch.
+
+        Raises:
+            NonceWindowFullError: The window stayed full for
+                ``_nonce_wait_timeout`` seconds.
+        """
+        if not read_base:
+            nonce = self._nonces.take(did, 0)
+            if nonce is not None:
+                return nonce
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._nonce_wait_timeout
+        while True:
+            nonce = self._nonces.take(did, await self._account_nonce(did))
+            if nonce is not None:
+                return nonce
+            if loop.time() >= deadline:
+                raise NonceWindowFullError(
+                    f"every nonce the node accepts for {did} is taken by a transaction "
+                    f"that hasn't landed; wait for earlier ones to land"
+                )
+            await asyncio.sleep(self._nonce_poll_interval)
+
+    async def _sign_and_submit(
+        self, tx_type: str, tx: Any, read_base: bool = True
+    ) -> Dict[str, Any]:
+        """Sign ``tx`` as the identity under a nonce it hands out, and submit it.
+
+        A transaction CheckTx refuses gives its nonce back, unless the
+        refusal says the nonce is held by a pending transaction or already
+        used. When it is already used, no transaction under it can run, so
+        ``tx`` is signed again under a fresh nonce. A submission that fails in
+        transit keeps its nonce until its lease runs out, since it may have
+        reached the node; its ``NetworkError`` carries the ``did`` and
+        ``nonce`` it was signed under.
+
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction.
+        """
+        did = self._did or ""
+        create_sign_message(tx_type, tx)  # refuse what can't be signed before taking a nonce
+        error: Optional[TransactionError] = None
+        for _ in range(WINDOW):
+            tx.nonce = await self._take_nonce(did, read_base)
+            read_base = True  # a retry follows a nonce the base may have passed
+            try:
+                signed = self._sign_transaction(tx_type, tx)
+            except BaseException:
+                self._nonces.release(did, tx.nonce)
+                raise
+            try:
+                response = await self._post_transaction(signed)
+            except NetworkError as e:
+                # It may have reached the node: say under which nonce.
+                e.did, e.nonce = did, tx.nonce  # type: ignore[attr-defined]
+                raise
+            try:
+                return dict(_tx_submit_result(response), did=did, nonce=tx.nonce)
+            except TransactionError as e:
+                outcome = refusal_outcome(e, response.status_code)
+                self._nonces.settle(did, tx.nonce, outcome)
+                if outcome != USED:
+                    raise
+                error = e
+        assert error is not None
+        raise error
+
+    async def _post_transaction(self, tx: Dict[str, Any]) -> httpx.Response:
+        """POST a JSON transaction to the API's ``/tx/submit``.
+
+        Raises:
+            NetworkError: On network errors.
+        """
+        try:
+            return await self._http.request(
+                "POST",
+                f"{self.api_url}/tx/submit",
+                content=_encode_json_body(tx),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.NetworkError as e:
+            raise NetworkError(f"Network error: {str(e)}")
+        except httpx.TimeoutException:
+            raise NetworkError("Request timed out")
 
     async def _submit_transaction(self, tx: Dict[str, Any]) -> Dict[str, Any]:
         """Submit a JSON transaction to the API's ``POST /tx/submit``.
@@ -1532,18 +1681,60 @@ class WillowClient:
             TransactionError: Unless CheckTx accepted the transaction.
             NetworkError: On network errors.
         """
-        try:
-            response = await self._http.request(
-                "POST",
-                f"{self.api_url}/tx/submit",
-                content=_encode_json_body(tx),
-                headers={"Content-Type": "application/json"},
-            )
-        except httpx.NetworkError as e:
-            raise NetworkError(f"Network error: {str(e)}")
-        except httpx.TimeoutException:
-            raise NetworkError("Request timed out")
-        return _tx_submit_result(response)
+        return _tx_submit_result(await self._post_transaction(tx))
+
+    async def wait_until_landed(
+        self,
+        *writes: Any,
+        timeout: float = 60.0,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Wait until each write's nonce has been used in a block.
+
+        Each of ``writes`` is what a write returned: a ``{..., did, nonce}``
+        dict (``register_did``, ``data.store_item``,
+        ``registration.register_subgrove``, the ``privacy`` grants) or a list
+        of them (``data.store``, ``data.batch_store``). A write returns once
+        CheckTx accepts it; send one that depends on it (a write after the
+        DID's registration, a store into a subgrove just registered) only
+        after it lands. Writes in flight together may land in any order.
+
+        This polls ``GET /account/{did}/nonce`` until the account's base
+        reaches each write's nonce. The base advances only over used nonces
+        with no gap below them, so it also waits for every earlier write from
+        that DID. A write refused in its block uses its nonce too: read what
+        it wrote to know it took effect. A RegisterDid uses its nonce only
+        when it succeeds.
+
+        Raises:
+            NotLandedError: A nonce wasn't used within ``timeout`` seconds.
+            ValueError: A write carries no ``did`` and ``nonce``.
+        """
+        targets: Dict[str, int] = {}
+        pending: List[Any] = list(writes)
+        while pending:
+            write = pending.pop()
+            if isinstance(write, (list, tuple)):
+                pending.extend(write)
+                continue
+            did = write.get("did") if isinstance(write, dict) else None
+            nonce = write.get("nonce") if isinstance(write, dict) else None
+            if not isinstance(did, str) or isinstance(nonce, bool) or not isinstance(nonce, int):
+                raise ValueError("each write must be the {..., did, nonce} result a write returned")
+            targets[did] = max(targets.get(did, 0), nonce)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        for did, nonce in targets.items():
+            while True:
+                base = self._nonces.observe(did, await self._account_nonce(did))
+                if base >= nonce:
+                    break
+                if loop.time() >= deadline:
+                    raise NotLandedError(
+                        f"nonce {nonce} of {did} was not used within {timeout} s: the "
+                        f"account's base nonce is {base}"
+                    )
+                await asyncio.sleep(poll_interval)
 
     async def _request(
         self,

@@ -42,13 +42,16 @@ async def main():
             did_info["private_key"],
             did_info["public_key_id"],
         )
-        await client.register_did(did_info["did_document"])
+        # A write returns once CheckTx accepts it: wait for the registration
+        # to land before the DID signs anything else.
+        await client.wait_until_landed(await client.register_did(did_info["did_document"]))
 
         # 1. Store single item
         print("\n1. Store Single Item")
         print("-" * 40)
+        written = []
         try:
-            await client.data.store_item(
+            written.append(await client.data.store_item(
                 SUBGROVE,
                 "prod-001",
                 {
@@ -58,7 +61,7 @@ async def main():
                     "price": 1299.99,
                     "stock": 50,
                 },
-            )
+            ))
             print("Stored product: prod-001")
         except WillowError as e:
             print(f"Error: {e}")
@@ -99,10 +102,13 @@ async def main():
             },
         ]
         try:
-            await client.data.batch_store(SUBGROVE, products)
+            written.append(await client.data.batch_store(SUBGROVE, products))
             print(f"Batch stored {len(products)} products")
         except WillowError as e:
             print(f"Error: {e}")
+
+        # The writes above may land in any order; read them once they have.
+        await client.wait_until_landed(written)
 
         # 3. Get single item (with proof verification)
         print("\n3. Get Single Item")

@@ -43,10 +43,13 @@ async def main():
         print("  Identity set")
 
         # 4. Register the DID on the network (a RegisterDid transaction).
-        # The DID must first be pre-funded with the registration fee.
+        # The DID must first be pre-funded with the registration fee. A write
+        # returns once CheckTx accepts it: wait for the registration to land
+        # before the DID signs anything else.
         print("\nRegistering DID...")
-        await client.register_did(did_info["did_document"])
-        print("  DID registration submitted")
+        registration = await client.register_did(did_info["did_document"])
+        await client.wait_until_landed(registration)
+        print("  DID registered")
 
         # 5. Store data (automatic proof verification on reads).
         # In a real app you'd register the subgrove/dataset first; see

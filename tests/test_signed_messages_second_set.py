@@ -231,7 +231,8 @@ def _grant():
 
 
 LINE_BREAK_CASES = [
-    ("RegisterSubgrove subgrove_id", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (data)")[1], subgrove_id=v))),
+    # An indexing subgrove: a data or file subgrove's ID takes no '\r', ' ', or ':' either.
+    ("RegisterSubgrove subgrove_id", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (indexing)")[1], subgrove_id=v))),
     ("RegisterSubgrove owner_did", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (data)")[1], owner_did=v))),
     ("GrantSubgroveKey subgrove_id", lambda v: grant_subgrove_key_message(v, "did:willow:a", _grant(), 1)),
     ("GrantSubgroveKey sender_did", lambda v: grant_subgrove_key_message("sg", v, _grant(), 1)),
@@ -669,3 +670,109 @@ async def test_unregister_storage_node_signs_the_node_and_nonce_it_sends(file_tx
             "private_key": SEED, "public_key_id": PUBLIC_KEY_ID, "sign_function": sign, "nonce": 1,
         })
     assert len(file_tx_submit) == 1
+
+
+# ---------------------------------------------------------------------------
+# Registrations the node refuses for a data or file subgrove: refused before
+# anything is signed.
+# ---------------------------------------------------------------------------
+
+_INDEXED_SCHEMA = json.dumps({
+    "version": 1, "fields": {"a": "string"},
+    "indexes": [{"name": "by_a", "fields": ["a"], "unique": False}], "required_fields": [],
+})
+BAD_SUBGROVE_IDS = ["", "-a", "_a", "a" * 65, "a b", "a:b", "a.b", "a/b", "café", "a\rb"]
+
+
+@pytest.mark.parametrize("name", ["RegisterSubgrove (data)", "RegisterSubgrove (file)"])
+@pytest.mark.parametrize("subgrove_id", BAD_SUBGROVE_IDS)
+def test_a_storage_registration_with_an_id_the_node_refuses_is_not_signed(name, subgrove_id):
+    _, tx = _transaction(name)
+    with pytest.raises(ValueError, match="subgrove_id"):
+        register_subgrove_message(dict(tx, subgrove_id=subgrove_id))
+
+
+@pytest.mark.parametrize("subgrove_id", ["a", "0", "A-1_b", "x" * 64])
+def test_a_storage_registration_takes_any_id_the_node_takes(subgrove_id):
+    _, tx = _transaction("RegisterSubgrove (data)")
+    assert register_subgrove_message(dict(tx, subgrove_id=subgrove_id)).startswith(
+        f"RegisterSubgrove\nSubgrove: {subgrove_id}\n"
+    )
+
+
+@pytest.mark.parametrize("name", ["RegisterSubgrove (data)", "RegisterSubgrove (file)"])
+def test_a_storage_registration_whose_schema_declares_indexes_is_not_signed(name):
+    _, tx = _transaction(name)
+    with pytest.raises(ValueError, match="Schema indexes are not supported"):
+        register_subgrove_message(dict(tx, schema=_INDEXED_SCHEMA))
+
+
+def test_the_storage_rules_leave_an_indexing_registration_alone():
+    name = "RegisterSubgrove (indexing)"
+    _, tx = _transaction(name)
+    assert register_subgrove_message(tx) == VECTORS[name]["message"]
+    register_subgrove_message(dict(tx, subgrove_id="idx:2", schema=_INDEXED_SCHEMA))
+
+
+@pytest.mark.asyncio
+async def test_register_subgrove_refuses_indexes_and_bad_ids_before_anything_is_sent():
+    client, seen = _willow_client(0)
+    schema = {"version": 1, "fields": {"a": {"type": "string"}}}
+    request = {"subgrove_id": "sg-1", "name": "n", "owner_did": "did:willow:a", "schema": schema}
+    for bad, match in (
+        (dict(request, schema=dict(schema, indexes=[{"name": "i", "fields": ["a"]}])), "indexes are not supported"),
+        (dict(request, schema={"version": 1, "fields": {"a": {"type": "string", "indexed": True}}}), "indexes are not supported"),
+        (dict(request, subgrove_id="my data"), "subgrove_id"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            await client.registration.register_subgrove(bad)
+    assert seen == []
+    await client.registration.register_subgrove(request)
+    assert json.loads(_sent(seen, "RegisterSubgrove")["schema"])["indexes"] == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_consensus_register_subgrove_refuses_indexes_and_bad_ids_before_reading_the_nonce():
+    client = _consensus_client(0)
+    with pytest.raises(ValueError, match="subgrove_id"):
+        await client.register_subgrove("sg 1", "{}", "did:willow:a", SEED, PUBLIC_KEY_ID)
+    with pytest.raises(ValueError, match="indexes"):
+        await client.register_subgrove("sg-1", _INDEXED_SCHEMA, "did:willow:a", SEED, PUBLIC_KEY_ID)
+    assert client._session.submitted == []
+    assert client._session.read_nonces == 0
+
+
+# ---------------------------------------------------------------------------
+# File and storage-node transactions take the nonce the caller chose; the node
+# refuses nonce 0, so there is no default.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nonce", [None, 0, -1, True, "1"])
+async def test_file_transactions_need_a_nonce(file_tx_submit, nonce):
+    signing = {
+        "owner_did": "did:willow:a", "private_key": SEED, "public_key_id": PUBLIC_KEY_ID,
+        "sign_function": lambda message, key: sign_challenge(message, key, "Ed25519"),
+    }
+    if nonce is not None:
+        signing["nonce"] = nonce
+    client = WillowClient("http://api.test")
+    with pytest.raises(ValueError, match="nonce"):
+        await client.files.unregister_storage_node("did:willow:node", signing)
+    with pytest.raises(ValueError, match="nonce"):
+        await client.files.delete("sg", "f", signing)
+    with pytest.raises(ValueError, match="nonce"):
+        await client.files.upload("sg", "f", "a.txt", b"x", "http://storage.test", signing)
+    assert file_tx_submit == []
+
+
+@pytest.mark.asyncio
+async def test_consensus_store_data_refuses_nan_before_anything_is_sent():
+    client = _consensus_client(0)
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            await client.store_data("sg-1", "doc1", {"x": value}, "did:willow:a", SEED, PUBLIC_KEY_ID)
+    assert client._session.submitted == []
+    assert client._session.read_nonces == 0

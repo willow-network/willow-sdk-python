@@ -30,6 +30,7 @@ node's compact JSON of the DID document.
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -725,6 +726,29 @@ def register_subgrove_unsigned_bincode(tx: Any) -> bytes:
     return bytes(w.out)
 
 
+# A subgrove ID the node takes for a data or file subgrove.
+_STORAGE_SUBGROVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def _storage_registration_rules(t: Dict[str, Any]) -> None:
+    """Refuse a DataStorage or FileStorage registration the node refuses: a
+    subgrove ID that isn't 1 to 64 ASCII letters, digits, ``-``, or ``_``
+    starting with a letter or digit, or a schema that declares indexes."""
+    if "BlockchainIndexing" in t["mode"]:
+        return
+    if not _STORAGE_SUBGROVE_ID.fullmatch(t["subgrove_id"]):
+        raise ValueError(
+            f"subgrove_id {t['subgrove_id']!r} is not one the node takes: 1 to 64 ASCII "
+            "letters, digits, '-', or '_', starting with a letter or digit"
+        )
+    try:
+        schema = json.loads(t["schema"])
+    except ValueError:
+        return  # the node refuses a schema it can't parse itself
+    if isinstance(schema, dict) and schema.get("indexes"):
+        raise ValueError("Schema indexes are not supported: the node refuses a schema that declares indexes")
+
+
 def register_subgrove_message(tx: Any) -> str:
     """The message a RegisterSubgrove transaction is signed over::
 
@@ -737,16 +761,23 @@ def register_subgrove_message(tx: Any) -> str:
     ``tx`` is the transaction's JSON object; ``Config`` binds every field of
     it but the signature, as the node decodes it. Send
     ``normalize_register_subgrove(tx)`` and sign this message over it.
+
+    Raises:
+        ValueError: A field is out of range or a line holds a line break, or
+            a DataStorage or FileStorage registration has a subgrove ID the
+            node refuses (not 1 to 64 ASCII letters, digits, ``-``, or ``_``
+            starting with a letter or digit) or a schema that declares
+            indexes.
     """
     t = normalize_register_subgrove(tx)
-    config = hashlib.sha256(register_subgrove_unsigned_bincode(t)).hexdigest()
-    return "\n".join([
+    lines = [
         "RegisterSubgrove",
         _field("Subgrove", t["subgrove_id"]),
         _field("Owner", t["owner_did"]),
-        f"Config: {config}",
-        f"Nonce: {t['nonce']}",
-    ])
+    ]
+    _storage_registration_rules(t)
+    config = hashlib.sha256(register_subgrove_unsigned_bincode(t)).hexdigest()
+    return "\n".join(lines + [f"Config: {config}", f"Nonce: {t['nonce']}"])
 
 
 def _grant_lines(grant: Dict[str, Any]) -> List[str]:

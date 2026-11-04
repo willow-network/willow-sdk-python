@@ -280,7 +280,8 @@ class PrivacyOperations:
             grant: The EncryptedKeyGrant to issue.
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction.
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
@@ -313,7 +314,8 @@ class PrivacyOperations:
             revokee_did: The DID whose key grant should be revoked.
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction.
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
@@ -350,7 +352,8 @@ class PrivacyOperations:
                 one per authorized DID.
 
         Returns:
-            The ``{tx_hash, code, log}`` of the accepted transaction.
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
