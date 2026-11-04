@@ -23,7 +23,8 @@ from willow.grovedb import (
 )
 from willow.grovedb.bincode import BincodeReader
 from willow.grovedb.element import deserialize_element
-from willow.grovedb.types import ItemElement, LayerProof, ReferenceElement, SumItemElement
+from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash
+from willow.grovedb.types import NULL_HASH, ItemElement, LayerProof, ReferenceElement, SumItemElement
 from willow.light_client.types import QueryProof
 from willow.light_client.verifier import ProofVerifier as LightClientProofVerifier
 from willow.proof import (
@@ -195,10 +196,68 @@ def test_a_value_beside_the_honest_value_hash_is_refused():
     with pytest.raises(GroveDBVerificationError, match="does not hash to the value hash"):
         verify_item_at_path(tampered, BOB["path"], BOB["key"])
 
-    # The honest value beside its hash is bound.
+    # Even the honest value beside its hash is not returned: grovedb proves
+    # an Item as a KV node, and a value hash binds no bytes beside it.
     data.merk_proof = data.merk_proof.replace(forged, _kv_value_hash_op(b"user:bob", honest, value_hash(honest)))
-    root, item = verify_item_at_path(_encode_proof(proof), BOB["path"], BOB["key"])
-    assert (root, item.value) == (BOB_ROOT, bytes.fromhex(BOB["value_hex"]))
+    beside = _encode_proof(proof)
+    assert quick_verify(beside) == BOB_ROOT
+    with pytest.raises(GroveDBVerificationError, match="beside a value hash"):
+        verify_item_at_path(beside, BOB["path"], BOB["key"])
+    assert verify_items_at_path(beside, BOB["path"])[1] == []
+
+
+# A parent tree "p" holds, at key "t", a non-empty subtree. Its root key and
+# content are ground so that t's value hash, combine_hash(A, B), is also the
+# value hash of the 63 bytes (A + B)[1:], which decode as an Item.
+FORGE_ROOT_KEY = bytes.fromhex("6b003a2c06")
+FORGE_CONTENT = _item(b'{"n":42}')
+
+
+def _tree(root_key):
+    return b"\x02\x01" + _varint(len(root_key)) + root_key + b"\x00"
+
+
+def _layer(merk, lowers=()):
+    out = _varint(len(merk)) + merk + _varint(len(lowers))
+    for key, lower in lowers:
+        out += _varint(len(key)) + key + lower
+    return out
+
+
+def _tree_as_item(node_op):
+    """The honest proof of the subtree at p/t, a proof that carries, at
+    p/t, the 63 bytes that decode as an Item in the node ``node_op`` makes,
+    their Item's payload, and the root both reproduce."""
+    tree = _tree(FORGE_ROOT_KEY)
+    a = value_hash(tree)
+    b = node_hash(kv_hash(FORGE_ROOT_KEY, FORGE_CONTENT), NULL_HASH, NULL_HASH)
+    vh = combine_hash(a, b)
+    forged = (a + b)[1:]
+    assert len(forged) == 63 and value_hash(forged) == vh
+    payload = deserialize_element(forged).value
+    parent = _tree(b"t")
+    parent_vh = combine_hash(value_hash(parent), node_hash(kv_digest_to_kv_hash(b"t", vh), NULL_HASH, NULL_HASH))
+    top = _kv_value_hash_op(b"p", parent, parent_vh)
+    honest = b"\x00" + _layer(top, [(b"p", _layer(_kv_value_hash_op(b"t", tree, vh), [
+        (b"t", _layer(_kv_op(FORGE_ROOT_KEY, FORGE_CONTENT)))]))]) + b"\x01"
+    tampered = b"\x00" + _layer(top, [(b"p", _layer(node_op(b"t", forged, vh)))]) + b"\x01"
+    root = verify_grovedb_proof(honest).root_hash
+    assert verify_item_at_path(honest, ["p", "t"], FORGE_ROOT_KEY)[1].value == b'{"n":42}'
+    assert verify_grovedb_proof(tampered).root_hash == root
+    return tampered, payload, root
+
+
+def _assert_no_item_at_p_t(tampered, payload, root, match):
+    with pytest.raises(GroveDBVerificationError, match=match):
+        verify_item_at_path(tampered, ["p"], "t", root)
+    assert verify_items_at_path(tampered, ["p"], root)[1] == []
+    assert not ProofVerifier.verify_item_proof(tampered.hex(), "t", payload, ["p"]).valid
+    assert not LightClientProofVerifier().verify_inclusion_proof(b"t", payload, tampered, root, ["p"])
+
+
+def test_a_subtree_carried_beside_its_value_hash_is_not_an_item():
+    tampered, payload, root = _tree_as_item(_kv_value_hash_op)
+    _assert_no_item_at_p_t(tampered, payload, root, "beside a value hash")
 
 
 def test_tampered_envelopes_are_refused():

@@ -231,25 +231,35 @@ def _try_deserialize(value: bytes) -> Optional[Element]:
         return None
 
 
+_VALUE_HASH_NODES = ("KVValueHash", "KVValueHashFeatureType")
+
+
 def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: List[bytes]) -> bool:
     """Bind a leaf's bytes to the value hash its merk node commits to;
     whether they are bound.
 
-    A ``KV`` node's hash is computed from its bytes, and a
-    ``KVRefValueHash`` node's from the referenced bytes it carries, so both
-    are bound. A ``KVValueHash`` node carries its value hash beside its
-    bytes, and only the hash enters the root: its bytes are bound only when
-    they hash to it, so a value whose hash differs is refused. A tree
-    element is the exception: its value hash is
-    ``combine_hash(value_hash(bytes), subtree root)``. An empty subtree's
-    root is the null hash, so it is checked; a non-empty one's can't be
-    without its lower layer, so its bytes are not bound (``False``).
+    grovedb proves an Item it matches as a ``KV`` node, a reference as a
+    ``KVRefValueHash`` node, and a subtree (or a sum item) as a
+    ``KVValueHash`` node. A ``KV`` node's hash is computed from its bytes,
+    and a ``KVRefValueHash`` node's from the referenced bytes it carries, so
+    both are bound. A ``KVValueHash`` node carries its value hash beside its
+    bytes, and only the hash enters the root:
+
+    - a tree element's value hash is
+      ``combine_hash(value_hash(bytes), subtree root)``. An empty subtree's
+      root is the null hash, so it is checked; a non-empty one's can't be
+      without its lower layer, so its bytes are not bound (``False``).
+    - any other element is not bound (``False``): a non-empty subtree's
+      value hash is also the value hash of some bytes that can decode as an
+      element, so the node's bytes may stand for a subtree. Bytes that do
+      not hash to the node's value hash are refused.
     """
-    if proved.node_type not in ("KVValueHash", "KVValueHashFeatureType"):
+    if proved.node_type not in _VALUE_HASH_NODES:
         return True
-    if element is not None and is_tree_element(element):
-        if has_root_key(element):
-            return False
+    tree = element is not None and is_tree_element(element)
+    if tree and has_root_key(element):
+        return False
+    if tree:
         expected = combine_hash(value_hash(proved.value), NULL_HASH)
         what = "Empty subtree"
     else:
@@ -260,7 +270,20 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
             f"{what} at {_path_to_string(path + [proved.key])} does not hash to the value hash "
             f"its node commits to: expected {hash_to_hex(proved.proof)}, got {hash_to_hex(expected)}"
         )
-    return True
+    return tree
+
+
+def _unbound_reason(entry: Dict[str, Any]) -> Optional[str]:
+    """Why a leaf that is not a subtree is not returned as an Item, when
+    its node does not bind its bytes; None otherwise."""
+    if entry["tree"] or entry["value"] is not None and entry["node_type"] == "KV":
+        return None
+    if entry["node_type"] in _VALUE_HASH_NODES:
+        return (
+            f"its node ({entry['node_type']}) carries its bytes beside a value hash, which does "
+            "not bind them; grovedb proves an Item as a KV node"
+        )
+    return None
 
 
 @dataclass
@@ -300,9 +323,11 @@ def verify_items_at_path(
     and the Item elements it proves at exactly ``path``, in key order.
 
     The proof must descend to ``path`` with no lower layer off it (see
-    ``check_envelope``), and each Item's bytes must be bound to the root
-    (see ``_bind_leaf_value``). Entries proven at another path, subtrees,
-    references, and sum items are not returned. This proves each returned
+    ``check_envelope``). An Item is returned only from the ``KV`` node
+    grovedb proves it in, whose hash is computed from its bytes (see
+    ``_bind_leaf_value``): bytes carried beside a value hash are not.
+    Entries proven at another path, subtrees, references, and sum items are
+    not returned. This proves each returned
     Item is stored at ``path`` under the returned root; it does not prove
     that no other Item is.
 
@@ -315,6 +340,17 @@ def verify_items_at_path(
         GroveDBVerificationError: The proof is invalid, does not descend to
             ``path``, or (with ``expected_root_hash``) has another root.
     """
+    root_hash, items, _ = _proven_items(proof_bytes, path, expected_root_hash)
+    return root_hash, items
+
+
+def _proven_items(
+    proof_bytes: bytes,
+    path: List[Any],
+    expected_root_hash: Optional[CryptoHash],
+) -> "tuple[CryptoHash, List[ProvenItem], Dict[bytes, str]]":
+    """The root, the Items proven at ``path``, and, for each key there whose
+    bytes the proof does not bind, why."""
     segments = _path_bytes(path)
     if not segments:
         raise GroveDBVerificationError("a path is required: a proof binds values only at a path")
@@ -325,10 +361,15 @@ def verify_items_at_path(
             f"got {hash_to_hex(result.root_hash)}"
         )
     items = []
+    unbound: Dict[bytes, str] = {}
     for entry in result.results:
-        if entry["path"] != segments or entry["value"] is None:
+        if entry["path"] != segments:
             continue
-        if entry["node_type"] not in ("KV", "KVValueHash", "KVValueHashFeatureType"):
+        # An Item is returned only from a KV node, as grovedb proves one.
+        if entry["node_type"] != "KV" or entry["value"] is None:
+            reason = _unbound_reason(entry)
+            if reason:
+                unbound[entry["key"]] = reason
             continue
         element = _try_deserialize(entry["value"])
         if isinstance(element, ItemElement):
@@ -336,7 +377,7 @@ def verify_items_at_path(
                 path=segments, key=entry["key"], value=element.value,
                 element=entry["value"], flags=element.flags,
             ))
-    return result.root_hash, items
+    return result.root_hash, items, unbound
 
 
 def verify_item_at_path(
@@ -358,13 +399,14 @@ def verify_item_at_path(
             Item at ``path`` and ``key``.
     """
     key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
-    root_hash, items = verify_items_at_path(proof_bytes, path, expected_root_hash)
+    root_hash, items, unbound = _proven_items(proof_bytes, path, expected_root_hash)
     for item in items:
         if item.key == key_bytes:
             return root_hash, item
-    raise GroveDBVerificationError(
-        f"The proof does not prove an Item at {_path_to_string(_path_bytes(path) + [key_bytes])}"
-    )
+    where = _path_to_string(_path_bytes(path) + [key_bytes])
+    if key_bytes in unbound:
+        raise GroveDBVerificationError(f"The proof does not prove an Item at {where}: {unbound[key_bytes]}")
+    raise GroveDBVerificationError(f"The proof does not prove an Item at {where}")
 
 
 def verify_proof_against_root(
