@@ -36,9 +36,12 @@ from .types import (
     VerificationStats,
     HealthStatus,
     RetryConfig,
+    _HISTORICAL_UNSUPPORTED,
+    _QUERY_UNSUPPORTED,
 )
 from .auth import _key_algorithm, sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
 from .errors import (
+    UnsupportedError,
     WillowError,
     AuthenticationError,
     NetworkError,
@@ -69,7 +72,14 @@ from .indexers import (
     NoIndexersReachableError,
 )
 from .utils import require_auth
-from .proof import ProofVerifier, ProofVerificationOptions, configure_proof_verification
+from .proof import (
+    ProofVerificationOptions,
+    configure_proof_verification,
+    json_values_equal,
+    stored_value,
+    subgrove_data_path,
+)
+from .grovedb import GroveDBVerificationError, verify_item_at_path
 from .computed_fields import (
     ComputedFieldRegistry,
     ComputedFieldSet,
@@ -154,8 +164,9 @@ def _schema_json(schema: Any) -> str:
 class DataOperations:
     """Data operations for Willow client.
 
-    Provides methods for storing, retrieving, updating, and querying data
-    with automatic proof verification for secure operations.
+    Provides methods for storing and reading data. ``get`` verifies the
+    value it returns against a proof and a trusted root, or raises;
+    ``get_unverified`` and ``query_unverified`` return what the API serves.
     """
 
     def __init__(self, client: "WillowClient"):
@@ -257,10 +268,18 @@ class DataOperations:
 
     @require_auth
     async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
-        """Get a single item from a subgrove with automatic proof verification.
+        """Get a single item from a subgrove, verified against its proof and a
+        trusted root.
 
-        This method fetches data and automatically verifies the cryptographic
-        proof against the consensus root hash for security.
+        Reads the value (``GET /data/{subgrove_id}/{key}``) and its proof
+        (``GET /proof/{subgrove_id}/{key}``). The proof must prove an Item at
+        ``key`` under the subgrove's data path
+        (``subgrove_data_path(subgrove_id)``) whose JSON is the value served,
+        and the root it computes must be the ``app_hash`` of the CometBFT
+        header at the proof's ``height + 1`` (the state after block
+        ``height``), as the light client gives it (see ``get_root_hash``).
+        It returns the value the proof proves. Anything missing or
+        different raises; nothing is returned unverified.
 
         Args:
 
@@ -271,54 +290,58 @@ class DataOperations:
             The data item
 
         Raises:
-            ProofVerificationError: If proof verification fails
+            ProofVerificationError: The API returned no proof or no height,
+                the proof doesn't prove the value served at ``key`` under the
+                subgrove's data, the light client has no header for the
+                proof's state, or the roots differ.
+            WillowError: A read was refused (a key that isn't there, say).
         """
-        # First get the data
         data_response = await self.client._request(
             "GET",
             f"/data/{subgrove_id}/{key}",
             authenticated=True,
             read=True,
         )
-        data = data_response["data"]
+        data = data_response.get("data")
 
-        # Then get the proof
-        try:
-            proof_response = await self.client._request(
-                "GET",
-                f"/proof/{subgrove_id}/{key}",
-                authenticated=True,
-                read=True,
+        proof_response = await self.client._request(
+            "GET",
+            f"/proof/{subgrove_id}/{key}",
+            authenticated=True,
+            read=True,
+        )
+        proof = proof_response.get("data")
+        proof_hex = proof.get("proof") if isinstance(proof, dict) else None
+        if not isinstance(proof_hex, str) or not proof_hex:
+            raise ProofVerificationError(
+                f"The API returned no proof for key {key!r}: the value is not verified. "
+                "Use get_unverified to read it without verification."
+            )
+        height = proof.get("height")
+        if isinstance(height, bool) or not isinstance(height, int) or height < 0:
+            raise ProofVerificationError(
+                f"The proof for key {key!r} names no block height: there is no root to check it against"
             )
 
-            if proof_response.get("data") and proof_response["data"].get("proof"):
-                proof_hex = proof_response["data"]["proof"]
+        try:
+            root_hash, item = verify_item_at_path(
+                bytes.fromhex(proof_hex), subgrove_data_path(subgrove_id), key
+            )
+        except (ValueError, GroveDBVerificationError) as e:
+            raise ProofVerificationError(f"Proof verification failed for key {key!r}: {e}") from e
+        proven = stored_value(item.value)
+        if not json_values_equal(proven, data):
+            raise ProofVerificationError(
+                f"The value the API served for key {key!r} is not the value its proof proves"
+            )
 
-                # Verify the proof
-                result = ProofVerifier.verify_item_proof(proof_hex, key, data)
-                if result.error:
-                    raise ProofVerificationError(f"Proof verification failed: {result.error}")
-
-                # Compare with consensus root hash
-                try:
-                    consensus_root = await self.client.get_root_hash()
-                    if result.root_hash != consensus_root:
-                        raise ProofVerificationError(
-                            f"Root hash mismatch: computed {result.root_hash} vs consensus {consensus_root}"
-                        )
-                except ProofVerificationError:
-                    raise
-                except Exception as e:
-                    logger.warning(f"Could not fetch consensus root hash for verification: {e}")
-            else:
-                logger.warning(f"No proof available for key: {key}")
-
-        except ProofVerificationError:
-            raise
-        except Exception as e:
-            logger.warning(f"Could not fetch proof for key {key}: {e}")
-
-        return data
+        trusted_root = await self.client._trusted_app_hash(height + 1)
+        if root_hash.hex() != trusted_root.lower():
+            raise ProofVerificationError(
+                f"Root hash mismatch for key {key!r}: the proof computes {root_hash.hex()}, "
+                f"the header at height {height + 1} has app_hash {trusted_root}"
+            )
+        return proven
 
     @require_auth
     async def get_unverified(self, subgrove_id: str, key: str) -> Dict[str, Any]:
@@ -367,67 +390,21 @@ class DataOperations:
 
     @require_auth
     async def query(self, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
-        """Query indexed data with automatic proof verification.
+        """Not supported: raises ``UnsupportedError`` without a request.
 
-        Args:
-
-            subgrove_id: Subgrove/dataset identifier
-            query: Query parameters (filters, search, sort, limit, offset)
-
-        Returns:
-            Query response with documents and optional proof
-
-        Raises:
-            ProofVerificationError: If proof verification fails
+        A verified query would need its documents bound to the proof: the
+        node returns documents without their keys and proves the subgrove's
+        whole data tree, so nothing ties a document to a proven value or to
+        the query's filter, order, offset, and limit. ``query_unverified``
+        returns the API's documents unverified; ``get`` verifies one key.
         """
-        # Convert dict to QueryRequest for validation
-        query_request = QueryRequest(**query)
-
-        # Always request proof by default for security
-        query_dict = query_request.model_dump(exclude_none=True)
-        query_dict["include_proof"] = True
-
-        response = await self.client._request(
-            "POST",
-            f"/query/{subgrove_id}",
-            json=query_dict,
-            authenticated=True,
-            read=True,
-        )
-
-        query_response = QueryResponse(**response["data"])
-
-        # Verify proof if present
-        if query_response.proof:
-            result = ProofVerifier.verify_query_proof(query_response.proof, query_response.documents)
-            if result.error:
-                raise ProofVerificationError(f"Query proof verification failed: {result.error}")
-
-            # Compare with consensus root hash
-            try:
-                consensus_root = await self.client.get_root_hash()
-                if result.root_hash != consensus_root:
-                    raise ProofVerificationError(
-                        f"Root hash mismatch: computed {result.root_hash} vs consensus {consensus_root}"
-                    )
-            except ProofVerificationError:
-                raise
-            except Exception as e:
-                logger.warning(f"Could not fetch consensus root hash for verification: {e}")
-
-        # Apply computed fields if registered for this app/dataset
-        computed_fields = self.client._computed_fields.get(subgrove_id)
-        if computed_fields:
-            query_response = apply_computed_fields_to_response(query_response, computed_fields)
-
-        return query_response
+        raise UnsupportedError(_QUERY_UNSUPPORTED)
 
     @require_auth
     async def query_unverified(self, subgrove_id: str, query: Dict[str, Any]) -> QueryResponse:
         """Query indexed data without proof verification.
 
-        Use this method when performance is more important than cryptographic
-        verification.
+        The documents are what the API serves; nothing verifies them.
 
         Args:
 
@@ -529,35 +506,14 @@ class DataOperations:
         checkpoint_id: str,
         query: Dict[str, Any]
     ) -> "HistoricalQueryResponse":
-        """Query historical data with automatic proof verification.
+        """Deprecated and not supported: raises ``UnsupportedError`` without a
+        request.
 
-        Forces proof inclusion and verifies the proof against the
-        checkpoint's state root.
-
-        Args:
-            subgrove_id: Subgrove/dataset identifier
-            checkpoint_id: Checkpoint ID (hex string)
-            query: Query parameters (path, key, query_type)
-
-        Returns:
-            Verified historical query response
-
-        Raises:
-            ProofVerificationError: If proof verification fails
-            WillowError: If proof is missing from response
+        The node serves no historical proof, and the checkpoint state root a
+        historical answer carries is not a trusted root, so nothing can be
+        verified. ``query_historical`` returns the unverified answer.
         """
-        from .types import HistoricalQueryRequest, HistoricalQueryResponse
-        from .errors import WillowError, ProofVerificationError
-
-        # Force proof inclusion
-        query["include_proof"] = True
-
-        result = await self.query_historical(subgrove_id, checkpoint_id, query)
-
-        # Verify the proof against checkpoint state root
-        result.verify_proof()
-
-        return result
+        raise UnsupportedError(_HISTORICAL_UNSUPPORTED)
 
 
 class RegistrationOperations:
@@ -1455,12 +1411,11 @@ class WillowClient:
         return self._computed_fields.has(dataset_id)
 
     async def _get_or_create_light_client(self) -> "LightClient":
-        """Get or create a light client for trustless verification.
+        """Get or create the light client.
 
         Auto-initializes a light client using trust-on-first-use: the
-        first block received from validators is trusted, and every
-        subsequent block is verified against it. Pin a known-good
-        checkpoint header instead for production deployments.
+        first block received from validators is trusted as it is (see
+        ``get_root_hash`` for what it checks after).
         """
         if self._light_client is not None:
             return self._light_client
@@ -1493,13 +1448,17 @@ class WillowClient:
             return lc
 
     async def get_root_hash(self) -> str:
-        """Get the verified root hash using the light client.
+        """The ``app_hash`` of the light client's latest trusted header.
 
-        Uses the light client for trustless verification. Auto-initializes
-        with trust-on-first-use if no light client is configured.
+        The light client starts with trust-on-first-use: it trusts the
+        first header it fetches from the validator RPC derived from the API
+        URL. It reads headers from ``/block``, whose answer carries no commit
+        for its own block or validator set, and checks commit signatures
+        over sign bytes that are not CometBFT's canonical vote encoding: so
+        against a CometBFT node it fetches no header and this raises.
 
         Returns:
-            Verified root hash as hex string from the light client
+            The root hash as hex
 
         Raises:
             WillowError: If root hash is not available
@@ -1508,6 +1467,27 @@ class WillowClient:
         # This auto-initializes the light client on first use (trust-on-first-use)
         light_client = await self._get_or_create_light_client()
         return await light_client.get_verified_root_hash()
+
+    async def _trusted_app_hash(self, height: int) -> str:
+        """The ``app_hash`` (hex) of the CometBFT header at ``height``, as the
+        light client gives it: a header it trusts, or one it verifies
+        against one it trusts.
+
+        Raises:
+            ProofVerificationError: The light client has no such header.
+        """
+        try:
+            light_client = await self._get_or_create_light_client()
+            header = await light_client.get_header_by_height(height)
+        except Exception as e:
+            raise ProofVerificationError(
+                f"No trusted root: the light client has no header at height {height}: {e}"
+            ) from e
+        if header is None:
+            raise ProofVerificationError(
+                f"No trusted root: the light client has no verified header at height {height}"
+            )
+        return header.header.app_hash.hex()
 
     async def get_root_hash_local(self) -> str:
         """Get the current local root hash from the node.

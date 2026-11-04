@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import Prehashed, encode_ds
 from eth_utils import keccak
 
 from willow import QuerySource, WillowClient, WillowError
-from willow.errors import AuthenticationError
+from willow.errors import AuthenticationError, ProofVerificationError, UnsupportedError
 from willow.auth import (
     _SECP256K1_N,
     _sign_request_with_nonce_at,
@@ -337,14 +337,15 @@ async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
         assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519") == "nonce"
         seen.append(request)
         if request.url.path.startswith("/proof/"):
-            # No proof: data.get logs a warning and returns the value.
+            # No proof: data.get raises rather than return the value unverified.
             return httpx.Response(200, json={"success": True, "data": {"proof": None}, "error": None})
         if request.url.path.startswith("/graphql/"):
             return httpx.Response(200, json={"success": True, "data": {"data": {"items": []}}, "error": None})
         return _ok(request)
 
     client = _client(handler)
-    await client.data.get("sg", "k")
+    with pytest.raises(ProofVerificationError, match="no proof"):
+        await client.data.get("sg", "k")
     await client.indexing.graphql_query("sg", "{ items { id } }", source=QuerySource.VALIDATOR)
     await client._http.aclose()
     assert [(r.method, r.url.path) for r in seen] == [
@@ -356,7 +357,7 @@ async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
 
 
 @pytest.mark.asyncio
-async def test_client_nonce_signs_a_verified_query():
+async def test_client_nonce_signs_an_unverified_query():
     seen = []
 
     def handler(request):
@@ -365,11 +366,12 @@ async def test_client_nonce_signs_a_verified_query():
         return _ok(request)
 
     client = _client(handler)
-    # No proof in the answer, so nothing further is fetched.
-    await client.data.query("sg", {})
+    with pytest.raises(UnsupportedError):
+        await client.data.query("sg", {})  # nothing is sent
+    await client.data.query_unverified("sg", {})
     await client._http.aclose()
     assert [(r.method, r.url.path) for r in seen] == [("POST", "/query/sg")]
-    assert json.loads(seen[0].content) == {"include_proof": True}
+    assert json.loads(seen[0].content) == {"include_proof": False}
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 import click
 from .client import WillowClient
 from .auth import generate_did
-from .errors import WillowError
+from .errors import ProofVerificationError, WillowError
 from .types import DidDocument
 
 
@@ -221,16 +221,24 @@ def store(ctx, subgrove_id, data_file):
 @data.command()
 @click.argument("subgrove_id")
 @click.argument("key")
+@click.option("--unverified", is_flag=True, help="Print the value the API serves, without verifying it.")
 @click.pass_context
-def get(ctx, subgrove_id, key):
-    """Get a single item from a subgrove (with proof verification)."""
+def get(ctx, subgrove_id, key, unverified):
+    """Get a single item from a subgrove, verified against its proof (or --unverified)."""
 
     async def _get():
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
 
         async with WillowClient(ctx.obj["api_url"]) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
-            result = await client.data.get(subgrove_id, key)
+            try:
+                if unverified:
+                    result = await client.data.get_unverified(subgrove_id, key)
+                else:
+                    result = await client.data.get(subgrove_id, key)
+            except ProofVerificationError as e:
+                click.echo(f"Not verified: {e}. Use --unverified to print the value unverified.", err=True)
+                sys.exit(1)
             click.echo(json.dumps(result, indent=2))
 
     asyncio.run(_get())

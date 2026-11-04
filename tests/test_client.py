@@ -18,7 +18,9 @@ from willow.types import (
     SchemaDefinition,
     FieldType
 )
-from willow.errors import WillowError, AuthenticationError, NetworkError, NotAuthenticatedError
+from willow.errors import (
+    WillowError, AuthenticationError, NetworkError, NotAuthenticatedError, ProofVerificationError,
+)
 
 
 def _tx_client(account_nonce=0, did_info=None):
@@ -385,11 +387,11 @@ class TestDataOperations:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_get_data(self, client, mock_http_client):
-        """Test data retrieval."""
+    async def test_get_data_without_a_proof_raises(self, client, mock_http_client):
+        """``get`` reads the value and its proof; a value with no proof is not
+        returned (``get_unverified`` reads it without one)."""
         _set_test_identity(client)
 
-        # Mock response
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -400,13 +402,13 @@ class TestDataOperations:
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
 
-        # Get data
-        result = await client.data.get("dataset1", "key1")
-
-        assert result == {"value": "test"}
-        # `get` makes two calls: GET /data/... then GET /proof/...
+        with pytest.raises(ProofVerificationError, match="no proof"):
+            await client.data.get("dataset1", "key1")
         called_urls = [c.args[1] for c in mock_http_client.request.call_args_list]
         assert any("data/dataset1/key1" in url for url in called_urls), called_urls
+        assert any("proof/dataset1/key1" in url for url in called_urls), called_urls
+
+        assert await client.data.get_unverified("dataset1", "key1") == {"value": "test"}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation,args,kind", [

@@ -230,7 +230,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 2
         assert all(doc["author"] == "alice" for doc in results.documents)
     
@@ -248,7 +248,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 2
         assert all(1000 <= doc["timestamp"] <= 1500 for doc in results.documents)
     
@@ -264,7 +264,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) >= 2
         assert any("indexing" in doc["content"].lower() for doc in results.documents)
     
@@ -280,7 +280,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 3
         
         # Verify descending order
@@ -299,7 +299,7 @@ class TestQueryOperations:
             "offset": 0
         }
         
-        page1 = await client2.data.query( "blog_posts", page1_query)
+        page1 = await client2.data.query_unverified("blog_posts", page1_query)
         assert len(page1.documents) == 2
         assert page1.limit == 2
         assert page1.offset == 0
@@ -311,7 +311,7 @@ class TestQueryOperations:
             "offset": 2
         }
         
-        page2 = await client2.data.query( "blog_posts", page2_query)
+        page2 = await client2.data.query_unverified("blog_posts", page2_query)
         assert len(page2.documents) <= 2
         assert page2.offset == 2
     
@@ -331,7 +331,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 1
         assert results.documents[0]["author"] == "alice"
         assert results.documents[0]["views"] >= 200
@@ -354,9 +354,9 @@ class TestCrossNodeConsistency:
         
         # Query from all nodes
         results = await asyncio.gather(
-            client1.data.query( "blog_posts", query),
-            client2.data.query( "blog_posts", query),
-            client3.data.query( "blog_posts", query)
+            client1.data.query_unverified("blog_posts", query),
+            client2.data.query_unverified("blog_posts", query),
+            client3.data.query_unverified("blog_posts", query)
         )
         
         results1, results2, results3 = results
@@ -455,7 +455,7 @@ class TestPerformance:
         
         # Test query performance
         query_start = time.time()
-        category_results = await client1.data.query( "perf_test", {
+        category_results = await client1.data.query_unverified("perf_test", {
             "filters": {"category": "electronics"}
         })
         category_query_time = (time.time() - query_start) * 1000
@@ -465,7 +465,7 @@ class TestPerformance:
         
         # Range query performance
         range_start = time.time()
-        range_results = await client1.data.query( "perf_test", {
+        range_results = await client1.data.query_unverified("perf_test", {
             "filters": {
                 "value": {"$gte": 200, "$lte": 500}
             }
