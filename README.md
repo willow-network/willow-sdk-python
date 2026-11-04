@@ -50,7 +50,8 @@ async def main():
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
 
-        # 5. Retrieve with automatic proof verification
+        # 5. Read it back, verified against its proof (see What the SDK
+        #    verifies); ProofVerificationError when it can't be verified
         user = await client.data.get("users", "user_1")
         print(f"User: {user}")
 
@@ -60,13 +61,13 @@ asyncio.run(main())
 ## Features
 
 - **DID Management** — generate and register DIDs (Ed25519 and secp256k1)
-- **Secure by default** — automatic cryptographic proof verification on data reads
+- **Verified reads** — `data.get` returns a value only when its proof binds it to its key under a trusted root, and raises otherwise (see What the SDK verifies)
 - **Signed transactions** — DID and subgrove registration, data and file writes, and key grants, each signed over every field and its nonce
 - **Rich query support** — filters, search, sort, pagination
 - **Token operations** — balances, fees, token info
 - **Validator operations** — list validators, staking info
 - **GraphQL indexing** — query blockchain data with proofs
-- **File storage** — upload, download, list, delete with chunk-level Merkle verification
+- **File storage** — upload, download, list, delete; downloads are checked against the manifest's chunk Merkle root and content hash
 - **File encryption** — XChaCha20-Poly1305 (`pynacl`) for private files
 - **Type safety** — Pydantic models throughout
 - **Async/await** — modern async Python over `httpx`
@@ -99,6 +100,8 @@ client = (
 async with WillowClient("http://localhost:3031") as client:
     ...
 ```
+
+With `api_key`, the client sends `X-API-Key` on its HTTP requests to the API and to an `indexer_url` you configure. Requests to indexers found through discovery (`GET /indexers`, whose operators choose their hosts) and to the consensus RPC carry no key.
 
 ### DID Operations
 
@@ -321,13 +324,16 @@ await client.wait_until_landed(registration)
 
 results = await client.data.store("my-data", {"a": {"n": 1}, "b": {"n": 2}})
 await client.wait_until_landed(results, timeout=60.0)  # NotLandedError after 60 s
+
+removal = await client.files.delete("files", "old.png", signing)
+await client.wait_until_landed(removal)
 ```
 
 A nonce counts as used once it is at or below the account's base, or the node reports it used above the base. With `consensus_rpc_url`, the client reads which nonces above the base are used (the ABCI query `/store/account_nonce_state/{did}`, sent without the API key), so each write counts as landed when its own nonce is used. Without it, the client reads only the base (and the nonces CheckTx has refused as already used). The base advances only over used nonces with no gap below them, so a write counts as landed only once every lower nonce of its DID is used too. A nonce no transaction uses (one given back after CheckTx refused its write, or one whose write failed in transit and was never resubmitted) then holds back every write above it, until the client hands that nonce to a later write and that write lands.
 
 A write refused in its block uses its nonce too, so read what it wrote to know it took effect. A RegisterDid uses its nonce only when it succeeds.
 
-### Data Operations (Secure by Default)
+### Data Operations
 
 ```python
 # Store a whole dict of key -> JSON object in a subgrove: one StoreData
@@ -346,23 +352,24 @@ await client.data.batch_store("subgrove_id", [
     {"key": "key4", "value": {"field": "value4"}},
 ])
 
-# Get a single item (auto-verifies the proof)
+# Get a single item, verified against its proof and a trusted root
+# (ProofVerificationError when it can't be verified)
 item = await client.data.get("subgrove_id", "key1")
 
-# Get without verification (faster; trust assumed)
+# Get the value the API serves, without verification
 item = await client.data.get_unverified("subgrove_id", "key1")
 ```
 
 - Each value must be a JSON object (a `dict`); anything else raises `TypeError` before anything is sent. The data sent is `json.dumps(value, separators=(",", ":"), sort_keys=True, allow_nan=False)`: a value holding NaN or an infinity raises `ValueError` before anything is sent.
 - Each store returns the `{tx_hash, code, log, did, nonce}` of its transaction, or raises `TransactionError` if CheckTx refuses it. StoreData writes a new key: it is refused in its block for a key that already exists.
-- `store` and `batch_store` send their keys one at a time. If one fails (`TransactionError`, `NonceWindowFullError`, or `NetworkError`), the error's `submitted` holds the results of the keys sent before it and `failed_key` the key that failed; the keys after it are not sent.
+- `store` and `batch_store` send their keys one at a time. If one fails (`TransactionError`, `NonceWindowFullError`, or `NetworkError`) or is cancelled (`asyncio.CancelledError`), the error's `submitted` holds the results of the keys sent before it and `failed_key` the key that failed; the keys after it are not sent.
 - `client.data.update` and `client.data.delete` raise `WillowError`: the node changes and deletes data only through UpdateData and DeleteData transactions, which this SDK does not build.
 
 ### Query Operations
 
 ```python
-# Filtered query (proof verified)
-result = await client.data.query("subgrove_id", {
+# Filtered query (the documents are not verified)
+result = await client.data.query_unverified("subgrove_id", {
     "filters": {
         "status": {"$eq": "active"},
         "age": {"$gte": 18},
@@ -374,13 +381,12 @@ result = await client.data.query("subgrove_id", {
 
 # Filter operators: $eq, $ne, $gt, $gte, $lt, $lte, $in, $contains
 
-# Skip verification
-result = await client.data.query_unverified("subgrove_id", {"filters": {}})
-
 for doc in result.documents:
     print(doc)
 print(f"Total: {result.total}")
 ```
+
+`client.data.query` raises `UnsupportedError` without sending anything: the API returns a query's documents without their keys, with a proof of the subgrove's whole data, so nothing binds a document to a proven value or to the query's filter, order, offset, and limit. `query_unverified` returns the documents unverified; `get` verifies a single key. `client.data.query_historical_verified` and `HistoricalQueryResponse.verify_proof` are deprecated and raise `UnsupportedError`: the node serves no historical proof.
 
 ### Registration Operations
 
@@ -482,18 +488,34 @@ print(f"Verification rate: {stats.verification_rate:.1%}")
 ### Proof Operations
 
 ```python
-proof_data = await client.proof.get("subgrove_id", "key1")
-proof_hex = proof_data["proof"]
-value = proof_data["value"]
+from willow import ProofVerifier, subgrove_data_path
 
-from willow import ProofVerifier
+value = await client.data.get_unverified("subgrove_id", "key1")
+proof_data = await client.proof.get("subgrove_id", "key1")  # proof, path, key, height
 
-result = ProofVerifier.verify_item_proof(proof_hex, "key1", value)
-if result.error:
+result = ProofVerifier.verify_item_proof(
+    proof_data["proof"], "key1", value, subgrove_data_path("subgrove_id")
+)
+if not result.valid:
     print(f"Verification failed: {result.error}")
 else:
-    print(f"Root hash: {result.root_hash}")
+    # The proof binds the value to key1 under this root. It proves the value
+    # once the root is the app_hash of a header you trust at height + 1.
+    print(f"Root hash: {result.root_hash}, header height: {proof_data['height'] + 1}")
 ```
+
+### What the SDK verifies
+
+- **`client.data.get(subgrove, key)`** reads the value and its proof. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the client's light client gives it. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified.
+- **The light client** trusts the first header it fetches (trust on first use) from the validator RPC derived from the API URL, as it is. It reads headers from `/block`, whose answer carries no commit for its own block or validator set, and checks commit signatures over sign bytes that are not CometBFT's canonical vote encoding. Against a CometBFT node it therefore fetches no header, `get_root_hash` raises, and `data.get` raises `ProofVerificationError`. `get_unverified` reads a value without verification.
+- **`ProofVerifier.verify_item_proof(proof, key, value, path)`** (and `GroveDBProofVerifier.verify_item_proof`, `verify_item_proof`) is valid only when the proof descends to `path`, proves an Item at exactly `key` there whose bytes the root commits to, and the Item's payload is `value` (the same bytes, or the same JSON value). A proof of another key or path, or a lone root hash, is invalid. It returns the root the proof computes: compare it with a root you trust, or pin one with `ProofVerificationOptions(expected_root_hash=...)`.
+- **`verify_query_proof(proof, documents, path)`** proves that each document is an Item stored at `path` under the returned root. It does not prove a query's filter, order, offset, or limit, or that no document was left out. `QueryResponse.verify_proof` raises `UnsupportedError`.
+- **`verify_proof_quick`, `extract_root_hash_from_proof`, and `verify_proof_with_expected_root`** compute or compare the root a proof reproduces, and bind no key or value. The light client's `ProofVerifier.verify_inclusion_proof` takes the key's path and binds the key and value; `verify_absence_proof` raises `UnsupportedError`.
+- **Proof decoding.** The SDK decodes grovedb's encoding (bincode's standard configuration, big-endian, variable-length integers) and reproduces grovedb's root for a proof. A proof must descend to the path it is checked at, with no lower layer off it. An item's bytes are bound to the value hash its merk node commits to: a node carrying a value beside another value's hash is refused, since only the hash enters the root.
+
+### File Storage
+
+`client.files.upload` submits the file's manifest as a StoreFileManifest transaction, then posts its chunks to the storage node. The storage node takes a chunk only once the manifest is on chain, so `upload` posts a chunk again every `poll_interval` seconds (1 by default) while the node refuses it for want of the manifest (HTTP 403, or 503 while it can't reach consensus), for up to `landing_timeout` seconds (60 by default). A chunk the node never takes raises `WillowError`, with `submission` the manifest's `{tx_hash, code, log, did, nonce}` and `chunk_index` the chunk. A manifest refused in its block never lands, so its chunks are never taken. `upload` returns once the storage node has taken every chunk, so the manifest is on chain; the returned manifest carries the same `submission`. `delete` and `unregister_storage_node` return their transaction's `{tx_hash, code, log, did, nonce}`. `download` checks the chunks against the manifest's chunk Merkle root and content hash.
 
 ### Private Subgroves (key grants)
 
@@ -523,15 +545,14 @@ for name, component in health.components.items():
 
 `GET /health` answers the health object itself (not an envelope), with `timestamp` as RFC 3339 text and its components under `checks`.
 
-### Root Hash Verification
+### Root Hash
 
 ```python
-verified_root = await client.get_root_hash()        # Consensus-verified
-local_root = await client.get_root_hash_local()     # Node's local view
-
-if verified_root == local_root:
-    print("Node is in sync with consensus")
+trusted_root = await client.get_root_hash()       # The light client's latest trusted header's app_hash
+local_root = await client.get_root_hash_local()   # The node's own GroveDB root, as the API reports it
 ```
+
+See What the SDK verifies for what the light client checks.
 
 ## Error Handling
 
@@ -545,6 +566,7 @@ from willow import (
     PermissionDeniedError,
     ProofVerificationError,
     RateLimitError,
+    UnsupportedError,
 )
 
 try:
@@ -554,7 +576,7 @@ except NotAuthenticatedError:
 except NotFoundError as e:
     print(f"Data not found: {e}")
 except ProofVerificationError as e:
-    print(f"Proof verification failed: {e}")
+    print(f"Not verified: {e}")  # client.data.get_unverified reads it unverified
 except PermissionDeniedError as e:
     print(f"Access denied: {e}")
 except RateLimitError as e:
@@ -621,7 +643,8 @@ willow-cli did register did.json
 
 # Data ops (reads the saved identity; stores are signed StoreData transactions)
 willow-cli data store my-subgrove items.json
-willow-cli data get my-subgrove user1
+willow-cli data get my-subgrove user1               # verified, or exits with the reason
+willow-cli data get my-subgrove user1 --unverified  # the value the API serves
 
 # Proof
 willow-cli proof get my-subgrove user1

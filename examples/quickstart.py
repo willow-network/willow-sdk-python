@@ -64,16 +64,15 @@ async def main():
         except WillowError as e:
             print(f"  Note: {e} (subgrove may need registration first)")
 
-        # 6. Query data (automatic proof verification).
+        # 6. Query data. Query results are not verified; client.data.get
+        #    verifies a single key.
         print("\nQuerying data...")
         try:
-            result = await client.data.query(
+            result = await client.data.query_unverified(
                 SUBGROVE,
                 {"filters": {"name": "Alice"}},
             )
-            print(f"  Found {len(result.documents)} documents")
-            if result.proof:
-                print("  Proof verified automatically")
+            print(f"  Found {len(result.documents)} documents (unverified)")
         except WillowError as e:
             print(f"  Note: {e}")
 

@@ -18,11 +18,11 @@ Example:
     ...     # Register Uniswap V2 computed fields
     ...     client.register_computed_fields('pairs', UNISWAP_V2_PAIR_FIELDS)
     ...
-    ...     # Query returns computed prices alongside proven reserves
-    ...     result = await client.data.query('pairs', {'filters': {'id': '0x...'}})
+    ...     # Query returns computed prices alongside the reserves
+    ...     result = await client.data.query_unverified('pairs', {'filters': {'id': '0x...'}})
     ...     # result.documents[0] contains:
-    ...     # - reserve0, reserve1 (proven by GKR circuit)
-    ...     # - token0Price, token1Price (computed from proven reserves)
+    ...     # - reserve0, reserve1 (as the API serves them, unverified)
+    ...     # - token0Price, token1Price (computed from those reserves)
 """
 
 from typing import Any, Callable, Dict, List, Optional, Union

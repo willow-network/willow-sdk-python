@@ -1,16 +1,19 @@
 """
 Willow Python SDK - Light Client Example
 
-Demonstrates the CometBFT light client for trustless verification:
+Demonstrates the CometBFT light client's interface:
 1. Configure the light client with the fluent builder
 2. Initialize with trust-on-first-use (or a hardcoded trusted header)
-3. Fetch and verify the current verified root hash (app_hash)
-4. Verify subsequent headers against the trusted set
+3. Read the root hash (app_hash) of its latest trusted header
+4. Check later headers against the trusted set
 
-Security model:
-- Verifies 2/3+ validator signatures
-- Validates header chain (heights, times)
-- Extracts app_hash for GroveDB proof verification
+What it checks: trust-on-first-use trusts the first header it fetches as
+it is. A later header must follow a trusted one (height, time, validator
+set hash) and carry commit signatures over the trust threshold, but the
+signatures are checked over sign bytes that are not CometBFT's canonical
+vote encoding, and headers are read from `/block`, whose answer carries no
+commit for its own block or validator set: so against a CometBFT node it
+fetches no header, and verifies none.
 
 Prerequisites:
 - pip install willow-sdk
@@ -66,13 +69,12 @@ async def main():
             await light_client.initialize_with_trust_on_first_use()
             print("Light client initialized")
 
-            # 3. Get the verified root hash (app_hash)
-            print("\n3. Verified Root Hash")
+            # 3. The latest trusted header's root hash (app_hash)
+            print("\n3. Trusted Root Hash")
             print("-" * 40)
             try:
                 root_hash = await light_client.get_verified_root_hash()
-                print(f"Verified app_hash: {root_hash[:32]}...")
-                print("Use this to verify GroveDB proofs.")
+                print(f"Latest trusted app_hash: {root_hash[:32]}...")
             except WillowError as e:
                 print(f"Error: {e}")
 
@@ -104,12 +106,8 @@ async def main():
     print(f"Created config with {len(direct_config.validator_endpoints)} endpoint(s)")
 
     print("\n" + "=" * 50)
-    print("Light Client Security Model:")
-    print("1. Fetch block headers from validator RPC endpoints")
-    print("2. Verify 2/3+ validator signatures")
-    print("3. Validate header chain (heights, times)")
-    print("4. Extract app_hash (GroveDB root)")
-    print("5. Verify proofs against trusted app_hash")
+    print("A trusted header's app_hash is the root of the state after the block")
+    print("before it: a proof of the state after block H checks against header H+1.")
 
 
 if __name__ == "__main__":

@@ -110,18 +110,18 @@ async def main():
         # The writes above may land in any order; read them once they have.
         await client.wait_until_landed(written)
 
-        # 3. Get single item (with proof verification)
+        # 3. Get single item, verified against its proof and the light
+        #    client's header (ProofVerificationError when it can't be)
         print("\n3. Get Single Item")
         print("-" * 40)
         try:
             item = await client.data.get(SUBGROVE, "prod-001")
-            print(f"Retrieved: {item}")
-            print("Proof verified automatically")
+            print(f"Retrieved (verified): {item}")
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 4. Get unverified (performance mode)
-        print("\n4. Get Unverified (Performance Mode)")
+        # 4. Get unverified (what the API serves)
+        print("\n4. Get Unverified")
         print("-" * 40)
         try:
             item = await client.data.get_unverified(SUBGROVE, "prod-001")
@@ -129,11 +129,11 @@ async def main():
         except WillowError as e:
             print(f"Error: {e}")
 
-        # 5. Query with filters
-        print("\n5. Query with Filters")
+        # 5. Query with filters. Query results are not verified.
+        print("\n5. Query with Filters (unverified)")
         print("-" * 40)
         try:
-            result = await client.data.query(
+            result = await client.data.query_unverified(
                 SUBGROVE,
                 {"filters": {"category": "electronics"}},
             )
@@ -147,7 +147,7 @@ async def main():
         print("\n6. Query with Range Filter")
         print("-" * 40)
         try:
-            result = await client.data.query(
+            result = await client.data.query_unverified(
                 SUBGROVE,
                 {"filters": {"price": {"$gte": 50, "$lte": 500}}},
             )
@@ -161,7 +161,7 @@ async def main():
         print("\n7. Query with Sorting and Pagination")
         print("-" * 40)
         try:
-            result = await client.data.query(
+            result = await client.data.query_unverified(
                 SUBGROVE,
                 {
                     "sort": {"field": "price", "order": "desc"},
