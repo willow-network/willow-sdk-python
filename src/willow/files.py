@@ -5,6 +5,7 @@ Files are chunked locally, manifests go through consensus,
 and chunks are uploaded to storage nodes.
 """
 
+import asyncio
 import hashlib
 import math
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import httpx
 
-from .errors import TransactionError, parse_api_error
+from .errors import TransactionError, WillowError, parse_api_error
 from .nonces import already_in_cache
 from .signed_messages import (
     delete_file_manifest_message,
@@ -43,6 +44,10 @@ class FileManifest:
     updated_at: int = 0
     encrypted: bool = False
     storage_nodes: List[str] = field(default_factory=list)
+    #: The ``{tx_hash, code, log, did, nonce}`` of the StoreFileManifest
+    #: transaction ``upload`` submitted (for ``client.wait_until_landed``);
+    #: ``None`` on a manifest read from the API.
+    submission: Optional[Dict[str, Any]] = None
 
 
 class FileOperations:
@@ -78,8 +83,19 @@ class FileOperations:
         data: bytes,
         storage_node_endpoint: str,
         signing: Optional[Dict[str, Any]] = None,
+        *,
+        landing_timeout: float = 60.0,
+        poll_interval: float = 1.0,
     ) -> FileManifest:
         """Upload a file to a FileStorage subgrove.
+
+        Submits the file's manifest as a StoreFileManifest transaction, then
+        posts its chunks to the storage node. The storage node takes a chunk
+        only once the manifest is on chain, so a chunk it refuses for want of
+        the manifest (HTTP 403, or 503 while it can't reach consensus) is
+        posted again every ``poll_interval`` seconds until the manifest lands
+        or ``landing_timeout`` seconds pass. A manifest refused in its block
+        never lands, and its chunks are never taken.
 
         Args:
             subgrove_id: Subgrove ID.
@@ -104,11 +120,19 @@ class FileOperations:
                 signature verifies spends its nonce: retry under the next
                 free nonce, which signs anew.
 
+        Returns:
+            The file's manifest, with ``submission`` the
+            ``{tx_hash, code, log, did, nonce}`` of its transaction.
+
         Raises:
             ValueError: ``signing`` is missing (the node takes no unsigned
                 write), a signed text field holds a line break, or the nonce
                 is missing or below 1 for a signer that isn't the client's
                 identity, or not free for one that is. Nothing is sent.
+            TransactionError: CheckTx refused the manifest. No chunk is sent.
+            WillowError: The storage node refused a chunk, or didn't take it
+                before ``landing_timeout``; ``error.submission`` is the
+                manifest's submission and ``error.chunk_index`` the chunk.
         """
         chunk_size = DEFAULT_CHUNK_SIZE
         chunks = _chunk_data(data, chunk_size)
@@ -158,16 +182,34 @@ class FileOperations:
                 }
             }
 
-        await self._sign_and_submit(owner_did, signing, message, transaction)
+        submission = await self._sign_and_submit(owner_did, signing, message, transaction)
 
-        # Upload chunks to storage node
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + landing_timeout
         async with httpx.AsyncClient() as client:
             for i, chunk in enumerate(chunks):
                 url = (
                     f"{storage_node_endpoint}/upload/{subgrove_id}/{file_key}"
                     f"?chunk_index={i}&chunk_count={chunk_count}&content_hash={content_hash}"
                 )
-                await client.post(url, content=chunk)
+                while True:
+                    try:
+                        resp = await client.post(url, content=chunk)
+                    except httpx.HTTPError as e:
+                        raise _chunk_error(
+                            f"chunk {i} of {file_key} did not reach the storage node: {e}",
+                            submission, i,
+                        ) from e
+                    if resp.status_code < 300:
+                        break
+                    if resp.status_code in (403, 503) and loop.time() < deadline:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    raise _chunk_error(
+                        f"the storage node refused chunk {i} of {file_key}: "
+                        f"{resp.text.strip() or 'HTTP ' + str(resp.status_code)}",
+                        submission, i, resp.status_code,
+                    )
 
         return FileManifest(
             file_key=file_key,
@@ -180,6 +222,7 @@ class FileOperations:
             chunk_merkle_root=chunk_merkle_root,
             owner_did=owner_did,
             storage_nodes=[storage_node_endpoint],
+            submission=submission,
         )
 
     async def download(
@@ -250,7 +293,7 @@ class FileOperations:
         subgrove_id: str,
         file_key: str,
         signing: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Delete a file (submits DeleteFileManifestTx to consensus).
 
         Args:
@@ -272,6 +315,10 @@ class FileOperations:
                 each write in flight. A write refused in its block after its
                 signature verifies spends its nonce: retry under the next
                 free nonce, which signs anew.
+
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction (for ``client.wait_until_landed``).
 
         Raises:
             ValueError: ``signing`` is missing (the node takes no unsigned
@@ -297,14 +344,13 @@ class FileOperations:
                 }
             }
 
-        await self._sign_and_submit(owner_did, signing, message, transaction)
-
+        return await self._sign_and_submit(owner_did, signing, message, transaction)
 
     async def unregister_storage_node(
         self,
         node_did: str,
         signing: Dict[str, Any],
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Unregister a storage node (submits UnregisterStorageNode to consensus).
 
         Args:
@@ -319,6 +365,10 @@ class FileOperations:
                 ``nonce`` out; one given must be free). Otherwise the nonce
                 is required: one of the 24 above the node DID's account
                 nonce (``GET /account/{did}/nonce``) not used yet.
+
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction (for ``client.wait_until_landed``).
 
         Raises:
             ValueError: ``signing`` is missing, the node DID holds a line
@@ -341,7 +391,7 @@ class FileOperations:
                 }
             }
 
-        await self._sign_and_submit(node_did, signing, message, transaction)
+        return await self._sign_and_submit(node_did, signing, message, transaction)
 
     async def _sign_and_submit(
         self,
@@ -351,7 +401,8 @@ class FileOperations:
         transaction: Callable[[int, Any], Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Sign ``transaction(nonce, signature)`` over ``message(nonce)`` with
-        ``signing``'s ``sign_function``, and submit it.
+        ``signing``'s ``sign_function``, and submit it. Returns the
+        ``{tx_hash, code, log, did, nonce}`` of the accepted transaction.
 
         When ``signer`` is the client's identity, the client hands out the
         nonce (or claims the one ``signing`` gives) and records what the
@@ -368,9 +419,10 @@ class FileOperations:
 
             return await client._submit_under_nonce(signer, sign, nonce=given)
         nonce = _signing_nonce(signing)
-        return await self._submit_tx(
+        result = await self._submit_tx(
             transaction(nonce, signing["sign_function"](message(nonce), signing["private_key"]))
         )
+        return dict(result, did=signer, nonce=nonce)
 
     async def _submit_tx(self, tx: Dict[str, Any]) -> Dict[str, Any]:
         """Submit a JSON transaction to the API's ``POST /tx/submit``.
@@ -398,6 +450,15 @@ _NONCE_HELP = (
     "(GET /account/{did}/nonce) that is not used yet, never 0; writes in "
     "flight from one signer each need their own"
 )
+
+
+def _chunk_error(
+    message: str, submission: Dict[str, Any], chunk_index: int, status: Optional[int] = None
+) -> WillowError:
+    error = WillowError(message, status_code=status)
+    error.submission = submission  # type: ignore[attr-defined]
+    error.chunk_index = chunk_index  # type: ignore[attr-defined]
+    return error
 
 
 def _required_signing(signing: Optional[Dict[str, Any]]) -> Dict[str, Any]:

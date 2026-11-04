@@ -208,9 +208,10 @@ class DataOperations:
             NonceWindowFullError: Every nonce the node accepts stayed taken.
             NetworkError: A submission failed in transit.
 
-            On any of the last three, ``error.submitted`` holds the results
-            of the keys submitted before it and ``error.failed_key`` the key
-            that wasn't; the keys after it were not sent.
+            On any of the last three, and on ``asyncio.CancelledError``,
+            ``error.submitted`` holds the results of the keys submitted
+            before it and ``error.failed_key`` the key that wasn't; the keys
+            after it were not sent.
         """
         if not isinstance(data, dict):
             raise TypeError("data must map each key to a JSON object (a dict)")
@@ -238,7 +239,7 @@ class DataOperations:
                 submitted.append(
                     await client._sign_and_submit("DataStore", tx, read_base=not submitted)
                 )
-            except Exception as e:
+            except (Exception, asyncio.CancelledError) as e:
                 e.submitted = submitted  # type: ignore[attr-defined]
                 e.failed_key = key  # type: ignore[attr-defined]
                 raise
