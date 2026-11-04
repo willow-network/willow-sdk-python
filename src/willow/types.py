@@ -307,8 +307,9 @@ class QueryResponse(BaseModel):
         the subgrove's whole data tree, so nothing binds the documents to the
         proof and the query's filter, order, offset, and limit. To check that
         each document is a value proven under a subgrove's data, call
-        ``willow.proof.verify_query_proof(proof, documents,
-        subgrove_data_path(id))``; it proves nothing about the query.
+        ``willow.proof.ProofVerifier.verify_query_proof(proof, documents,
+        subgrove_data_path(id))`` (synchronous; it returns a
+        ``ProofVerificationResult``); it proves nothing about the query.
         """
         from .errors import UnsupportedError
         raise UnsupportedError(_QUERY_UNSUPPORTED)
