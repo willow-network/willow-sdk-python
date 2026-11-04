@@ -10,6 +10,12 @@ from enum import Enum
 import base64
 import json
 
+from ..signed_messages import (
+    delete_file_manifest_message,
+    store_data_message,
+    store_file_manifest_message,
+)
+
 
 class ConsensusError(Exception):
     """Base exception for consensus client operations."""
@@ -177,7 +183,10 @@ class TransferTx:
 
 @dataclass
 class DataStoreTx:
-    """Data storage transaction."""
+    """Data storage transaction (the chain's ``StoreData``).
+
+    ``data`` is JSON text; the transaction carries its UTF-8 bytes.
+    """
     subgrove_id: str
     key: str
     data: str  # JSON data as string
@@ -298,20 +307,43 @@ def _hex_signature_to_bytes(hex_sig: str) -> List[int]:
     return [int(s[i:i + 2], 16) for i in range(0, len(s), 2)]
 
 
+def _data_bytes(tx: DataStoreTx) -> bytes:
+    """The bytes a StoreData transaction's ``data`` field carries."""
+    if isinstance(tx.data, (bytes, bytearray)):
+        return bytes(tx.data)
+    return tx.data.encode("utf-8")
+
+
 def create_transaction_wrapper(tx_type: str, transaction: Transaction) -> Dict[str, Any]:
     """Create transaction wrapper for consensus submission.
 
-    Converts the internal hex-string `signature` to the `Vec<u8>` wire
-    shape the validator expects (a JSON number array).
+    Converts the internal hex strings (`signature`, and a file manifest's
+    `content_hash` and `chunk_merkle_root`) and a StoreData transaction's
+    JSON text to the byte fields the validator reads (JSON number arrays).
+    ``DataStore`` is sent as the chain's ``StoreData``.
     """
     body = transaction.to_dict()
     if isinstance(body.get("signature"), str):
         body["signature"] = _hex_signature_to_bytes(body["signature"])
+    if tx_type in ("DataStore", "StoreData"):
+        tx_type = "StoreData"
+        body["data"] = list(_data_bytes(transaction))
+    elif tx_type == "StoreFileManifest":
+        for name in ("content_hash", "chunk_merkle_root"):
+            if isinstance(body[name], str):
+                body[name] = _hex_signature_to_bytes(body[name])
+            elif isinstance(body[name], (bytes, bytearray)):
+                body[name] = list(body[name])
     return {tx_type: body}
 
 
 def create_sign_message(tx_type: str, transaction: Transaction) -> str:
-    """Create canonical message for transaction signing."""
+    """Create canonical message for transaction signing.
+
+    StoreData (``DataStore``), StoreFileManifest, and DeleteFileManifest use
+    the builders in ``willow.signed_messages``, which bind the transaction's
+    nonce and every field it writes; build the message after the nonce is set.
+    """
     if tx_type == "RegisterDid":
         # For DID registration, sign the DID document directly
         return json.dumps(transaction.did_document, separators=(',', ':'), sort_keys=True)
@@ -356,25 +388,31 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
             f"Nonce: {tx.nonce}"
         )
     
-    elif tx_type == "DataStore":
+    elif tx_type in ("DataStore", "StoreData"):
         tx = transaction
-        return (
-            f"DataStore\n"
-            
-            f"Subgrove ID: {tx.subgrove_id}\n"
-            f"Key: {tx.key}\n"
-            f"Data: {tx.data}\n"
-            f"Owner: {tx.owner_did}\n"
-            f"Nonce: {tx.nonce}"
+        return store_data_message(
+            tx.subgrove_id, tx.key, tx.owner_did, _data_bytes(tx), tx.nonce
         )
 
     elif tx_type == "StoreFileManifest":
         tx = transaction
-        return f"store_file:{tx.subgrove_id}:{tx.file_key}:{tx.content_hash}:{tx.total_size}"
+        return store_file_manifest_message(
+            tx.subgrove_id,
+            tx.file_key,
+            tx.owner_did,
+            tx.filename,
+            tx.content_type,
+            tx.total_size,
+            tx.content_hash,
+            tx.chunk_count,
+            tx.chunk_size,
+            tx.chunk_merkle_root,
+            tx.nonce,
+        )
 
     elif tx_type == "DeleteFileManifest":
         tx = transaction
-        return f"delete_file:{tx.subgrove_id}:{tx.file_key}"
+        return delete_file_manifest_message(tx.subgrove_id, tx.file_key, tx.owner_did, tx.nonce)
 
     elif tx_type == "DeregisterSubgrove":
         tx = transaction

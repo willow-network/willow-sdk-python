@@ -160,6 +160,51 @@ headers = sign_request_with_nonce(did, private_key_hex, public_key_id, "POST", "
 
 `sign_request(did, private_key_hex, public_key_id, method, path, algorithm)` makes the older `{METHOD}:{PATH}:{TIMESTAMP}` form, over the path without its query string. It proves the DID but carries none of its read rights, and it can be replayed with any body until the timestamp expires.
 
+### Transaction signing (data and file writes)
+
+StoreData, StoreFileManifest, and DeleteFileManifest transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` with no trailing newline:
+
+```
+StoreData
+Subgrove: <subgrove_id>
+Key: <key>
+Owner: <owner_did>
+DataHash: <hex SHA-256 of the transaction's data bytes>
+Nonce: <nonce>
+```
+
+```
+StoreFileManifest
+Subgrove: <subgrove_id>
+Key: <file_key>
+Owner: <owner_did>
+Filename: <filename>
+ContentType: <content_type>
+TotalSize: <total_size>
+ContentHash: <hex content_hash>
+ChunkCount: <chunk_count>
+ChunkSize: <chunk_size>
+ChunkMerkleRoot: <hex chunk_merkle_root>
+Encryption: none
+Nonce: <nonce>
+```
+
+```
+DeleteFileManifest
+Subgrove: <subgrove_id>
+Key: <file_key>
+Owner: <owner_did>
+Nonce: <nonce>
+```
+
+- `DataHash` is over the exact bytes sent in `data`: the JSON text's UTF-8 bytes.
+- `Encryption` is `none` for a manifest without encryption, else `<key_epoch>:<hex 24-byte nonce>`.
+- The nonce in the message is the nonce in the transaction, so a transaction sent under a new nonce needs a new signature.
+- A subgrove ID, key, owner DID, filename, or content type holding a line break is refused with `ValueError` before anything is signed.
+- Ed25519 signs the message's UTF-8 bytes; secp256k1 signs their Keccak-256.
+
+`ConsensusClient` and `client.files` build these messages; `store_data_message`, `store_file_manifest_message`, and `delete_file_manifest_message` return the exact text for a transaction you sign yourself.
+
 ### Data Operations (Secure by Default)
 
 ```python
