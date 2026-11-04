@@ -637,9 +637,11 @@ class ConsensusClient:
                 whether any attempt may have reached the node.
         """
         if not self.config.api_url:
-            raise ConsensusError(
+            error = ConsensusError(
                 "api_url is required for transaction submission. Set it in the SDK config."
             )
+            error._sent = False  # type: ignore[attr-defined]
+            raise error
 
         url = f"{self.config.api_url.rstrip('/')}/tx/submit"
         maybe_sent = False
@@ -690,7 +692,9 @@ class ConsensusClient:
                     raise error from e
                 logger.warning(f"tx submit attempt {attempt + 1} failed: {e}")
 
-        raise ConsensusError("tx submit made no attempt: max_retries is negative")
+        error = ConsensusError("tx submit made no attempt: max_retries is negative")
+        error._sent = False  # type: ignore[attr-defined]
+        raise error
     
     async def _rpc_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Make a JSON-RPC request to CometBFT."""

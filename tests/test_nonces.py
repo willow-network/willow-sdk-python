@@ -856,3 +856,16 @@ async def test_consensus_register_did_signs_with_the_algorithm_its_key_type_name
     message = register_did_message(body["did_document"])
     assert verify_signature(message, bytes(body["signature"]).hex(), info["public_key"], "secp256k1")
     assert not verify_signature(message, bytes(body["signature"]).hex(), info["public_key"], "Ed25519")
+
+
+@pytest.mark.asyncio
+async def test_consensus_register_did_without_an_api_url_sends_nothing_and_keeps_no_nonce():
+    info = generate_did()
+    client = ConsensusClient(ConsensusConfig(consensus_rpc_url="http://rpc.test"))
+    client._session = _Session(FakeNode(info["did"]))
+    with pytest.raises(ConsensusError, match="api_url is required") as exc_info:
+        await client.register_did(
+            info["did_document"].model_dump(by_alias=True), info["private_key"], info["public_key_id"]
+        )
+    assert exc_info.value.transaction is None
+    assert client._nonces.handed_at(info["did"], 1) is None
