@@ -33,13 +33,14 @@ async def main():
     did_info = generate_did()
 
     async with WillowClient("http://localhost:3031") as client:
-        # Auth
-        await client.register_did(did_info["did_document"])
+        # Auth: the identity signs the DID's registration (pre-fund the DID
+        # with the registration fee first) and every later transaction.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
             did_info["public_key_id"],
         )
+        await client.register_did(did_info["did_document"])
 
         # 1. Define a schema with indexes
         print("\n1. Define Schema with Indexes")

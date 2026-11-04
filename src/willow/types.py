@@ -742,17 +742,25 @@ class DidPermissions(BaseModel):
 # ============================================================================
 
 class ComponentHealth(BaseModel):
-    """Individual component health."""
-    status: str
+    """Individual component health (``system`` reports figures, no status)."""
+    status: Optional[str] = None
     message: Optional[str] = None
+
+    model_config = {"extra": "allow"}
 
 
 class HealthStatus(BaseModel):
-    """Health check response."""
+    """Health check response.
+
+    ``GET /health`` answers ``timestamp`` as RFC 3339 text and its components
+    under ``checks``.
+    """
     status: str
-    timestamp: int
+    timestamp: Union[int, str]
     version: Optional[str] = None
-    components: Dict[str, ComponentHealth] = Field(default_factory=dict)
+    components: Dict[str, ComponentHealth] = Field(
+        default_factory=dict, validation_alias=AliasChoices("components", "checks")
+    )
 
 
 # ============================================================================

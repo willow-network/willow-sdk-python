@@ -8,10 +8,17 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 import base64
-import json
 
 from ..signed_messages import (
+    _key_grant,
     delete_file_manifest_message,
+    did_document_body,
+    grant_subgrove_key_message,
+    normalize_register_subgrove,
+    register_did_message,
+    register_subgrove_message,
+    revoke_subgrove_key_message,
+    rotate_subgrove_key_message,
     store_data_message,
     store_file_manifest_message,
 )
@@ -79,7 +86,12 @@ class BroadcastResult:
 
 @dataclass
 class RegisterDidTx:
-    """DID registration transaction."""
+    """DID registration transaction.
+
+    It is signed over the node's compact JSON of the DID document
+    (``register_did_message``) and sends that document as the node decodes
+    it (``did_document_body``). The node takes a registration only at nonce 1.
+    """
     did_document: Dict[str, Any]
     signature: str  # hex-encoded
     public_key_id: str
@@ -88,7 +100,7 @@ class RegisterDidTx:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "did_document": self.did_document,
+            "did_document": did_document_body(self.did_document),
             "signature": self.signature,
             "public_key_id": self.public_key_id,
             "nonce": self.nonce
@@ -127,7 +139,18 @@ SubgroveMode = Union[Dict[str, Any], None]
 
 @dataclass
 class RegisterSubgroveTx:
-    """Subgrove registration transaction."""
+    """Subgrove registration transaction.
+
+    ``to_dict`` gives every field of the node's transaction explicitly (see
+    ``normalize_register_subgrove``), and the transaction is signed over
+    ``register_subgrove_message`` of exactly that, so its ``Config`` binds
+    every field. ``mode`` is the node's JSON form, e.g.
+    ``{"DataStorage": {"name": ..., "writers": [...], "free_readers": [...]}}``,
+    ``{"FileStorage": {...}}``, or ``{"BlockchainIndexing": {...}}``; ``None``
+    is DataStorage with an empty name, writers, and free readers. ``name``
+    defaults to the mode's name. ``retention_window`` is a BlockchainIndexing
+    mode's own field; set here, it goes into that mode.
+    """
     subgrove_id: str
     schema: str  # JSON schema as string
     owner_did: str
@@ -136,25 +159,53 @@ class RegisterSubgroveTx:
     signature: str = ""  # hex-encoded
     public_key_id: str = ""
     nonce: int = 0
+    name: Optional[str] = None
+    description: str = ""
+    admins: List[str] = field(default_factory=list)
+    initial_funding: Optional[int] = None
+    required_tee: Optional[str] = None  # "AwsNitro", "IntelSgx", or "AmdSev"
+    privacy: Optional[Any] = None  # willow.privacy.PrivacyConfig or its JSON form
+    initial_owner_key_grant: Optional[Any] = None  # EncryptedKeyGrant or its JSON form
+    template_config: Optional[Dict[str, Any]] = None
+    confirmation_depth: int = 0
+    cryptographic_completeness: bool = False
+
+    def _mode(self) -> SubgroveMode:
+        if self.retention_window is None:
+            return self.mode
+        indexing = self.mode.get("BlockchainIndexing") if isinstance(self.mode, dict) else None
+        if not isinstance(indexing, dict):
+            raise ValueError("retention_window applies only to a BlockchainIndexing mode")
+        if indexing.get("retention_window") is not None:
+            raise ValueError("retention_window is set both here and in the BlockchainIndexing mode")
+        return {"BlockchainIndexing": {**indexing, "retention_window": self.retention_window}}
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        result = {
+        """The transaction's JSON object, every field explicit, as the node decodes it."""
+        mode = self._mode()
+        name = self.name
+        if name is None:
+            payload = next(iter(mode.values()), None) if isinstance(mode, dict) and len(mode) == 1 else None
+            name = payload.get("name", "") if isinstance(payload, dict) else ""
+        return normalize_register_subgrove({
             "subgrove_id": self.subgrove_id,
+            "name": name,
+            "description": self.description,
             "schema": self.schema,
             "owner_did": self.owner_did,
+            "admins": list(self.admins),
+            "initial_funding": self.initial_funding,
+            "checkpoint_verification": {"required_tee": self.required_tee},
+            "mode": mode,
+            "privacy": self.privacy,
+            "initial_owner_key_grant": self.initial_owner_key_grant,
+            "template_config": self.template_config,
+            "confirmation_depth": self.confirmation_depth,
             "signature": self.signature,
             "public_key_id": self.public_key_id,
-            "nonce": self.nonce
-        }
-        if self.mode is not None:
-            result["mode"] = self.mode
-        if self.retention_window is not None:
-            result["retention_window"] = {
-                "type": self.retention_window.type,
-                **({"value": self.retention_window.value} if self.retention_window.value is not None else {})
-            }
-        return result
+            "nonce": self.nonce,
+            "cryptographic_completeness": self.cryptographic_completeness,
+        })
 
 
 @dataclass
@@ -286,10 +337,86 @@ class DeregisterSubgroveTx:
         }
 
 
+@dataclass
+class GrantSubgroveKeyTx:
+    """Grant a subgrove's encryption key to a DID (owner or admin).
+
+    ``encrypted_key_grant`` is an ``EncryptedKeyGrant`` or its JSON form;
+    byte fields go as bytes, hex, or lists of ints.
+    """
+    subgrove_id: str
+    encrypted_key_grant: Any
+    sender_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "subgrove_id": self.subgrove_id,
+            "encrypted_key_grant": _key_grant("encrypted_key_grant", self.encrypted_key_grant),
+            "sender_did": self.sender_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
+@dataclass
+class RevokeSubgroveKeyTx:
+    """Revoke a DID's subgrove key grant (owner or admin)."""
+    subgrove_id: str
+    revokee_did: str
+    sender_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "subgrove_id": self.subgrove_id,
+            "revokee_did": self.revokee_did,
+            "sender_did": self.sender_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
+@dataclass
+class RotateSubgroveKeyTx:
+    """Rotate a subgrove's encryption key to ``new_epoch`` (owner), with a
+    grant for every DID that keeps access."""
+    subgrove_id: str
+    new_epoch: int
+    new_grants: List[Any]
+    sender_did: str
+    signature: str = ""  # hex-encoded
+    public_key_id: str = ""
+    nonce: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "subgrove_id": self.subgrove_id,
+            "new_epoch": self.new_epoch,
+            "new_grants": [
+                _key_grant(f"new_grants[{i}]", g) for i, g in enumerate(self.new_grants)
+            ],
+            "sender_did": self.sender_did,
+            "signature": self.signature,
+            "public_key_id": self.public_key_id,
+            "nonce": self.nonce,
+        }
+
+
 # Transaction type union
 Transaction = Union[
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
     StoreFileManifestTx, DeleteFileManifestTx, DeregisterSubgroveTx,
+    GrantSubgroveKeyTx, RevokeSubgroveKeyTx, RotateSubgroveKeyTx,
 ]
 
 
@@ -320,7 +447,8 @@ def create_transaction_wrapper(tx_type: str, transaction: Transaction) -> Dict[s
     Converts the internal hex strings (`signature`, and a file manifest's
     `content_hash` and `chunk_merkle_root`) and a StoreData transaction's
     JSON text to the byte fields the validator reads (JSON number arrays).
-    ``DataStore`` is sent as the chain's ``StoreData``.
+    ``DataStore`` is sent as the chain's ``StoreData``. A RegisterSubgrove
+    carries every field explicitly, as its ``Config`` hashed them.
     """
     body = transaction.to_dict()
     if isinstance(body.get("signature"), str):
@@ -340,41 +468,18 @@ def create_transaction_wrapper(tx_type: str, transaction: Transaction) -> Dict[s
 def create_sign_message(tx_type: str, transaction: Transaction) -> str:
     """Create canonical message for transaction signing.
 
-    StoreData (``DataStore``), StoreFileManifest, and DeleteFileManifest use
-    the builders in ``willow.signed_messages``, which bind the transaction's
-    nonce and every field it writes; build the message after the nonce is set.
+    StoreData (``DataStore``), StoreFileManifest, DeleteFileManifest,
+    RegisterSubgrove, GrantSubgroveKey, RotateSubgroveKey, and
+    RevokeSubgroveKey use the builders in ``willow.signed_messages``, which
+    bind the transaction's nonce and every field it writes; build the message
+    after the nonce is set. RegisterDid signs the node's compact JSON of the
+    DID document.
     """
     if tx_type == "RegisterDid":
-        # For DID registration, sign the DID document directly
-        return json.dumps(transaction.did_document, separators=(',', ':'), sort_keys=True)
-    
+        return register_did_message(transaction.did_document)
+
     elif tx_type == "RegisterSubgrove":
-        tx = transaction
-        mode = tx.mode
-        if mode and "BlockchainIndexing" in mode:
-            bi = mode["BlockchainIndexing"]
-            return (
-                f"RegisterSubgrove\n"
-                f"Subgrove ID: {tx.subgrove_id}\n"
-                
-                f"Mode: BlockchainIndexing\n"
-                f"Schema: {tx.schema}\n"
-                f"Owner: {tx.owner_did}\n"
-                f"Nonce: {tx.nonce}"
-            )
-        # DataStorage mode (default)
-        ds = mode.get("DataStorage", {}) if mode and "DataStorage" in mode else {}
-        return (
-            f"RegisterSubgrove\n"
-            f"Subgrove ID: {tx.subgrove_id}\n"
-            
-            f"Name: {ds.get('name', '')}\n"
-            f"Schema: {tx.schema}\n"
-            f"Owner: {tx.owner_did}\n"
-            f"Writers: {','.join(ds.get('writers', []))}\n"
-            f"Readers: {','.join(ds.get('free_readers', []))}\n"
-            f"Nonce: {tx.nonce}"
-        )
+        return register_subgrove_message(transaction.to_dict())
     
     elif tx_type == "Transfer":
         tx = transaction
@@ -417,6 +522,22 @@ def create_sign_message(tx_type: str, transaction: Transaction) -> str:
     elif tx_type == "DeregisterSubgrove":
         tx = transaction
         return f"DeregisterSubgrove:{tx.subgrove_id}:{tx.owner_did}:{tx.nonce}"
+
+    elif tx_type == "GrantSubgroveKey":
+        tx = transaction
+        return grant_subgrove_key_message(
+            tx.subgrove_id, tx.sender_did, tx.encrypted_key_grant, tx.nonce
+        )
+
+    elif tx_type == "RevokeSubgroveKey":
+        tx = transaction
+        return revoke_subgrove_key_message(tx.subgrove_id, tx.revokee_did, tx.sender_did, tx.nonce)
+
+    elif tx_type == "RotateSubgroveKey":
+        tx = transaction
+        return rotate_subgrove_key_message(
+            tx.subgrove_id, tx.sender_did, tx.new_epoch, tx.new_grants, tx.nonce
+        )
 
     else:
         raise ValueError(f"Unknown transaction type: {tx_type}")

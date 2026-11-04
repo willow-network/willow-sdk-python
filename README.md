@@ -19,7 +19,7 @@ pip install -e .
 
 ## Transaction submission
 
-Transactions submitted through this SDK go to the API server's `POST /tx/submit`. `api_url` is therefore **required** whenever you submit a tx; `consensus_rpc_url` is only used for read-only RPC queries (status, block, validators) and may be omitted or pointed at the same endpoint.
+Every write is a signed transaction submitted to the API server's `POST /tx/submit`: DID registration, subgrove registration, data and file writes, and key grants. The API accepts no writes over its REST routes. `api_url` is therefore **required** whenever you submit a tx; `consensus_rpc_url` is only used for read-only RPC queries (status, block, validators) and may be omitted or pointed at the same endpoint.
 
 ## Quick Start
 
@@ -32,17 +32,18 @@ async def main():
         # 1. Generate a DID
         did_info = generate_did()
 
-        # 2. Register the DID
-        await client.register_did(did_info["did_document"])
-
-        # 3. Set identity for per-request signing (synchronous, no server session).
+        # 2. Set it as the client's identity (synchronous, no server session).
+        #    It signs every transaction and authenticated request.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
             did_info["public_key_id"],
         )
 
-        # 4. Store data
+        # 3. Register the DID (pre-fund it with the registration fee first)
+        await client.register_did(did_info["did_document"])
+
+        # 4. Store data: one StoreData transaction per key
         await client.data.store("users", {
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
@@ -58,7 +59,7 @@ asyncio.run(main())
 
 - **DID Management** — generate and register DIDs (Ed25519 and secp256k1)
 - **Secure by default** — automatic cryptographic proof verification on data reads
-- **Full CRUD** — store, get, update, delete with per-request signing
+- **Signed transactions** — DID and subgrove registration, data and file writes, and key grants, each signed over every field and its nonce
 - **Rich query support** — filters, search, sort, pagination
 - **Token operations** — balances, fees, token info
 - **Validator operations** — list validators, staking info
@@ -105,9 +106,14 @@ did_info = generate_did()
 # secp256k1 (Ethereum-compatible)
 did_info = generate_did(algorithm="secp256k1")
 
-await client.register_did(did_info["did_document"])
-
 # did_info keys: did, private_key, public_key, public_key_id, did_document, algorithm
+```
+
+A DID's id is derived from its key, so it can be funded before it exists: transfer the registration fee to `did_info["did"]` from a funded account, then register it. `register_did` submits a RegisterDid transaction signed with the document's own key, the identity set on the client (or pass `private_key_hex`):
+
+```python
+client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"], did_info["algorithm"])
+result = await client.register_did(did_info["did_document"])  # {"tx_hash", "code", "log"}
 ```
 
 ### Authentication (per-request signing)
@@ -131,7 +137,7 @@ client.clear_identity()
 
 ### Request signing
 
-With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, and `POST /query`, `/sql`, and `/graphql`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, or a place on a priced subgrove's free-reader list. The client signs its other authenticated requests (writes, key-grant reads) in the older form described below.
+With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, and `POST /query`, `/sql`, and `/graphql`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, or a place on a priced subgrove's free-reader list. The client signs its key-grant reads in the older form described below. Writes are transactions, signed as described under Transaction signing.
 
 The headers are `X-DID`, `X-Public-Key-ID`, `X-Signature`, `X-Timestamp`, and `X-Nonce`. The signature is over eight lines:
 
@@ -160,9 +166,11 @@ headers = sign_request_with_nonce(did, private_key_hex, public_key_id, "POST", "
 
 `sign_request(did, private_key_hex, public_key_id, method, path, algorithm)` makes the older `{METHOD}:{PATH}:{TIMESTAMP}` form, over the path without its query string. It proves the DID but carries none of its read rights, and it can be replayed with any body until the timestamp expires.
 
-### Transaction signing (data and file writes)
+### Transaction signing
 
-StoreData, StoreFileManifest, and DeleteFileManifest transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` (the byte 0x0A) with no trailing newline, and the message is UTF-8. Text fields go in verbatim, with no escaping or normalization:
+StoreData, StoreFileManifest, DeleteFileManifest, RegisterSubgrove, GrantSubgroveKey, RotateSubgroveKey, and UnregisterStorageNode transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` (the byte 0x0A) with no trailing newline, and the message is UTF-8. Text fields go in verbatim, with no escaping or normalization; numbers are unsigned decimal; hex is lowercase.
+
+Data and file writes:
 
 ```
 StoreData
@@ -204,12 +212,58 @@ Nonce: <nonce>
 - A subgrove ID, key, owner DID, filename, or content type holding a line break (the byte 0x0A) is refused with `ValueError` before anything is signed.
 - Ed25519 signs the message's UTF-8 bytes; secp256k1 signs their Keccak-256.
 
-`ConsensusClient` and `client.files` build these messages; `store_data_message`, `store_file_manifest_message`, and `delete_file_manifest_message` return the exact text for a transaction you sign yourself.
+Registrations, key grants, and storage-node removals:
+
+```
+RegisterSubgrove
+Subgrove: <subgrove_id>
+Owner: <owner_did>
+Config: <hex SHA-256 of the transaction's bincode with an empty signature>
+Nonce: <nonce>
+```
+
+```
+GrantSubgroveKey
+Subgrove: <subgrove_id>
+Sender: <sender_did>
+Grantee: <grantee_did>
+GranteeKey: <grantee_public_key_id>
+KeyEpoch: <key_epoch>
+EphemeralKey: <hex ephemeral_public_key>
+EncryptedKey: <hex encrypted_key>
+GrantedBy: <granted_by>
+GrantedAt: <granted_at>
+Nonce: <nonce>
+```
+
+```
+RotateSubgroveKey
+Subgrove: <subgrove_id>
+Sender: <sender_did>
+NewEpoch: <new_epoch>
+Grants: <number of new_grants>
+<each grant's seven lines, Grantee to GrantedAt, in order>
+Nonce: <nonce>
+```
+
+```
+UnregisterStorageNode
+Node: <node_did>
+Nonce: <nonce>
+```
+
+- RegisterSubgrove's `Config` binds every field of the transaction. It is the SHA-256 of `bincode::serialize` (bincode 1.x default: fixed-width little-endian integers, u64 lengths, u32 enum variant indexes, a one-byte `Option` tag) of the `RegisterSubgroveTx` struct with `signature` empty and every other field as the node decodes the JSON sent. The SDK sends every field explicitly (`normalize_register_subgrove`) and hashes exactly that (`register_subgrove_unsigned_bincode`), for every mode: DataStorage, FileStorage, and BlockchainIndexing.
+- RevokeSubgroveKey signs `RevokeSubgroveKey:<subgrove_id>:<revokee_did>:<sender_did>:<nonce>`, which binds every field it carries.
+- RegisterDid signs the node's compact JSON of the DID document, its fields in the node's order (`id`, `public_keys`, `authentication`, `service`, `created`, `updated`, `proof`; each key `id`, `type`, `controller`, `public_key_base58`, `public_key_hex`), always under nonce 1. The SDK sends that same document (`did_document_body`).
+- A subgrove ID, owner, sender, grantee, grantee key ID, granter, or node DID holding a line break is refused with `ValueError` before anything is signed.
+
+`ConsensusClient`, `client.files`, `client.data`, `client.registration`, `client.privacy`, and `client.register_did` build these messages. `store_data_message`, `store_file_manifest_message`, `delete_file_manifest_message`, `register_subgrove_message`, `grant_subgrove_key_message`, `rotate_subgrove_key_message`, `revoke_subgrove_key_message`, `unregister_storage_node_message`, and `register_did_message` return the exact text for a transaction you sign yourself.
 
 ### Data Operations (Secure by Default)
 
 ```python
-# Store a whole dict of key -> value pairs in a subgrove
+# Store a whole dict of key -> JSON object in a subgrove: one StoreData
+# transaction per key, under consecutive nonces
 await client.data.store("subgrove_id", {
     "key1": {"field": "value"},
     "key2": {"field": "value2"},
@@ -218,24 +272,22 @@ await client.data.store("subgrove_id", {
 # Store a single item
 await client.data.store_item("subgrove_id", "key1", {"field": "value"})
 
+# Batch store
+await client.data.batch_store("subgrove_id", [
+    {"key": "key3", "value": {"field": "value3"}},
+    {"key": "key4", "value": {"field": "value4"}},
+])
+
 # Get a single item (auto-verifies the proof)
 item = await client.data.get("subgrove_id", "key1")
 
 # Get without verification (faster; trust assumed)
 item = await client.data.get_unverified("subgrove_id", "key1")
-
-# Update
-await client.data.update("subgrove_id", "key1", {"field": "updated"})
-
-# Delete
-await client.data.delete("subgrove_id", "key1")
-
-# Batch store
-await client.data.batch_store("subgrove_id", [
-    {"key": "key1", "value": {"field": "value1"}},
-    {"key": "key2", "value": {"field": "value2"}},
-])
 ```
+
+- Each value must be a JSON object (a `dict`); anything else raises `TypeError` before anything is sent. The data sent is `json.dumps(value, separators=(",", ":"), sort_keys=True)`.
+- Each store returns the `{tx_hash, code, log}` of its transaction, or raises `TransactionError` if CheckTx refuses it. StoreData writes a new key: it is refused in its block for a key that already exists.
+- `client.data.update` and `client.data.delete` raise `WillowError`: the node changes and deletes data only through UpdateData and DeleteData transactions, which this SDK does not build.
 
 ### Query Operations
 
@@ -262,6 +314,8 @@ print(f"Total: {result.total}")
 ```
 
 ### Registration Operations
+
+`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. A field's `indexed` flag, an index's `type`, and `dataset_path` have no on-chain counterpart and are not sent. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
 
 ```python
 await client.registration.register_subgrove({
@@ -374,6 +428,22 @@ else:
     print(f"Root hash: {result.root_hash}")
 ```
 
+### Private Subgroves (key grants)
+
+```python
+from willow import EncryptedKeyGrant
+
+# Each is a transaction sent by the identity set on the client
+await client.privacy.grant_subgrove_key("private-sg", grant)        # an EncryptedKeyGrant
+await client.privacy.rotate_subgrove_key("private-sg", 2, new_grants)
+await client.privacy.revoke_subgrove_key("private-sg", "did:willow:...")
+
+mine = await client.privacy.get_my_key_grant("private-sg")
+grantees = await client.privacy.list_key_grantees("private-sg")    # grantee DIDs
+```
+
+An `EncryptedKeyGrant`'s `ephemeral_public_key` and `encrypted_key` take bytes, hex, or a list of ints.
+
 ### Health Check
 
 ```python
@@ -383,6 +453,8 @@ print(f"Version: {health.version}")
 for name, component in health.components.items():
     print(f"  {name}: {component.status}")
 ```
+
+`GET /health` answers the health object itself (not an envelope), with `timestamp` as RFC 3339 text and its components under `checks`.
 
 ### Root Hash Verification
 
@@ -475,11 +547,12 @@ willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id>
 willow-cli auth status
 willow-cli auth logout
 
-# Data ops (reads the saved identity and signs per-request)
+# Register a DID document, signed with the saved identity (pre-fund the DID first)
+willow-cli did register did.json
+
+# Data ops (reads the saved identity; stores are signed StoreData transactions)
 willow-cli data store my-subgrove items.json
 willow-cli data get my-subgrove user1
-willow-cli data update my-subgrove user1 updated.json
-willow-cli data delete my-subgrove user1
 
 # Proof
 willow-cli proof get my-subgrove user1

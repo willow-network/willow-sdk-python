@@ -36,7 +36,7 @@ from .types import (
     HealthStatus,
     RetryConfig,
 )
-from .auth import sign_request, sign_request_with_nonce, SignatureAlgorithm
+from .auth import sign_challenge, sign_request, sign_request_with_nonce, SignatureAlgorithm
 from .errors import (
     WillowError,
     AuthenticationError,
@@ -45,6 +45,14 @@ from .errors import (
     ProofVerificationError,
     parse_api_error,
 )
+from .consensus.types import (
+    DataStoreTx,
+    RegisterDidTx,
+    RegisterSubgroveTx,
+    create_sign_message,
+    create_transaction_wrapper,
+)
+from .signed_messages import did_document_body
 from .indexers import (
     WillowIndexers,
     QuerySource,
@@ -61,7 +69,7 @@ from .computed_fields import (
     apply_computed_fields_to_response,
 )
 from .privacy import PrivacyOperations
-from .files import FileOperations
+from .files import FileOperations, _tx_submit_result
 from .completeness import CompletenessOperations
 
 if TYPE_CHECKING:
@@ -79,6 +87,59 @@ def _encode_json_body(payload: Any) -> Optional[bytes]:
     ).encode("utf-8")
 
 
+def _envelope_data(body: Any) -> Any:
+    """``data`` of an API envelope (``{success, data, error}``), raising its
+    ``error`` when ``success`` is false; any other body as it is."""
+    if isinstance(body, dict) and "success" in body and ("data" in body or "error" in body):
+        if not body.get("success"):
+            raise WillowError(body.get("error") or "Request failed")
+        return body.get("data")
+    return body
+
+
+def _unsupported_data_write(operation: str, route: str, kind: str) -> WillowError:
+    return WillowError(
+        f"{operation} is not supported: the node API does not serve {route}. Data "
+        f"changes only through a {kind} transaction submitted to POST /tx/submit, "
+        f"which this SDK does not build."
+    )
+
+
+# The field types the node's subgrove schema takes.
+_SCHEMA_FIELD_TYPES = ("string", "number", "boolean", "array", "object", "bytes")
+
+
+def _schema_json(schema: Any) -> str:
+    """A ``SchemaDefinition`` as the node's schema JSON text.
+
+    The node maps each field to its type name and lists required fields in
+    ``required_fields``; a field's ``required`` flag joins that list. A
+    field's ``indexed`` flag and an index's ``type`` have no on-chain
+    counterpart: declare indexes in ``indexes``.
+    """
+    fields: Dict[str, str] = {}
+    required = list(schema.required_fields)
+    for name, definition in schema.fields.items():
+        field_type = getattr(definition, "type", None) or getattr(definition, "field_type", None)
+        field_type = getattr(field_type, "value", field_type)
+        if field_type not in _SCHEMA_FIELD_TYPES:
+            raise ValueError(
+                f"schema field {name!r} has type {field_type!r}; the node takes "
+                + ", ".join(_SCHEMA_FIELD_TYPES)
+            )
+        fields[name] = field_type
+        if definition.required and name not in required:
+            required.append(name)
+    indexes = [
+        {"name": index.name, "fields": list(index.fields), "unique": index.unique}
+        for index in schema.indexes or []
+    ]
+    return _json.dumps(
+        {"version": schema.version, "fields": fields, "indexes": indexes, "required_fields": required},
+        separators=(",", ":"),
+    )
+
+
 class DataOperations:
     """Data operations for Willow client.
 
@@ -90,37 +151,85 @@ class DataOperations:
         self.client = client
 
     @require_auth
-    async def store(self, subgrove_id: str, data: Dict[str, Any]) -> None:
-        """Store data in a subgrove.
+    async def store(self, subgrove_id: str, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Store each key of ``data`` in a subgrove, one StoreData transaction each.
+
+        Each value must be a JSON object (a ``dict``): the node stores only
+        objects. Each transaction is signed by the identity set on the client
+        over ``store_data_message`` (its data the value's JSON text,
+        ``json.dumps(value, separators=(",", ":"), sort_keys=True)``) and
+        submitted to ``POST /tx/submit``, under consecutive nonces from the
+        account's next one. All are signed before any is sent.
+
+        StoreData writes a new key; it is refused in its block for a key that
+        already exists, and a write refused in its block still spends its
+        nonce. Writes sent together may land in any order.
 
         Args:
 
             subgrove_id: Subgrove/dataset identifier
-            data: Data to store (key-value pairs)
+            data: Key -> JSON object to store under it
+
+        Returns:
+            For each key, in order, the ``{tx_hash, code, log}`` of the
+            accepted transaction
+
+        Raises:
+            TypeError: A value is not a ``dict``. Nothing is sent.
+            ValueError: The subgrove ID, a key, or the DID holds a line break.
+                Nothing is sent.
+            TransactionError: CheckTx refused a transaction; those before it
+                were submitted.
         """
-        await self.client._request(
-            "POST",
-            f"/data/{subgrove_id}",
-            json=data,
-            authenticated=True
-        )
+        if not isinstance(data, dict):
+            raise TypeError("data must map each key to a JSON object (a dict)")
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                raise TypeError(f"the value for key {key!r} must be a JSON object (a dict)")
+        client = self.client
+        did = client._did or ""
+        writes = [
+            DataStoreTx(
+                subgrove_id=subgrove_id,
+                key=key,
+                data=_json.dumps(value, separators=(",", ":"), sort_keys=True),
+                owner_did=did,
+                public_key_id=client._public_key_id or "",
+            )
+            for key, value in data.items()
+        ]
+        for tx in writes:
+            create_sign_message("DataStore", tx)  # refuse a line break before reading the nonce
+        if not writes:
+            return []
+        nonce = await client._account_nonce(did)
+        signed = []
+        for tx in writes:
+            nonce += 1
+            tx.nonce = nonce
+            signed.append(client._sign_transaction("DataStore", tx))
+        return [await client._submit_transaction(tx) for tx in signed]
 
     @require_auth
     async def store_item(
         self,
         subgrove_id: str,
         key: str,
-        value: Any
-    ) -> None:
-        """Store a single item in a subgrove.
+        value: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Store a single item in a subgrove (one StoreData transaction; see ``store``).
 
         Args:
 
             subgrove_id: Subgrove/dataset identifier
             key: Item key
-            value: Item value
+            value: Item value, a JSON object (``dict``)
+
+        Returns:
+            The ``{tx_hash, code, log}`` of the accepted transaction
         """
-        await self.store(subgrove_id, {key: value})
+        (result,) = await self.store(subgrove_id, {key: value})
+        return result
 
     @require_auth
     async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
@@ -210,36 +319,26 @@ class DataOperations:
         )
         return response["data"]
 
-    @require_auth
     async def update(self, subgrove_id: str, key: str, data: Dict[str, Any]) -> None:
-        """Update an item in a subgrove.
+        """Not supported: raises ``WillowError``.
 
-        Args:
-
-            subgrove_id: Subgrove/dataset identifier
-            key: Item key
-            data: New data
+        The node API does not serve ``PUT /data/{subgrove_id}/{key}``; data
+        changes only through an UpdateData transaction submitted to
+        ``POST /tx/submit``, which this SDK does not build.
         """
-        await self.client._request(
-            "PUT",
-            f"/data/{subgrove_id}/{key}",
-            json=data,
-            authenticated=True
+        raise _unsupported_data_write(
+            "client.data.update", "PUT /data/{subgrove_id}/{key}", "UpdateData"
         )
 
-    @require_auth
     async def delete(self, subgrove_id: str, key: str) -> None:
-        """Delete an item from a subgrove.
+        """Not supported: raises ``WillowError``.
 
-        Args:
-
-            subgrove_id: Subgrove/dataset identifier
-            key: Item key
+        The node API does not serve ``DELETE /data/{subgrove_id}/{key}``; data
+        is deleted only through a DeleteData transaction submitted to
+        ``POST /tx/submit``, which this SDK does not build.
         """
-        await self.client._request(
-            "DELETE",
-            f"/data/{subgrove_id}/{key}",
-            authenticated=True
+        raise _unsupported_data_write(
+            "client.data.delete", "DELETE /data/{subgrove_id}/{key}", "DeleteData"
         )
 
     @require_auth
@@ -338,17 +437,20 @@ class DataOperations:
         return query_response
 
     @require_auth
-    async def batch_store(self, subgrove_id: str, items: List[Dict[str, Any]]) -> None:
-        """Store multiple items in a subgrove.
+    async def batch_store(self, subgrove_id: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Store multiple items in a subgrove, one StoreData transaction each (see ``store``).
 
         Args:
 
             subgrove_id: Subgrove/dataset identifier
             items: List of items with "key" and "value" fields
+
+        Returns:
+            For each item, the ``{tx_hash, code, log}`` of its transaction
         """
         # Convert list of {key, value} to dict
         data = {item["key"]: item["value"] for item in items}
-        await self.store(subgrove_id, data)
+        return await self.store(subgrove_id, data)
 
     async def get_checkpoint_state_root(self, subgrove_id: str, checkpoint_id: str) -> "CheckpointInfo":
         """Get checkpoint information including state root.
@@ -445,26 +547,55 @@ class RegistrationOperations:
 
     @require_auth
     async def register_subgrove(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Register a new subgrove/dataset.
+        """Register a new DataStorage subgrove with a RegisterSubgrove transaction.
+
+        The request (``RegisterDatasetRequest`` fields) becomes a
+        RegisterSubgrove transaction with every field explicit, signed by the
+        identity set on the client over ``register_subgrove_message`` and
+        submitted to ``POST /tx/submit``. ``owner_did`` must be that identity.
+        ``readers`` become the mode's free readers. The schema is sent as the
+        node's schema JSON: each field's type, with required fields listed in
+        ``required_fields``; ``indexed`` flags, index types, and
+        ``dataset_path`` have no on-chain counterpart and are not sent. For
+        other modes and fields, use ``ConsensusClient.register_subgrove``.
 
         Args:
             request: Subgrove registration request data
 
         Returns:
-            Registration result
+            The ``{tx_hash, code, log}`` of the accepted transaction
+
+        Raises:
+            ValueError: ``owner_did`` is not the client's identity, or the
+                schema is missing or has a type the node does not take.
+            TransactionError: CheckTx refused the transaction.
         """
+        request = dict(request)
         # Handle subgrove_id -> dataset_id alias for compatibility
         if "subgrove_id" in request:
             request["dataset_id"] = request.pop("subgrove_id")
 
         dataset_request = RegisterDatasetRequest(**request)
-        response = await self.client._request(
-            "POST",
-            "/register/subgrove",
-            json=dataset_request.model_dump(by_alias=True, exclude_none=True),
-            authenticated=True
+        if dataset_request.owner_did != self.client._did:
+            raise ValueError(
+                "owner_did must be the identity set on the client: the owner signs the registration"
+            )
+        if dataset_request.schema_ is None:
+            raise ValueError("schema is required")
+        tx = RegisterSubgroveTx(
+            subgrove_id=dataset_request.dataset_id,
+            schema=_schema_json(dataset_request.schema_),
+            owner_did=dataset_request.owner_did,
+            mode={"DataStorage": {
+                "name": dataset_request.name,
+                "writers": list(dataset_request.writers),
+                "free_readers": list(dataset_request.readers),
+                "read_pricing": None,
+            }},
+            public_key_id=self.client._public_key_id or "",
+            name=dataset_request.name,
         )
-        return response["data"]
+        return await self.client._sign_and_submit("RegisterSubgrove", tx)
 
     # Alias for compatibility
     register_dataset = register_subgrove
@@ -857,19 +988,19 @@ class WillowClient:
     Example:
         ```python
         async with WillowClient("http://localhost:3031") as client:
-            # Generate and register DID
+            # Generate a DID and set it as the client's identity
             did_info = generate_did()
-            await client.register_did(did_info["did_document"])
-
-            # Set identity for per-request signing
             client.set_identity(
                 did_info["did"],
                 did_info["private_key"],
                 did_info["public_key_id"]
             )
 
-            # Store data
-            await client.data.store("my-data", {"key": "value"})
+            # Register it (pre-fund the derived DID with the fee first)
+            await client.register_did(did_info["did_document"])
+
+            # Store a JSON object under a key (a StoreData transaction)
+            await client.data.store("my-data", {"key": {"value": 1}})
         ```
     """
 
@@ -983,11 +1114,30 @@ class WillowClient:
     async def health(self) -> HealthStatus:
         """Check API health status.
 
+        ``GET /health`` answers the health object itself, not an envelope.
+
         Returns:
             Health status information
         """
-        response = await self._request("GET", "/health")
-        return HealthStatus(**response.get("data", response))
+        try:
+            response = await self._http.request("GET", f"{self.api_url}/health")
+        except httpx.NetworkError as e:
+            raise NetworkError(f"Network error: {str(e)}")
+        except httpx.TimeoutException:
+            raise NetworkError("Request timed out")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if response.status_code >= 400:
+            raise parse_api_error(
+                body if isinstance(body, dict) else {"error": response.text or f"HTTP {response.status_code}"},
+                response.status_code,
+            )
+        body = _envelope_data(body)
+        if not isinstance(body, dict):
+            raise WillowError("The API answered no health status", status_code=response.status_code)
+        return HealthStatus(**body)
 
     async def _route_query(
         self,
@@ -1021,11 +1171,8 @@ class WillowClient:
                     pass
                 raise ValidatorHasNoDataError(subgrove_id, reason)
             resp.raise_for_status()
-            data = resp.json()
             # Validator wraps in ApiResponse({success, data}); indexer returns raw.
-            if isinstance(data, dict) and "data" in data and "success" in data:
-                return data.get("data") or {}
-            return data
+            return _envelope_data(resp.json()) or {}
 
         async def _call_indexer(info: IndexerInfo) -> Dict[str, Any]:
             headers: Dict[str, str] = {}
@@ -1038,10 +1185,7 @@ class WillowClient:
             url = f"{endpoint}{path}"
             resp = await self._http.post(url, json=body, headers=headers)
             resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and "data" in data and "success" in data:
-                return data.get("data") or {}
-            return data
+            return _envelope_data(resp.json()) or {}
 
         if source == QuerySource.VALIDATOR:
             result = await _call_validator()
@@ -1093,8 +1237,14 @@ class WillowClient:
             fallback=had_candidates,
         )
 
-    async def register_did(self, did_document: DidDocument) -> DidDocument:
-        """Register a DID document.
+    async def register_did(
+        self,
+        did_document: DidDocument,
+        private_key_hex: Optional[str] = None,
+        public_key_id: Optional[str] = None,
+        algorithm: Optional[SignatureAlgorithm] = None,
+    ) -> Dict[str, Any]:
+        """Register a DID document with a RegisterDid transaction.
 
         Willow DIDs are self-certifying: the id is derived from the public key
         (see ``generate_did`` / ``derive_did``), not chosen. Because the id is
@@ -1106,19 +1256,46 @@ class WillowClient:
         2. Register: the holder calls this method; the fee is paid from that
            pre-funded balance.
 
+        The transaction is signed with the document's own key over the node's
+        compact JSON of the document (``register_did_message``), under nonce
+        1, and submitted to ``POST /tx/submit``.
+
         Args:
             did_document: DID document to register (its ``id`` must be the
                 self-certifying DID derived from the key).
+            private_key_hex: The key to sign with. Defaults to the identity
+                set on the client, which must then be ``did_document.id``.
+            public_key_id: The signing key's id in the document. Defaults to
+                the identity's, or the document's first authentication key.
+            algorithm: The key's algorithm. Defaults to the identity's, or
+                "Ed25519".
 
         Returns:
-            Registered DID document
+            The ``{tx_hash, code, log}`` of the accepted transaction
+
+        Raises:
+            NotAuthenticatedError: No key given and no identity set for this DID.
+            TransactionError: CheckTx refused the transaction.
         """
-        response = await self._request(
-            "POST",
-            "/did",
-            json=did_document.model_dump(by_alias=True)
+        body = did_document_body(did_document)
+        if private_key_hex is None:
+            if not self.is_authenticated() or self._did != body["id"]:
+                raise NotAuthenticatedError(
+                    "register_did signs with the document's key: pass private_key_hex, "
+                    "or call set_identity as the DID being registered first"
+                )
+            private_key_hex = self._private_key
+            public_key_id = public_key_id or self._public_key_id
+            algorithm = algorithm or self._algorithm
+        if public_key_id is None:
+            if not body["authentication"]:
+                raise ValueError("did_document lists no authentication key")
+            public_key_id = body["authentication"][0]
+        tx = RegisterDidTx(did_document=body, signature="", public_key_id=public_key_id, nonce=1)
+        tx.signature = sign_challenge(
+            create_sign_message("RegisterDid", tx), private_key_hex or "", algorithm or "Ed25519"
         )
-        return DidDocument(**response["data"])
+        return await self._submit_transaction(create_transaction_wrapper("RegisterDid", tx))
 
     def set_identity(
         self,
@@ -1321,6 +1498,53 @@ class WillowClient:
             self._algorithm,
         )
 
+    async def _account_nonce(self, did: str) -> int:
+        """The account's nonce (``GET /account/{did}/nonce``): the next
+        transaction signs the one after it."""
+        response = await self._request("GET", f"/account/{did}/nonce")
+        data = response.get("data")
+        nonce = data.get("nonce") if isinstance(data, dict) else None
+        if isinstance(nonce, bool) or not isinstance(nonce, int):
+            raise WillowError(f"The API answered no nonce for {did}")
+        return nonce
+
+    def _sign_transaction(self, tx_type: str, tx: Any) -> Dict[str, Any]:
+        """``tx`` signed by the identity set on the client over the message
+        built from its own fields (``create_sign_message``), as ``/tx/submit``
+        takes it. Set the nonce first."""
+        message = create_sign_message(tx_type, tx)
+        tx.signature = sign_challenge(message, self._private_key or "", self._algorithm)
+        return create_transaction_wrapper(tx_type, tx)
+
+    async def _sign_and_submit(self, tx_type: str, tx: Any) -> Dict[str, Any]:
+        """Sign ``tx`` under the account's next nonce and submit it."""
+        create_sign_message(tx_type, tx)  # refuse what can't be signed before reading the nonce
+        tx.nonce = await self._account_nonce(self._did or "") + 1
+        return await self._submit_transaction(self._sign_transaction(tx_type, tx))
+
+    async def _submit_transaction(self, tx: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit a JSON transaction to the API's ``POST /tx/submit``.
+
+        Returns:
+            The ``{tx_hash, code, log}`` of a transaction CheckTx accepted.
+
+        Raises:
+            TransactionError: Unless CheckTx accepted the transaction.
+            NetworkError: On network errors.
+        """
+        try:
+            response = await self._http.request(
+                "POST",
+                f"{self.api_url}/tx/submit",
+                content=_encode_json_body(tx),
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.NetworkError as e:
+            raise NetworkError(f"Network error: {str(e)}")
+        except httpx.TimeoutException:
+            raise NetworkError("Request timed out")
+        return _tx_submit_result(response)
+
     async def _request(
         self,
         method: str,
@@ -1386,7 +1610,10 @@ class WillowClient:
                 except ValueError:
                     error_data = None
                 if not isinstance(error_data, dict):
-                    error_data = {"error": response.reason_phrase or f"HTTP {response.status_code}"}
+                    text = response.text.strip() if isinstance(response.text, str) else ""
+                    error_data = {
+                        "error": text or response.reason_phrase or f"HTTP {response.status_code}"
+                    }
                 raise parse_api_error(error_data, response.status_code)
 
             # Parse response

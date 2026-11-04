@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 import json
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 import logging
 
 from ..auth import sign_message, SignatureAlgorithm
@@ -102,22 +102,48 @@ class ConsensusClient:
         public_key_id: str,
         mode: Optional[Dict[str, Any]] = None,
         algorithm: SignatureAlgorithm = "Ed25519",
+        *,
+        name: Optional[str] = None,
+        description: str = "",
+        admins: Optional[List[str]] = None,
+        initial_funding: Optional[int] = None,
+        required_tee: Optional[str] = None,
+        privacy: Optional[Any] = None,
+        initial_owner_key_grant: Optional[Any] = None,
+        template_config: Optional[Dict[str, Any]] = None,
+        confirmation_depth: int = 0,
+        cryptographic_completeness: bool = False,
     ) -> BroadcastResult:
         """
         Register a subgrove (dataset) on the blockchain.
 
+        The transaction carries every field explicitly and is signed over
+        ``register_subgrove_message``, whose ``Config`` is the SHA-256 of its
+        bincode with an empty signature, so the signature binds every field
+        and the nonce.
+
         Args:
             subgrove_id: Unique subgrove identifier
-            schema: JSON schema definition
+            schema: The subgrove's schema, as JSON text
             owner_did: DID of the subgrove owner
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
-            mode: SubgroveMode dict, e.g. {"DataStorage": {"name": "...", ...}}
-                  or {"BlockchainIndexing": {"manifest_content": [...], ...}}.
-                  Defaults to DataStorage when omitted.
+            mode: SubgroveMode in its JSON form, e.g.
+                  {"DataStorage": {"name": "...", "writers": [...], "free_readers": [...]}},
+                  {"FileStorage": {...}}, or
+                  {"BlockchainIndexing": {"manifest_content": [...], ...}}.
+                  Defaults to DataStorage with no name, writers, or free readers.
+            name: The subgrove's name; defaults to the mode's name
+            description, admins, initial_funding, required_tee, privacy,
+            initial_owner_key_grant, template_config, confirmation_depth,
+            cryptographic_completeness: The transaction's other fields
 
         Returns:
             BroadcastResult with transaction status
+
+        Raises:
+            ValueError, TypeError: A field is missing or out of range, or the
+                subgrove ID or owner DID holds a line break; nothing is sent.
         """
         tx = RegisterSubgroveTx(
             subgrove_id=subgrove_id,
@@ -126,8 +152,20 @@ class ConsensusClient:
             mode=mode,
             signature="",
             public_key_id=public_key_id,
-            nonce=await self._get_next_nonce(owner_did)
+            name=name,
+            description=description,
+            admins=list(admins or []),
+            initial_funding=initial_funding,
+            required_tee=required_tee,
+            privacy=privacy,
+            initial_owner_key_grant=initial_owner_key_grant,
+            template_config=template_config,
+            confirmation_depth=confirmation_depth,
+            cryptographic_completeness=cryptographic_completeness,
         )
+        # Refuse what the node can't decode, or a line break, before reading the nonce.
+        create_sign_message("RegisterSubgrove", tx)
+        tx.nonce = await self._get_next_nonce(owner_did)
 
         return await self._sign_and_broadcast("RegisterSubgrove", tx, private_key, algorithm)
     
@@ -183,14 +221,20 @@ class ConsensusClient:
         Args:
             subgrove_id: Subgrove ID
             key: Data key
-            data: Data to store
+            data: Data to store, a JSON object (``dict``)
             owner_did: DID of the data owner
             private_key: Private key for signing (hex-encoded)
             public_key_id: Public key identifier in the DID document
             
         Returns:
             BroadcastResult with transaction status
+
+        Raises:
+            TypeError: ``data`` is not a ``dict``: the node stores only a JSON
+                object. Nothing is sent.
         """
+        if not isinstance(data, dict):
+            raise TypeError("data must be a JSON object (a dict)")
         tx = DataStoreTx(
             subgrove_id=subgrove_id,
             key=key,
@@ -442,7 +486,15 @@ class ConsensusClient:
         for attempt in range(self.config.max_retries + 1):
             try:
                 async with self._session.post(url, json=transaction) as response:
-                    body = await response.json()
+                    try:
+                        body = await response.json(content_type=None)
+                    except ValueError:
+                        # A body the API refused to decode answers in plain text.
+                        body = None
+                    if not isinstance(body, dict):
+                        text = (await response.text()).strip()
+                        msg = text or f"HTTP {response.status}"
+                        return BroadcastResult(success=False, error_message=msg, raw_log=msg)
                     if not response.status == 200 or not body.get('success') or 'data' not in body:
                         msg = body.get('error') or f"HTTP {response.status}"
                         return BroadcastResult(success=False, error_message=msg, raw_log=msg)

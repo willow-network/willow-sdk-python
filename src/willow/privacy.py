@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from .consensus.types import GrantSubgroveKeyTx, RevokeSubgroveKeyTx, RotateSubgroveKeyTx
 from .errors import WillowError
 from .utils import require_auth
 
@@ -121,8 +122,10 @@ class EncryptedKeyGrant:
         grantee_did: The DID that received the key grant.
         key_epoch: The key epoch this grant belongs to.
         grantee_public_key_id: ID of the grantee's public key used for ECDH.
-        ephemeral_public_key: Hex-encoded 32-byte X25519 ephemeral public key.
-        encrypted_key: Hex-encoded nonce || ciphertext || auth_tag.
+        ephemeral_public_key: The 32-byte X25519 ephemeral public key: hex,
+            bytes, or a list of ints (the API answers a list of ints).
+        encrypted_key: nonce || ciphertext || auth_tag, as hex, bytes, or a
+            list of ints.
         granted_by: The DID that issued the grant.
         granted_at: Unix timestamp of when the grant was issued.
     """
@@ -130,8 +133,8 @@ class EncryptedKeyGrant:
     grantee_did: str
     key_epoch: int
     grantee_public_key_id: str
-    ephemeral_public_key: str
-    encrypted_key: str
+    ephemeral_public_key: Union[str, bytes, List[int]]
+    encrypted_key: Union[str, bytes, List[int]]
     granted_by: str
     granted_at: int
 
@@ -213,18 +216,18 @@ class PrivacyOperations:
     @require_auth
     async def list_key_grantees(
         self, subgrove_id: str
-    ) -> List[EncryptedKeyGrant]:
-        """List all key grants for a subgrove.
+    ) -> List[str]:
+        """List the DIDs holding a key grant for a subgrove.
 
-        Returns all encryption key grants that have been issued for the
-        specified subgrove. Typically only the subgrove owner or admins
-        can list all grantees.
+        Only the subgrove owner or an admin can list grantees. Read one
+        grantee's grant with ``GET /key-grants/{subgrove_id}/{did}`` (the
+        grantee's own through ``get_my_key_grant``).
 
         Args:
             subgrove_id: Subgrove identifier.
 
         Returns:
-            List of EncryptedKeyGrant instances.
+            The grantee DIDs.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
@@ -235,8 +238,7 @@ class PrivacyOperations:
             f"/key-grants/{subgrove_id}",
             authenticated=True,
         )
-        grants_data = response.get("data", [])
-        return [EncryptedKeyGrant.from_dict(g) for g in grants_data]
+        return list(response.get("data") or [])
 
     async def get_key_grant_proof(
         self, subgrove_id: str, did: str
@@ -268,31 +270,31 @@ class PrivacyOperations:
     ) -> Dict[str, Any]:
         """Grant an encryption key to a DID for a subgrove.
 
-        Broadcasts a GrantSubgroveKey transaction to the consensus layer,
-        recording the encrypted key grant on-chain.
+        Submits a GrantSubgroveKey transaction to ``POST /tx/submit``, sent
+        by the identity set on the client and signed over
+        ``grant_subgrove_key_message``, which binds every field of the grant
+        and the nonce.
 
         Args:
             subgrove_id: Subgrove identifier.
             grant: The EncryptedKeyGrant to issue.
 
         Returns:
-            Transaction result dictionary with broadcast status.
+            The ``{tx_hash, code, log}`` of the accepted transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
-            PermissionDeniedError: If the caller is not the subgrove owner.
+            ValueError: A signed text field holds a line break, or a field is
+                out of range. Nothing is sent.
+            TransactionError: CheckTx refused the transaction.
         """
-        payload = {
-            "subgrove_id": subgrove_id,
-            "grant": grant.to_dict(),
-        }
-        response = await self.client._request(
-            "POST",
-            "/tx/grant-subgrove-key",
-            json=payload,
-            authenticated=True,
+        tx = GrantSubgroveKeyTx(
+            subgrove_id=subgrove_id,
+            encrypted_key_grant=grant,
+            sender_did=self.client._did,
+            public_key_id=self.client._public_key_id or "",
         )
-        return response.get("data", {})
+        return await self.client._sign_and_submit("GrantSubgroveKey", tx)
 
     @require_auth
     async def revoke_subgrove_key(
@@ -302,31 +304,28 @@ class PrivacyOperations:
     ) -> Dict[str, Any]:
         """Revoke a DID's encryption key for a subgrove.
 
-        Broadcasts a RevokeSubgroveKey transaction to the consensus layer,
-        removing the specified DID's key grant.
+        Submits a RevokeSubgroveKey transaction to ``POST /tx/submit``, sent
+        by the identity set on the client and signed over
+        ``revoke_subgrove_key_message``.
 
         Args:
             subgrove_id: Subgrove identifier.
             revokee_did: The DID whose key grant should be revoked.
 
         Returns:
-            Transaction result dictionary with broadcast status.
+            The ``{tx_hash, code, log}`` of the accepted transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
-            PermissionDeniedError: If the caller is not the subgrove owner.
+            TransactionError: CheckTx refused the transaction.
         """
-        payload = {
-            "subgrove_id": subgrove_id,
-            "revokee_did": revokee_did,
-        }
-        response = await self.client._request(
-            "POST",
-            "/tx/revoke-subgrove-key",
-            json=payload,
-            authenticated=True,
+        tx = RevokeSubgroveKeyTx(
+            subgrove_id=subgrove_id,
+            revokee_did=revokee_did,
+            sender_did=self.client._did,
+            public_key_id=self.client._public_key_id or "",
         )
-        return response.get("data", {})
+        return await self.client._sign_and_submit("RevokeSubgroveKey", tx)
 
     @require_auth
     async def rotate_subgrove_key(
@@ -337,33 +336,33 @@ class PrivacyOperations:
     ) -> Dict[str, Any]:
         """Rotate the encryption key for a subgrove.
 
-        Broadcasts a RotateSubgroveKey transaction that advances the key
-        epoch and re-issues encrypted keys to all authorized DIDs. Previous
-        epoch keys become invalid for new data.
+        Submits a RotateSubgroveKey transaction to ``POST /tx/submit`` that
+        advances the key epoch and re-issues encrypted keys to all authorized
+        DIDs, sent by the identity set on the client and signed over
+        ``rotate_subgrove_key_message``, which binds every grant, their
+        count and order, and the nonce. Previous epoch keys become invalid
+        for new data.
 
         Args:
             subgrove_id: Subgrove identifier.
-            new_epoch: The new key epoch number (must be greater than current).
+            new_epoch: The new key epoch number (the current one plus one).
             new_grants: List of EncryptedKeyGrant instances for the new epoch,
                 one per authorized DID.
 
         Returns:
-            Transaction result dictionary with broadcast status.
+            The ``{tx_hash, code, log}`` of the accepted transaction.
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
-            PermissionDeniedError: If the caller is not the subgrove owner.
-            ValidationError: If new_epoch is not greater than the current epoch.
+            ValueError: A signed text field holds a line break, or a field is
+                out of range. Nothing is sent.
+            TransactionError: CheckTx refused the transaction.
         """
-        payload = {
-            "subgrove_id": subgrove_id,
-            "new_epoch": new_epoch,
-            "new_grants": [g.to_dict() for g in new_grants],
-        }
-        response = await self.client._request(
-            "POST",
-            "/tx/rotate-subgrove-key",
-            json=payload,
-            authenticated=True,
+        tx = RotateSubgroveKeyTx(
+            subgrove_id=subgrove_id,
+            new_epoch=new_epoch,
+            new_grants=list(new_grants),
+            sender_did=self.client._did,
+            public_key_id=self.client._public_key_id or "",
         )
-        return response.get("data", {})
+        return await self.client._sign_and_submit("RotateSubgroveKey", tx)

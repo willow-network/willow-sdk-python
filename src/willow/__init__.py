@@ -9,23 +9,23 @@ Example usage:
 
     async def main():
         async with WillowClient("http://localhost:3031") as client:
-            # Generate and register DID
+            # Generate a DID and set it as the client's identity
             did_info = generate_did()
-            await client.register_did(did_info["did_document"])
-
-            # Set identity for per-request signing
             client.set_identity(
                 did_info["did"],
                 did_info["private_key"],
                 did_info["public_key_id"]
             )
 
-            # Store data with automatic proof verification
-            await client.data.store("my-data", {"key": "value"})
+            # Register it (pre-fund the derived DID with the fee first)
+            await client.register_did(did_info["did_document"])
+
+            # Store a JSON object under a key (a StoreData transaction)
+            await client.data.store("my-data", {"key": {"value": 1}})
 
             # Query with automatic proof verification
             result = await client.data.query("my-data", {
-                "filters": {"key": {"$eq": "value"}}
+                "filters": {"value": {"$eq": 1}}
             })
     ```
 """
@@ -71,6 +71,15 @@ from .signed_messages import (
     store_data_message,
     store_file_manifest_message,
     delete_file_manifest_message,
+    register_subgrove_message,
+    register_subgrove_unsigned_bincode,
+    normalize_register_subgrove,
+    grant_subgrove_key_message,
+    rotate_subgrove_key_message,
+    revoke_subgrove_key_message,
+    unregister_storage_node_message,
+    register_did_message,
+    did_document_body,
 )
 from .errors import (
     WillowError,
@@ -335,6 +344,15 @@ __all__ = [
     "store_data_message",
     "store_file_manifest_message",
     "delete_file_manifest_message",
+    "register_subgrove_message",
+    "register_subgrove_unsigned_bincode",
+    "normalize_register_subgrove",
+    "grant_subgrove_key_message",
+    "rotate_subgrove_key_message",
+    "revoke_subgrove_key_message",
+    "unregister_storage_node_message",
+    "register_did_message",
+    "did_document_body",
     # Errors
     "WillowError",
     "NetworkError",

@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 import click
 from .client import WillowClient
 from .auth import generate_did
+from .errors import WillowError
 from .types import DidDocument
 
 
@@ -92,15 +93,21 @@ def generate(algorithm, save):
 @click.argument("did_file", type=click.File("r"))
 @click.pass_context
 def register(ctx, did_file):
-    """Register a DID document."""
+    """Register a DID document (a RegisterDid transaction).
+
+    Signed with the saved identity's key, which must be the document's DID.
+    Pre-fund that DID with the registration fee first.
+    """
 
     async def _register():
+        did_val, key_val, key_id_val = get_identity_or_exit()
         did_doc_data = json.load(did_file)
         did_doc = DidDocument(**did_doc_data)
 
         async with WillowClient(ctx.obj["api_url"]) as client:
+            client.set_identity(did_val, key_val, key_id_val)
             result = await client.register_did(did_doc)
-            click.echo(f"DID registered successfully: {result.id}")
+            click.echo(f"DID registration submitted: {did_doc.id} (tx {result.get('tx_hash')})")
 
     asyncio.run(_register())
 
@@ -175,7 +182,10 @@ def data():
 @click.argument("data_file", type=click.File("r"))
 @click.pass_context
 def store(ctx, subgrove_id, data_file):
-    """Store data in a subgrove. DATA_FILE is JSON (or '-' for stdin)."""
+    """Store data in a subgrove, one StoreData transaction per key.
+
+    DATA_FILE is a JSON object of key -> JSON object (or '-' for stdin).
+    """
 
     async def _store():
         did_val, key_val, key_id_val = get_identity_or_exit()
@@ -213,7 +223,7 @@ def get(ctx, subgrove_id, key):
 @click.argument("data_file", type=click.File("r"))
 @click.pass_context
 def update(ctx, subgrove_id, key, data_file):
-    """Update an item in a subgrove."""
+    """Update an item in a subgrove (not supported: the SDK builds no UpdateData)."""
 
     async def _update():
         did_val, key_val, key_id_val = get_identity_or_exit()
@@ -221,7 +231,11 @@ def update(ctx, subgrove_id, key, data_file):
 
         async with WillowClient(ctx.obj["api_url"]) as client:
             client.set_identity(did_val, key_val, key_id_val)
-            await client.data.update(subgrove_id, key, data_dict)
+            try:
+                await client.data.update(subgrove_id, key, data_dict)
+            except WillowError as e:
+                click.echo(str(e), err=True)
+                sys.exit(1)
             click.echo(f"Updated {key} in {subgrove_id}")
 
     asyncio.run(_update())
@@ -232,14 +246,18 @@ def update(ctx, subgrove_id, key, data_file):
 @click.argument("key")
 @click.pass_context
 def delete(ctx, subgrove_id, key):
-    """Delete an item from a subgrove."""
+    """Delete an item from a subgrove (not supported: the SDK builds no DeleteData)."""
 
     async def _delete():
         did_val, key_val, key_id_val = get_identity_or_exit()
 
         async with WillowClient(ctx.obj["api_url"]) as client:
             client.set_identity(did_val, key_val, key_id_val)
-            await client.data.delete(subgrove_id, key)
+            try:
+                await client.data.delete(subgrove_id, key)
+            except WillowError as e:
+                click.echo(str(e), err=True)
+                sys.exit(1)
             click.echo(f"Deleted {key} from {subgrove_id}")
 
     asyncio.run(_delete())

@@ -7,10 +7,9 @@ Comprehensive data operations:
 3. Get single item (with proof verification)
 4. Get unverified (performance mode)
 5. Query with filters / range / sort
-6. Update items
-7. Delete items
 
-All operations include automatic proof verification by default.
+Each store is a StoreData transaction signed by the identity. Reads include
+automatic proof verification by default.
 
 Prerequisites:
 - pip install willow-sdk
@@ -36,13 +35,14 @@ async def main():
     did_info = generate_did()
 
     async with WillowClient("http://localhost:3031") as client:
-        # Auth
-        await client.register_did(did_info["did_document"])
+        # Auth: the identity signs the DID's registration (pre-fund the DID
+        # with the registration fee first) and every later transaction.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
             did_info["public_key_id"],
         )
+        await client.register_did(did_info["did_document"])
 
         # 1. Store single item
         print("\n1. Store Single Item")
@@ -166,35 +166,6 @@ async def main():
             print("Top 2 by price (descending):")
             for doc in result.documents:
                 print(f"  - {doc.get('name', 'Unknown')}: ${doc.get('price', 0)}")
-        except WillowError as e:
-            print(f"Error: {e}")
-
-        # 8. Update item
-        print("\n8. Update Item")
-        print("-" * 40)
-        try:
-            await client.data.update(
-                SUBGROVE,
-                "prod-001",
-                {
-                    "id": "prod-001",
-                    "name": "Laptop Pro",
-                    "category": "electronics",
-                    "price": 1199.99,
-                    "stock": 45,
-                    "on_sale": True,
-                },
-            )
-            print("Updated prod-001 (price reduced, on_sale flag added)")
-        except WillowError as e:
-            print(f"Error: {e}")
-
-        # 9. Delete item
-        print("\n9. Delete Item")
-        print("-" * 40)
-        try:
-            await client.data.delete(SUBGROVE, "prod-004")
-            print("Deleted prod-004")
         except WillowError as e:
             print(f"Error: {e}")
 

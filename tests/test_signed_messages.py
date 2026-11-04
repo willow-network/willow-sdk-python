@@ -256,8 +256,11 @@ class _Response:
         self.status = 200
         self._payload = payload
 
-    async def json(self):
+    async def json(self, content_type="application/json"):
         return self._payload
+
+    async def text(self):
+        return json.dumps(self._payload)
 
     async def __aenter__(self):
         return self

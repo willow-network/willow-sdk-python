@@ -294,3 +294,162 @@ async def test_file_delete_signs_the_nonce_it_sends(tx_submit):
     assert signed == [message] == [vector["message"]]
     assert bytes(body["signature"]).hex() == vector["ed25519_signature_hex"]
     assert _verifies(message, body)
+
+
+# ---------------------------------------------------------------------------
+# Writes the API serves only as transactions, and the shapes routes answer.
+# ---------------------------------------------------------------------------
+
+
+def _tx_api(seen, account_nonce=0):
+    def handler(request):
+        seen.append(request)
+        if request.url.path.endswith("/nonce"):
+            return httpx.Response(200, json=_envelope({"did": "did:willow:a", "nonce": account_nonce}))
+        if request.url.path == "/tx/submit":
+            return httpx.Response(200, json=_envelope({"tx_hash": "AB", "code": 0, "log": ""}))
+        # The API serves no other write: POST /data and the rest answer 501 or 404.
+        return httpx.Response(501, json={"success": False, "data": None, "error": "disabled"})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_data_store_is_the_store_data_known_answer():
+    vector = next(v for v in _KAT["vectors"] if v["name"] == "StoreData")
+    i = vector["inputs"]
+    seen = []
+    client = WillowClient(API)
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(_tx_api(seen, i["nonce"] - 1)))
+    client.set_identity(i["owner_did"], _KAT["private_key_seed_hex"], _KAT["public_key_id"])
+
+    result = await client.data.store_item(i["subgrove_id"], i["key"], json.loads(i["data_utf8"]))
+
+    assert result == {"tx_hash": "AB", "code": 0, "log": ""}
+    assert [r.url.path for r in seen] == [f"/account/{i['owner_did']}/nonce", "/tx/submit"]
+    body = json.loads(seen[1].content)["StoreData"]
+    assert bytes(body["data"]).decode("utf-8") == i["data_utf8"]
+    assert body["nonce"] == i["nonce"]
+    assert bytes(body["signature"]).hex() == vector["ed25519_signature_hex"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_health_reads_the_health_object_the_api_answers():
+    # GET /health answers no envelope: an RFC 3339 timestamp and its checks.
+    health = {
+        "status": "degraded", "timestamp": "2026-01-01T00:00:00+00:00", "version": "0.1.0",
+        "checks": {
+            "storage": {"status": "healthy", "message": "GroveDB is accessible"},
+            "consensus": {"status": "degraded", "message": "CometBFT unreachable or unhealthy"},
+            "system": {"uptime_seconds": 12},
+        },
+    }
+    client = WillowClient(API)
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=health)))
+    status = await client.health()
+    assert (status.status, status.version) == ("degraded", "0.1.0")
+    assert status.components["consensus"].status == "degraded"
+    assert status.components["system"].uptime_seconds == 12
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_key_grantees_are_dids():
+    client, seen = _client({"/key-grants/sg": ["did:willow:a", "did:willow:b"]})
+    client.set_identity("did:willow:a", _KAT["private_key_seed_hex"], _KAT["public_key_id"])
+    assert await client.privacy.list_key_grantees("sg") == ["did:willow:a", "did:willow:b"]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_in_an_envelope_raises_its_error():
+    client = WillowClient(API)
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"success": False, "data": None, "error": "Data not found"})
+    ))
+    client.set_identity("did:willow:a", _KAT["private_key_seed_hex"], _KAT["public_key_id"])
+    from willow.errors import WillowError
+    from willow.indexers import QuerySource
+
+    with pytest.raises(WillowError, match="Data not found"):
+        await client.data.get_unverified("sg", "k")
+    with pytest.raises(WillowError, match="Data not found"):
+        await client.indexing.sql_query("sg", "SELECT 1", source=QuerySource.VALIDATOR)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_plain_text_refusal_is_reported():
+    from willow.errors import ValidationError
+
+    client = WillowClient(API)
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(400, text="Invalid URL: Cannot parse `k`")
+    ))
+    with pytest.raises(ValidationError, match="Cannot parse"):
+        await client.proof.get("sg", "k")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tx_submit_reports_a_body_the_api_could_not_decode(monkeypatch):
+    real_async_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda r: httpx.Response(
+            422, text="Failed to deserialize the JSON body into the target type: missing field `owner_did`"
+        ))
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    client = WillowClient(API)
+    with pytest.raises(TransactionError, match="missing field `owner_did`"):
+        await client.files.delete("sg", "f", _signing())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body,match", [
+    (403, {"success": False, "data": None, "error": "Private subgrove file data is not available"}, "Private subgrove"),
+    (404, {"error": "File not found: missing"}, "File not found"),
+    (451, {"error": "Unavailable For Legal Reasons", "code": 451}, "Legal Reasons"),
+])
+async def test_file_reads_raise_the_apis_error(monkeypatch, status, body, match):
+    from willow.errors import WillowError
+
+    real_async_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda r: httpx.Response(status, json=body))
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    client = WillowClient(API)
+    with pytest.raises(WillowError, match=match):
+        await client.files.metadata("sg", "f")
+    with pytest.raises(WillowError, match=match):
+        await client.files.list("sg")
+
+
+@pytest.mark.asyncio
+async def test_file_reads_decode_the_raw_shape(monkeypatch):
+    manifest = {
+        "file_key": "f", "filename": "a.txt", "content_type": "text/plain", "total_size": 5,
+        "content_hash": "11" * 32, "chunk_count": 1, "chunk_size": 262144,
+        "chunk_merkle_root": "22" * 32, "owner_did": "did:willow:a", "created_at": 1,
+        "updated_at": 1, "encrypted": False,
+    }
+    real_async_client = httpx.AsyncClient
+
+    def handler(request):
+        if request.url.path == "/files/sg":
+            return httpx.Response(200, json={"files": [manifest], "limit": 50, "start_after": None, "has_more": False})
+        return httpx.Response(200, json=dict(manifest, storage_nodes=["https://storage.test"]))
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    client = WillowClient(API)
+    assert (await client.files.metadata("sg", "f")).storage_nodes == ["https://storage.test"]
+    assert [m.file_key for m in await client.files.list("sg")] == ["f"]

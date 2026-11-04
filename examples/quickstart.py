@@ -32,13 +32,8 @@ async def main():
 
     # 2. Connect to Willow node
     async with WillowClient("http://localhost:3031") as client:
-        # 3. Register the DID on the network
-        print("\nRegistering DID...")
-        await client.register_did(did_info["did_document"])
-        print("  DID registered successfully")
-
-        # 4. Set identity for per-request signing (synchronous).
-        # Each authenticated call signs with this key; there is no server session.
+        # 3. Set identity (synchronous). It signs each transaction and each
+        # authenticated request; there is no server session.
         print("\nSetting identity...")
         client.set_identity(
             did_info["did"],
@@ -47,6 +42,12 @@ async def main():
         )
         print("  Identity set")
 
+        # 4. Register the DID on the network (a RegisterDid transaction).
+        # The DID must first be pre-funded with the registration fee.
+        print("\nRegistering DID...")
+        await client.register_did(did_info["did_document"])
+        print("  DID registration submitted")
+
         # 5. Store data (automatic proof verification on reads).
         # In a real app you'd register the subgrove/dataset first; see
         # app_registration.py.
@@ -54,7 +55,7 @@ async def main():
         try:
             await client.data.store(
                 SUBGROVE,
-                {"name": "Alice", "email": "alice@example.com"},
+                {"user_1": {"name": "Alice", "email": "alice@example.com"}},
             )
             print("  Data stored successfully")
         except WillowError as e:

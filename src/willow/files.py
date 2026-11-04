@@ -12,8 +12,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
-from .errors import TransactionError
-from .signed_messages import delete_file_manifest_message, store_file_manifest_message
+from .errors import TransactionError, parse_api_error
+from .signed_messages import (
+    delete_file_manifest_message,
+    store_file_manifest_message,
+    unregister_storage_node_message,
+)
 
 DEFAULT_CHUNK_SIZE = 262_144  # 256 KB
 
@@ -192,26 +196,30 @@ class FileOperations:
     async def metadata(
         self, subgrove_id: str, file_key: str
     ) -> FileManifest:
-        """Get file manifest metadata."""
+        """Get file manifest metadata.
+
+        Raises:
+            WillowError: The API refused the read; its ``error`` is the message.
+        """
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{self._api_url}/files/{subgrove_id}/{file_key}",
                 headers=self._get_headers(),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return FileManifest(**data)
+        return FileManifest(**_file_route_body(resp))
 
     async def list(self, subgrove_id: str) -> List[FileManifest]:
-        """List all files in a subgrove."""
+        """List all files in a subgrove.
+
+        Raises:
+            WillowError: The API refused the read; its ``error`` is the message.
+        """
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{self._api_url}/files/{subgrove_id}",
                 headers=self._get_headers(),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return [FileManifest(**f) for f in data.get("files", [])]
+        return [FileManifest(**f) for f in _file_route_body(resp).get("files", [])]
 
     async def delete(
         self,
@@ -272,9 +280,15 @@ class FileOperations:
             signing: Signing parameters dict with keys:
                 private_key, public_key_id, sign_function, nonce.
                 sign_function should accept (message: str, private_key: str)
-                and return a hex-encoded signature string.
+                and return a hex-encoded signature string. The message is
+                ``unregister_storage_node_message`` over the node DID and
+                ``nonce`` sent.
+
+        Raises:
+            ValueError: If the node DID holds a line break.
         """
-        message = f"unregister_storage_node:{node_did}"
+        nonce = signing.get("nonce", 0)
+        message = unregister_storage_node_message(node_did, nonce)
         signature = signing["sign_function"](message, signing["private_key"])
 
         tx = {
@@ -282,7 +296,7 @@ class FileOperations:
                 "node_did": node_did,
                 "signature": _byte_array(signature),
                 "public_key_id": signing["public_key_id"],
-                "nonce": signing.get("nonce", 0),
+                "nonce": nonce,
             }
         }
         await self._submit_tx(tx)
@@ -305,26 +319,56 @@ class FileOperations:
                 json=tx,
                 headers=self._get_headers(),
             )
-        try:
-            envelope = resp.json()
-        except ValueError:
-            envelope = None
-        if not isinstance(envelope, dict):
-            envelope = {}
-        data = envelope.get("data")
-        if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
-            raise TransactionError(
-                envelope.get("error") or f"transaction submission failed: HTTP {resp.status_code}"
-            )
-        code = data.get("code", 0)
-        if code != 0:
-            raise TransactionError(
-                data.get("log") or f"transaction refused with code {code}",
-                tx_hash=data.get("tx_hash"),
-                error_code=code,
-                raw_log=data.get("log"),
-            )
-        return data
+        return _tx_submit_result(resp)
+
+
+def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:
+    """The ``{tx_hash, code, log}`` of ``POST /tx/submit``'s answer.
+
+    The API answers ``{success, data: {tx_hash, code, log}, error}``; a CheckTx
+    refusal is HTTP 200 with a nonzero ``code``. A body it can't decode is
+    refused in plain text.
+
+    Raises:
+        TransactionError: Unless CheckTx accepted the transaction.
+    """
+    try:
+        envelope = resp.json()
+    except ValueError:
+        envelope = None
+    if not isinstance(envelope, dict):
+        text = resp.text.strip()
+        raise TransactionError(text or f"transaction submission failed: HTTP {resp.status_code}")
+    data = envelope.get("data")
+    if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
+        raise TransactionError(
+            envelope.get("error") or f"transaction submission failed: HTTP {resp.status_code}"
+        )
+    code = data.get("code", 0)
+    if code != 0:
+        raise TransactionError(
+            data.get("log") or f"transaction refused with code {code}",
+            tx_hash=data.get("tx_hash"),
+            error_code=code,
+            raw_log=data.get("log"),
+        )
+    return data
+
+
+def _file_route_body(resp: httpx.Response) -> Dict[str, Any]:
+    """The JSON a ``/files`` route answers, which is not an envelope.
+
+    A refusal carries its reason in ``error`` (in an envelope for a private
+    subgrove)."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if resp.status_code >= 400 or not isinstance(body, dict) or body.get("success") is False:
+        if not isinstance(body, dict) or not body.get("error"):
+            body = {"error": resp.text.strip() or f"HTTP {resp.status_code}"}
+        raise parse_api_error(body, resp.status_code)
+    return body
 
 
 def _byte_array(value: Any) -> List[int]:

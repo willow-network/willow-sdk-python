@@ -261,6 +261,8 @@ def _server_verifies(request: httpx.Request, public_key_hex: str, algorithm: str
 
 def _ok(request: httpx.Request) -> httpx.Response:
     path = request.url.path
+    if path.startswith("/willow/"):  # behind a proxy mounted under /willow
+        path = path[len("/willow"):]
     if path.startswith("/data/"):
         data = {"value": 1}
     elif path.startswith("/proof/"):
@@ -293,7 +295,7 @@ def _client(handler, api_url="http://api.test", algorithm="Ed25519", identity=Tr
 
 
 @pytest.mark.asyncio
-async def test_client_nonce_signs_reads_and_legacy_signs_writes():
+async def test_client_nonce_signs_reads_and_legacy_signs_key_grant_reads():
     seen = []
 
     def handler(request):
@@ -305,7 +307,6 @@ async def test_client_nonce_signs_reads_and_legacy_signs_writes():
     await client.data.query_unverified("sg", {"limit": 5})
     await client.proof.get("sg", "k")
     await client.indexing.sql_query("sg", "SELECT 1", source=QuerySource.VALIDATOR)
-    await client.data.store("sg", {"k": {"v": 1}})
     await client.privacy.get_my_key_grant("sg")
     await client._http.aclose()
 
@@ -315,7 +316,6 @@ async def test_client_nonce_signs_reads_and_legacy_signs_writes():
         ("POST", "/query/sg", "nonce"),
         ("GET", "/proof/sg/k", "nonce"),
         ("POST", "/sql/sg", "nonce"),
-        ("POST", "/data/sg", "legacy"),
         ("GET", "/key-grants/sg/did:willow:a", "legacy"),
     ]
     # The signed body is the body sent.
@@ -383,9 +383,9 @@ async def test_client_legacy_signs_the_path_the_api_receives():
 
     # URL-encoded, and less the base URL's path, as the API receives it.
     client = _client(handler, api_url="https://proxy.test/willow")
-    await client.data.update("sg", "a key", {"v": 1})
+    await client.privacy.get_my_key_grant("a sg")
     await client._http.aclose()
-    assert seen[0].url.raw_path == b"/willow/data/sg/a%20key"
+    assert seen[0].url.raw_path == b"/willow/key-grants/a%20sg/did:willow:a"
 
 
 @pytest.mark.asyncio
@@ -459,7 +459,7 @@ async def test_client_secp256k1_requests_verify():
 
     client = _client(handler, algorithm="secp256k1")
     await client.data.query_unverified("sg", {})
-    await client.data.store("sg", {"k": 1})
+    await client.privacy.get_my_key_grant("sg")
     await client._http.aclose()
 
 
