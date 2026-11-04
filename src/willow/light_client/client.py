@@ -264,15 +264,21 @@ class LightClient:
     ) -> VerificationResult:
         """
         Verify a GroveDB query proof against verified headers.
-        
+
+        A proof made at block ``height`` proves the state after that block,
+        whose root is the ``app_hash`` of the header at ``height + 1``: the
+        proof is checked against that header (see
+        ``ProofVerifier.verify_query_proof``).
+
         Args:
             proof: Query proof to verify
-            height: Specific height to verify against (uses proof height if None)
-            
+            height: The block height whose resulting state the proof proves
+                (``proof.height`` when None)
+
         Returns:
             VerificationResult indicating success/failure
         """
-        verify_height = height or proof.height
+        verify_height = (proof.height if height is None else height) + 1
         
         # Get trusted header for the height
         trusted_header = await self.get_header_by_height(verify_height)

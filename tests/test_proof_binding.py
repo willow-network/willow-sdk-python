@@ -8,6 +8,7 @@ path and key a proof proves it at, with the bytes its root commits to.
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +26,8 @@ from willow.grovedb.bincode import MAX_LAYER_DEPTH, BincodeReader
 from willow.grovedb.element import deserialize_element
 from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash
 from willow.grovedb.types import NULL_HASH, ItemElement, LayerProof, ReferenceElement, SumItemElement
-from willow.light_client.types import QueryProof
+from willow.light_client import LightClient
+from willow.light_client.types import LightClientConfig, QueryProof
 from willow.light_client.verifier import ProofVerifier as LightClientProofVerifier
 from willow.proof import (
     GroveDBProofVerifier,
@@ -429,6 +431,27 @@ def test_the_light_client_inclusion_check_binds_path_key_and_value():
     assert not v.verify_inclusion_proof(b"user:bob", value, BOB_PROOF, BOB_ROOT, subgrove_data_path("x"))
     with pytest.raises(UnsupportedError):
         v.verify_absence_proof(b"user:alice", BOB_PROOF, BOB_ROOT)
+
+
+@pytest.mark.asyncio
+async def test_the_light_client_checks_a_query_proof_against_the_next_header():
+    # A proof made at block h proves the state after it: header h + 1's root.
+    client = LightClient(LightClientConfig(
+        chain_id="test", validator_endpoints=["http://validator.test"], min_validators_for_consensus=1
+    ))
+    asked = []
+
+    async def header(height):
+        asked.append(height)
+        return SimpleNamespace(header=SimpleNamespace(app_hash=BOB_ROOT if height == 42 else bytes(32)))
+
+    client.get_header_by_height = header
+    value = bytes.fromhex(BOB["value_hex"])
+    proof = QueryProof(proof=BOB_PROOF, path_query={"path": BOB["path"]}, height=41, query_result=[value])
+    assert (await client.verify_query_proof(proof)).success
+    assert (await client.verify_query_proof(proof, height=41)).success
+    assert not (await client.verify_query_proof(proof, height=0)).success
+    assert asked == [42, 42, 1]
 
 
 def test_the_light_client_query_check_binds_its_results_to_the_path():
