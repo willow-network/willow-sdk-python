@@ -9,7 +9,7 @@ import base64
 import httpx
 import json as _json
 import logging
-from typing import Optional, Dict, Any, FrozenSet, List, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Optional, Dict, Any, FrozenSet, List, Set, Tuple, TYPE_CHECKING
 
 from .types import (
     DidDocument,
@@ -49,7 +49,9 @@ from .errors import (
     TransactionError,
     parse_api_error,
 )
-from .nonces import UNKNOWN, WINDOW, NonceTracker, parse_nonce_state, refusal_outcome
+from .nonces import (
+    FREE, HELD, UNKNOWN, WINDOW, InterruptedWrite, NonceTracker, parse_nonce_state, refusal_outcome,
+)
 from .consensus.types import (
     DataStoreTx,
     RegisterDidTx,
@@ -1091,6 +1093,10 @@ class WillowClient:
         self._nonces = NonceTracker()
         self._nonce_poll_interval = 1.0
         self._nonce_wait_timeout = 60.0
+        #: Writes cancelled after they were signed, while their submission
+        #: was in flight, keyed by ``(did, nonce)`` (see ``InterruptedWrite``
+        #: and ``resubmit``).
+        self.interrupted_writes: Dict[Tuple[str, int], InterruptedWrite] = {}
 
         # Configure proof verification if options provided
         if proof_verification_options:
@@ -1111,7 +1117,7 @@ class WillowClient:
         self.validators = ValidatorOperations(self)
         self.indexing = IndexingOperations(self)
         self.privacy = PrivacyOperations(self)
-        self.files = FileOperations(self.api_url, api_key=api_key)
+        self.files = FileOperations(self.api_url, api_key=api_key, client=self)
 
         # HTTP client. ``X-API-Key`` is set as a default header so it
         # rides on every request through this client (data, query, proof,
@@ -1661,34 +1667,64 @@ class WillowClient:
     async def _sign_and_submit(
         self, tx_type: str, tx: Any, read_base: bool = True
     ) -> Dict[str, Any]:
-        """Sign ``tx`` as the identity under a nonce it hands out, and submit it.
-
-        A transaction CheckTx refuses gives its nonce back, unless the
-        refusal says the nonce is held by a pending transaction or already
-        used. When it is already used, no transaction under it can run, so
-        ``tx`` is signed again under a fresh nonce. See ``_submit_signed`` for
-        a submission that may have reached the node.
+        """Sign ``tx`` as the identity under a nonce it hands out, and submit
+        it (see ``_submit_under_nonce``).
 
         Returns:
             The ``{tx_hash, code, log, did, nonce}`` of the accepted
             transaction.
         """
-        did = self._did or ""
         create_sign_message(tx_type, tx)  # refuse what can't be signed before taking a nonce
+
+        def sign(nonce: int) -> Dict[str, Any]:
+            tx.nonce = nonce
+            return self._sign_transaction(tx_type, tx)
+
+        return await self._submit_under_nonce(self._did or "", sign, read_base)
+
+    async def _submit_under_nonce(
+        self,
+        did: str,
+        sign: Callable[[int], Dict[str, Any]],
+        read_base: bool = True,
+        nonce: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Submit the transaction ``sign(n)`` builds, signed by ``did`` under
+        a nonce ``n`` this client hands out, or under ``nonce`` when given.
+
+        A transaction CheckTx refuses gives its nonce back, unless the
+        refusal says the nonce is held by a pending transaction or already
+        used. When it is already used, no transaction under it can run, so it
+        is signed again under a fresh nonce (not when ``nonce`` was given).
+        See ``_submit_signed`` for a submission that may have reached the
+        node.
+
+        Raises:
+            ValueError: ``nonce`` is outside the node's window, used, or
+                handed to another write within its lease. Nothing is sent.
+        """
+        if nonce is not None:
+            base, used = await self._nonce_state(did)
+            if not self._nonces.claim(did, base, nonce, used):
+                raise ValueError(
+                    f"nonce {nonce} of {did} is not free: it is outside the 24 above the "
+                    f"account's base, used, or handed to another write; leave it out and "
+                    f"the client picks one"
+                )
         error: Optional[TransactionError] = None
-        for _ in range(WINDOW):
-            tx.nonce = await self._take_nonce(did, read_base)
+        for _ in range(1 if nonce is not None else WINDOW):
+            n = nonce if nonce is not None else await self._take_nonce(did, read_base)
             read_base = True  # a retry follows a nonce the base may have passed
             try:
-                signed = self._sign_transaction(tx_type, tx)
+                signed = sign(n)
             except BaseException:
-                self._nonces.release(did, tx.nonce)
+                self._nonces.release(did, n)
                 raise
             try:
-                return await self._submit_signed(did, tx.nonce, signed)
+                return await self._submit_signed(did, n, signed)
             except TransactionError as e:
                 # Signed under a nonce some other transaction used: it can't run.
-                if e.transaction is not None or not self._nonces.is_used(did, tx.nonce):
+                if nonce is not None or e.transaction is not None or not self._nonces.is_used(did, n):
                     raise
                 error = e
         assert error is not None
@@ -1706,39 +1742,54 @@ class WillowClient:
         the node (it failed in transit after connecting, or the API answered
         a gateway error with no CheckTx answer) keeps its nonce until its
         lease runs out, and its error carries the signed ``transaction`` for
-        ``resubmit``. Every error carries the ``did`` and ``nonce``.
+        ``resubmit``. So does a ``resubmission`` refused for anything but its
+        nonce being used: the earlier copy may be pending or have landed,
+        whatever the refusal says. Every error carries the ``did`` and
+        ``nonce``. A cancellation records the write in
+        ``interrupted_writes`` before it propagates.
         """
+        handout = self._nonces.handout(did, nonce)
         try:
             response = await self._post_transaction(transaction)
+        except asyncio.CancelledError as e:
+            self.interrupted_writes[(did, nonce)] = InterruptedWrite(did, nonce, transaction, handout)
+            e.did, e.nonce, e.transaction = did, nonce, transaction  # type: ignore[attr-defined]
+            e._handout = handout  # type: ignore[attr-defined]
+            raise
         except NetworkError as e:
             e.did, e.nonce = did, nonce
             if getattr(e, "_sent", True) or resubmission:
                 e.transaction = transaction
-                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+                e._handout = handout  # type: ignore[attr-defined]
             else:
-                self._nonces.release(did, nonce)
+                self._nonces.release(did, nonce, handout)
             raise
         try:
             return dict(_tx_submit_result(response), did=did, nonce=nonce)
         except TransactionError as e:
             e.did, e.nonce = did, nonce
             outcome = refusal_outcome(e, response.status_code, nonce)
-            self._nonces.settle(did, nonce, outcome)
+            if resubmission and outcome in (FREE, HELD):
+                outcome = UNKNOWN
+            self._nonces.settle(did, nonce, outcome, handout)
             if outcome == UNKNOWN:
                 e.transaction = transaction
-                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+                e._handout = handout  # type: ignore[attr-defined]
             raise
 
-    async def resubmit(self, failed: BaseException) -> Dict[str, Any]:
+    async def resubmit(self, failed: Any) -> Dict[str, Any]:
         """Send again, under its own nonce, a write that may have reached the node.
 
         ``failed`` is the ``NetworkError`` or ``TransactionError`` a write
         raised with its ``transaction`` set: it failed in transit after
         connecting, or the API answered a gateway error, so the transaction
-        may have reached the node. This sends those exact bytes again, as the
-        node's retry rule asks: whichever copy lands first spends the nonce,
-        and the other is refused, so the write runs at most once. Don't send
-        it again as a new write: under another nonce both copies could run.
+        may have reached the node. It can also be an ``InterruptedWrite``
+        from ``interrupted_writes`` (a write cancelled while its submission
+        was in flight); resubmitting a write removes it from there. This
+        sends those exact bytes again, as the node's retry rule asks:
+        whichever copy lands first spends the nonce, and the other is
+        refused, so the write runs at most once. Don't send it again as a new
+        write: under another nonce both copies could run.
 
         Returns:
             The ``{tx_hash, code, log, did, nonce}`` once CheckTx accepts
@@ -1749,17 +1800,20 @@ class WillowClient:
         Raises:
             ValueError: ``failed`` carries no ``transaction`` (a write that
                 never left: call it again instead).
-            WillowError: This client has since handed the nonce to another
-                write (``resubmit`` came after the 120 s lease ran out).
+            WillowError: This client has handed the nonce to another write
+                since (``resubmit`` came after the 120 s lease ran out),
+                whether or not that write has landed, so nothing is sent.
                 Read what the write wrote to learn whether it took effect.
             TransactionError: CheckTx refused it. A refusal that its nonce
-                is already used, or at or below the base, means a transaction
-                under that nonce landed: the earlier copy, since this client
-                handed the nonce to no other write. A copy refused in its
-                block spends its nonce too, so read what it wrote to know it
-                took effect. CheckTx checks some rules (a subgrove that
-                exists, a funded balance) before the nonce, so another
-                refusal can also follow from the earlier copy having landed.
+                is already used, or at or below the base, means some
+                transaction used that nonce: this write's earlier copy, or
+                another one signed by the same DID elsewhere. Read what the
+                write wrote to learn whether it took effect; a copy refused
+                in its block spends its nonce too. Any other refusal carries
+                ``transaction`` again and leaves the nonce taken: CheckTx
+                checks some rules (a subgrove that exists, a funded balance)
+                before the nonce, so it can follow from the earlier copy
+                having landed, or the earlier copy may still be pending.
             NetworkError: It failed in transit again; ``resubmit`` it again.
         """
         transaction = getattr(failed, "transaction", None)
@@ -1775,13 +1829,16 @@ class WillowClient:
                 "resubmit takes the error of a write that may have reached the node "
                 "(its transaction set); a write that never left is sent by calling it again"
             )
-        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handed_at", None)):
+        interrupted = self.interrupted_writes.get((did, nonce))
+        if interrupted is not None and interrupted.transaction == transaction:
+            del self.interrupted_writes[(did, nonce)]
+        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handout", None)):
             raise WillowError(
                 f"nonce {nonce} of {did} was handed to another write after this one's "
                 f"lease ran out, so it can't be resubmitted under it; read what the write "
                 f"wrote to learn whether it took effect"
             )
-        failed._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+        failed._handout = self._nonces.handout(did, nonce)  # type: ignore[attr-defined]
         return await self._submit_signed(did, nonce, transaction, resubmission=True)
 
     async def _post_transaction(self, tx: Dict[str, Any]) -> httpx.Response:

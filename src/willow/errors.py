@@ -223,7 +223,8 @@ class TransactionError(ConsensusError):
     Raised when transaction operations fail. Raised by a write, it carries
     the ``did`` and ``nonce`` the transaction was signed under, and, when
     the answer leaves open whether it reached the node (a gateway error
-    with no CheckTx answer), the signed ``transaction`` to resubmit.
+    with no CheckTx answer, or a resubmission refused for anything but its
+    nonce being used), the signed ``transaction`` to resubmit.
     """
 
     did: Optional[str] = None

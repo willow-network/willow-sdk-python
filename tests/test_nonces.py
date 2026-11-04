@@ -18,9 +18,13 @@ from willow import (
     NonceWindowFullError,
     NotLandedError,
     WillowClient,
+    delete_file_manifest_message,
     generate_did,
     register_did_message,
+    sign_challenge,
     store_data_message,
+    store_file_manifest_message,
+    unregister_storage_node_message,
     verify_signature,
 )
 from willow.consensus import ConsensusClient, ConsensusConfig, ConsensusError
@@ -183,15 +187,66 @@ def test_reclaim_refuses_a_nonce_handed_to_another_transaction():
     clock = _Clock()
     tracker = NonceTracker(clock)
     nonce = tracker.take("did:a", 0)
-    first = tracker.handed_at("did:a", nonce)
-    assert tracker.reclaim("did:a", nonce, first)  # still its own lease
-    renewed = tracker.handed_at("did:a", nonce)
-    clock.now += LEASE_SECONDS
-    assert tracker.take("did:a", 0) == nonce  # the lease ran out: handed to another
-    assert not tracker.reclaim("did:a", nonce, renewed)
-    clock.now += LEASE_SECONDS
-    assert tracker.reclaim("did:a", nonce, renewed)  # nobody holds it now
+    first = tracker.handout("did:a", nonce)
+    clock.now += LEASE_SECONDS - 1
+    assert tracker.reclaim("did:a", nonce, first)  # still its own: the lease is renewed
+    clock.now += LEASE_SECONDS - 1
     assert tracker.take("did:a", 0) == nonce + 1
+    clock.now += 1
+    assert tracker.take("did:a", 0) == nonce  # the lease ran out: handed to another
+    assert not tracker.reclaim("did:a", nonce, first)
+    clock.now += LEASE_SECONDS
+    assert not tracker.reclaim("did:a", nonce, first)  # that one may still land
+
+
+def test_the_record_of_a_hand_out_outlives_the_base_passing_it():
+    clock = _Clock()
+    tracker = NonceTracker(clock)
+    nonce = tracker.take("did:a", 4)
+    first = tracker.handout("did:a", nonce)
+    clock.now += LEASE_SECONDS
+    assert tracker.take("did:a", 4) == nonce
+    tracker.observe("did:a", nonce)  # the other write landed
+    assert not tracker.reclaim("did:a", nonce, first)
+    # A nonce whose only hand-out was this write's is taken again, used or not.
+    mine = tracker.take("did:a", nonce)
+    handout = tracker.handout("did:a", mine)
+    tracker.observe("did:a", mine)
+    assert tracker.reclaim("did:a", mine, handout)
+
+
+def test_a_nonce_given_back_after_another_hand_out_can_be_reclaimed():
+    clock = _Clock()
+    tracker = NonceTracker(clock)
+    nonce = tracker.take("did:a", 0)
+    first = tracker.handout("did:a", nonce)
+    clock.now += LEASE_SECONDS
+    assert tracker.take("did:a", 0) == nonce
+    tracker.settle("did:a", nonce, FREE, tracker.handout("did:a", nonce))  # that write never ran
+    assert tracker.reclaim("did:a", nonce, first)
+    assert tracker.take("did:a", 0) == nonce + 1
+
+
+def test_a_stale_refusal_does_not_give_back_a_nonce_handed_to_another_write():
+    clock = _Clock()
+    tracker = NonceTracker(clock)
+    nonce = tracker.take("did:a", 0)
+    first = tracker.handout("did:a", nonce)
+    clock.now += LEASE_SECONDS
+    assert tracker.take("did:a", 0) == nonce
+    tracker.release("did:a", nonce, first)
+    tracker.settle("did:a", nonce, FREE, first)
+    assert tracker.take("did:a", 0) == nonce + 1
+
+
+def test_claim_hands_out_a_free_nonce_the_caller_chose():
+    tracker = NonceTracker()
+    assert tracker.claim("did:a", 4, 7)
+    assert not tracker.claim("did:a", 4, 7)  # handed out
+    assert not tracker.claim("did:a", 4, 4)  # at the base
+    assert not tracker.claim("did:a", 4, 4 + WINDOW + 1)  # past the window
+    assert not tracker.claim("did:a", 4, 6, {6})  # used
+    assert [tracker.take("did:a", 4) for _ in range(2)] == [5, 8]
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +874,10 @@ async def test_consensus_retry_refused_as_used_after_a_transit_failure_is_not_si
         await client.transfer(info["did"], "did:willow:b", 5, info["private_key"], info["public_key_id"])
     assert (exc_info.value.did, exc_info.value.nonce) == (info["did"], 5)
     assert node.nonces_sent() == [5, 5]  # no copy under another nonce
+    # Resubmitted, its own copy is sent and refused as used.
+    refused = await client.resubmit(exc_info.value)
+    assert not refused.success and "Invalid nonce: 5 <= base nonce 5" in refused.raw_log
+    assert node.nonces_sent() == [5, 5, 5]
 
 
 @pytest.mark.asyncio
@@ -899,4 +958,348 @@ async def test_consensus_register_did_without_an_api_url_sends_nothing_and_keeps
             info["did_document"].model_dump(by_alias=True), info["private_key"], info["public_key_id"]
         )
     assert exc_info.value.transaction is None
-    assert client._nonces.handed_at(info["did"], 1) is None
+    assert client._nonces.take(info["did"], 0) == 1  # nonce 1 is free again
+
+
+@pytest.mark.asyncio
+async def test_consensus_gateway_error_on_a_write_that_landed_is_not_signed_again():
+    # The first transfer is admitted and lands, but the API answers a gateway
+    # error; a concurrent write reads the advanced base meanwhile.
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    real_post = client._session.post
+    gate = asyncio.Event()
+
+    class Slow502:
+        async def __aenter__(self):
+            await gate.wait()
+            return _Response({"success": False, "data": None, "error": "Failed to reach CometBFT RPC: operation timed out"}, 502)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    first = [True]
+
+    def post(url, json):
+        if first:
+            first.pop()
+            node.handler(httpx.Request("POST", url, content=_dumps(json)))
+            node.land()
+            return Slow502()
+        return real_post(url, json)
+
+    client._session.post = post
+    args = (info["private_key"], info["public_key_id"])
+
+    async def concurrent():
+        await asyncio.sleep(0)
+        result = await client.transfer(info["did"], "did:willow:c", 1, *args)
+        gate.set()
+        return result
+
+    gateway, other = await asyncio.gather(
+        client.transfer(info["did"], "did:willow:b", 100, *args), concurrent()
+    )
+    assert other.success and other.nonce == 6
+    assert (gateway.success, gateway.http_status, gateway.nonce) == (False, 502, 5)
+    assert gateway.transaction is not None
+    # Never signed again under another nonce: the transfer runs once.
+    assert [(b["amount"], b["nonce"]) for _, b in node.sent] == [(100, 5), (1, 6)]
+    node.cache.clear()  # evicted from the mempool cache
+    refused = await client.resubmit(gateway)
+    assert not refused.success and "Invalid nonce: 5 <= base nonce" in refused.raw_log
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("log", [
+    "Insufficient balance",
+    "Nonce 5 of {did} is held by a pending transaction; sign this one with another nonce",
+])
+async def test_consensus_refusal_after_a_transit_failure_keeps_the_nonce_and_the_transaction(log):
+    # The first attempt may have reached the node; the retry is refused
+    # for something other than its nonce being used.
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    client._session.failures = [aiohttp.ServerDisconnectedError()]
+    node.refusals = [log.format(did=info["did"])]
+    args = (info["did"], info["private_key"], info["public_key_id"])
+    result = await client.store_data("sg", "a", {}, *args)
+    assert (result.success, result.resent, result.nonce) == (False, True, 5)
+    assert result.transaction is not None
+    assert (await client.store_data("sg", "b", {}, *args)).nonce == 6  # 5 stays taken
+    assert node.nonces_sent() == [5, 6]
+
+
+@pytest.mark.asyncio
+async def test_consensus_retries_renew_the_nonce_lease():
+    clock = _Clock()
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    client._nonces = NonceTracker(clock)
+    client.config.max_retries = 1
+    real_post = client._session.post
+
+    def slow_failure(url, json):
+        clock.now += LEASE_SECONDS - 1  # each attempt takes most of a lease
+        raise aiohttp.ServerDisconnectedError()
+
+    client._session.post = slow_failure
+    args = (info["did"], info["private_key"], info["public_key_id"])
+    with pytest.raises(ConsensusError) as exc_info:
+        await client.store_data("sg", "a", {}, *args)
+    assert exc_info.value.nonce == 5 and exc_info.value.transaction is not None
+    client._session.post = real_post
+    # The second attempt renewed the lease, so 5 is still taken.
+    assert (await client.store_data("sg", "b", {}, *args)).nonce == 6
+
+
+@pytest.mark.asyncio
+async def test_consensus_retries_stop_once_the_nonce_went_to_another_write():
+    clock = _Clock()
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    client._nonces = NonceTracker(clock)
+    client.config.max_retries = 2
+    attempts = []
+
+    def refused_while_the_lease_runs_out(url, json):
+        attempts.append(json)
+        clock.now += LEASE_SECONDS
+        assert client._nonces.take(info["did"], 4) == 5  # another write takes it
+        raise _Refused()
+
+    client._session.post = refused_while_the_lease_runs_out
+    with pytest.raises(ConsensusError, match="handed to another write") as exc_info:
+        await client.store_data("sg", "a", {}, info["did"], info["private_key"], info["public_key_id"])
+    assert len(attempts) == 1 and exc_info.value.transaction is None
+    # The other write keeps it.
+    assert client._nonces.take(info["did"], 4) == 6
+
+
+@pytest.mark.asyncio
+async def test_a_write_resubmitted_after_its_nonce_went_to_another_write_that_landed_is_not_sent():
+    clock = _Clock()
+    client, node, _ = _client(base=4)
+    client._nonces = NonceTracker(clock)
+    _flaky(client, node, [httpx.ReadError("connection reset")])  # it never reached the node
+    with pytest.raises(NetworkError) as exc_info:
+        await client.data.store_item("sg", "w1", {"v": 1})
+    assert exc_info.value.nonce == 5 and exc_info.value.transaction is not None
+    clock.now += LEASE_SECONDS + 1
+    other = await client.data.store_item("sg", "w2", {"v": 2})
+    assert other["nonce"] == 5
+    node.land()
+    await client.wait_until_landed(other, timeout=0)
+    with pytest.raises(WillowError, match="handed to another write"):
+        await client.resubmit(exc_info.value)
+    assert [(b["key"], b["nonce"]) for _, b in node.sent] == [("w2", 5)]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_resubmission_refused_for_another_reason_keeps_its_nonce_and_transaction():
+    client, node, _ = _client(base=1)
+    _flaky(client, node, [httpx.ReadTimeout("timed out")])
+    with pytest.raises(NetworkError) as first:
+        await client.data.store_item("sg", "a", {})
+    node.refusals = ["Insufficient balance for the write fee"]
+    with pytest.raises(TransactionError, match="Insufficient balance") as refused:
+        await client.resubmit(first.value)
+    # The first copy may have landed or still be pending: nothing is given back.
+    assert refused.value.transaction == first.value.transaction
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 3
+    assert (await client.resubmit(refused.value))["nonce"] == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_write_cancelled_in_flight_is_kept_for_resubmit():
+    client, node, _ = _client(base=1)
+    arrived = asyncio.Event()
+    hang = [True]
+
+    async def handler(request):
+        if request.url.path == "/tx/submit" and hang:
+            hang.pop()
+            node.handler(request)  # it reached the node
+            arrived.set()
+            await asyncio.Event().wait()  # the answer never comes
+        return node.handler(request)
+
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task = asyncio.create_task(client.data.store_item("sg", "a", {"v": 1}))
+    await arrived.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+    write = client.interrupted_writes[(node.did, 2)]
+    assert (write.did, write.nonce) == (node.did, 2)
+    assert write.transaction["StoreData"]["nonce"] == 2
+    assert (exc_info.value.did, exc_info.value.nonce, exc_info.value.transaction) == (node.did, 2, write.transaction)
+    # Its nonce stays taken.
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 3
+    result = await client.resubmit(write)
+    assert (result["code"], result["nonce"]) == (0, 2)  # the node holds that copy
+    assert client.interrupted_writes == {}
+    assert sorted(node.pending) == [2, 3]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_consensus_write_cancelled_in_flight_is_kept_for_resubmit():
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    real_post = client._session.post
+    arrived = asyncio.Event()
+
+    class Hang:
+        async def __aenter__(self):
+            arrived.set()
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    first = [True]
+
+    def post(url, json):
+        if first:
+            first.pop()
+            return Hang()  # sent, never answered
+        return real_post(url, json)
+
+    client._session.post = post
+    args = (info["did"], info["private_key"], info["public_key_id"])
+    task = asyncio.create_task(client.store_data("sg", "a", {}, *args))
+    await arrived.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+    write = client.interrupted_writes[(info["did"], 5)]
+    assert exc_info.value.transaction == write.transaction
+    assert (await client.store_data("sg", "b", {}, *args)).nonce == 6
+    result = await client.resubmit(write)
+    assert result.success and result.nonce == 5
+    assert node.sent[-1] == next(iter(write.transaction.items()))
+    assert client.interrupted_writes == {}
+
+
+# ---------------------------------------------------------------------------
+# client.files: writes signed by the client's identity take its nonces.
+# ---------------------------------------------------------------------------
+
+
+def _identity_signing(info, **extra):
+    return dict({
+        "owner_did": info["did"],
+        "private_key": info["private_key"],
+        "public_key_id": info["public_key_id"],
+        "sign_function": lambda message, key: sign_challenge(message, key, "Ed25519"),
+    }, **extra)
+
+
+def _file_message(kind, body):
+    if kind == "DeleteFileManifest":
+        return delete_file_manifest_message(body["subgrove_id"], body["file_key"], body["owner_did"], body["nonce"])
+    if kind == "UnregisterStorageNode":
+        return unregister_storage_node_message(body["node_did"], body["nonce"])
+    return store_file_manifest_message(
+        body["subgrove_id"], body["file_key"], body["owner_did"], body["filename"],
+        body["content_type"], body["total_size"], body["content_hash"], body["chunk_count"],
+        body["chunk_size"], body["chunk_merkle_root"], body["nonce"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_writes_signed_by_the_identity_take_nonces_from_the_client():
+    client, node, info = _client(base=4)
+    await asyncio.gather(
+        client.data.store_item("sg", "a", {}),
+        client.files.delete("sg", "f", _identity_signing(info)),
+        client.files.unregister_storage_node(info["did"], _identity_signing(info)),
+    )
+    assert sorted(node.nonces_sent()) == [5, 6, 7]
+    assert len(node.pending) == 3
+    for kind, body in node.sent:
+        if kind != "StoreData":
+            message = _file_message(kind, body)
+            assert verify_signature(message, bytes(body["signature"]).hex(), info["public_key"], "Ed25519")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_file_upload_signed_by_the_identity_takes_its_nonce_from_the_client(monkeypatch):
+    client, node, info = _client(base=4)
+    real_async_client = httpx.AsyncClient
+    chunks = []
+
+    def storage(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda r: chunks.append(r.url.host) or httpx.Response(200))
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", storage)
+    await client.data.store_item("sg", "a", {})
+    await client.files.upload("sg", "f", "a.txt", b"hello", "http://storage.test", _identity_signing(info))
+    assert node.nonces_sent() == [5, 6]
+    kind, body = node.sent[-1]
+    assert kind == "StoreFileManifest"
+    assert verify_signature(_file_message(kind, body), bytes(body["signature"]).hex(), info["public_key"], "Ed25519")
+    assert chunks == ["storage.test"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_file_write_given_a_nonce_by_the_identity_claims_it():
+    client, node, info = _client(base=4)
+    await client.files.delete("sg", "f", _identity_signing(info, nonce=9))
+    with pytest.raises(ValueError, match="not free"):
+        await client.files.delete("sg", "g", _identity_signing(info, nonce=9))
+    with pytest.raises(ValueError, match="not free"):
+        await client.files.delete("sg", "g", _identity_signing(info, nonce=4))
+    assert node.nonces_sent() == [9]
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 5
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_file_write_that_may_have_reached_the_node_is_resubmitted():
+    client, node, info = _client(base=4)
+    _flaky(client, node, [httpx.ReadTimeout("timed out")])
+    with pytest.raises(NetworkError) as exc_info:
+        await client.files.delete("sg", "f", _identity_signing(info))
+    error = exc_info.value
+    assert (error.did, error.nonce) == (info["did"], 5) and error.transaction is not None
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 6
+    assert (await client.resubmit(error))["nonce"] == 5
+    assert node.sent[-1] == ("DeleteFileManifest", error.transaction["DeleteFileManifest"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_file_write_refused_by_checktx_gives_its_nonce_back():
+    client, node, info = _client(base=4)
+    node.refusals = ["File not found"]
+    with pytest.raises(TransactionError, match="File not found"):
+        await client.files.delete("sg", "f", _identity_signing(info))
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 5
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", [
+    lambda files: files.upload("sg", "f", "a.txt", b"x", "http://storage.test"),
+    lambda files: files.upload("sg", "f", "a.txt", b"x", "http://storage.test", None),
+    lambda files: files.delete("sg", "f"),
+    lambda files: files.unregister_storage_node("did:willow:node", None),
+])
+async def test_an_unsigned_file_write_is_refused(write):
+    client, node, _ = _client(base=4)
+    with pytest.raises(ValueError, match="signing is required"):
+        await write(client.files)
+    assert node.sent == [] and node.nonce_reads == 0
+    await client.close()

@@ -280,7 +280,7 @@ The node accepts a transaction under a nonce among the 24 above the account's no
 - While all 24 are taken, the next write waits for earlier ones to land, and raises `NonceWindowFullError` if none does within 60 s. `client.data.store` with more than 24 keys sends the rest as earlier ones land.
 - RegisterDid always signs nonce 1.
 
-Nonces are tracked per client object, so send one identity's writes through one client. `client.files` signs under the nonce you pass in `signing["nonce"]`, which is required.
+Nonces are tracked per client object, so send one identity's writes through one client. `client.files` takes nonces from the client for a write signed by the client's identity: leave `signing["nonce"]` out, or give one that is free. For any other signer, `signing["nonce"]` is required. Every file write needs `signing`: the node refuses an unsigned transaction.
 
 #### When a write fails
 
@@ -288,8 +288,9 @@ An error a write raises after choosing its nonce carries the `did` and `nonce` i
 
 - It never left: a `NetworkError` whose `transaction` is `None` (the connection was refused, or timed out before connecting). Its nonce is free again. Call the write again.
 - It may have reached the node: a `NetworkError` after connecting (a read timeout, a dropped connection), or a `TransactionError` for a gateway error with no CheckTx answer. Its `transaction` holds the signed transaction as sent, and its nonce stays taken. Send the same transaction again under the same nonce with `await client.resubmit(error)`: whichever copy lands first spends the nonce and the other is refused, so the write runs at most once. Don't call the write again: under another nonce, both copies could run.
-- `resubmit` returns `{tx_hash, code, log, did, nonce}` once CheckTx accepts the copy. If the node already holds an identical copy ("tx already exists in cache"), that counts as accepted, with `code` 0 and no `tx_hash`. A `TransactionError` saying the nonce is already used, or at or below the base, means a transaction under it landed: the earlier copy. CheckTx checks some rules (a subgrove that exists, a funded balance) before the nonce, so a refusal of a copy can also follow from the earlier copy having landed: read what the write wrote to know whether it took effect.
-- If `resubmit` comes after the 120 s lease and this client has handed the nonce to another write, it raises `WillowError` and sends nothing. Read what the write wrote to learn whether it took effect.
+- `resubmit` returns `{tx_hash, code, log, did, nonce}` once CheckTx accepts the copy. If the node already holds an identical copy ("tx already exists in cache"), that counts as accepted, with `code` 0 and no `tx_hash`. A `TransactionError` saying the nonce is already used, or at or below the base, means some transaction used that nonce: the earlier copy, or another write signed by the same DID elsewhere. Read what the write wrote to learn whether it took effect. Any other refusal of a copy carries `transaction` again and keeps the nonce taken: CheckTx checks some rules (a subgrove that exists, a funded balance) before the nonce, so it can follow from the earlier copy having landed, or the earlier copy may still be pending.
+- If `resubmit` comes after the 120 s lease and this client has handed the nonce to another write since, whether or not that write has landed, it raises `WillowError` and sends nothing. Read what the write wrote to learn whether it took effect.
+- A write cancelled (`asyncio.CancelledError`) after it was signed, while its submission was in flight, may have reached the node too. Its nonce stays taken, and the client keeps it in `client.interrupted_writes`, keyed by `(did, nonce)`, as an `InterruptedWrite` with its `did`, `nonce`, and `transaction`; the `CancelledError` carries the same `did`, `nonce`, and `transaction` when it reaches you. `await client.resubmit(write)` sends it again under its nonce and removes it from `interrupted_writes`; pop an entry you handle otherwise.
 - A write CheckTx refused (a `TransactionError` whose `transaction` is `None`) never ran: fix what the refusal says and call the write again.
 
 ```python
@@ -302,9 +303,13 @@ except (NetworkError, TransactionError) as error:
         raise  # never left, or refused at CheckTx: fix it and call the write again
     result = await client.resubmit(error)
 await client.wait_until_landed(result)
+
+# Writes cancelled while in flight, e.g. by a timeout around them
+for write in list(client.interrupted_writes.values()):
+    await client.wait_until_landed(await client.resubmit(write))
 ```
 
-`ConsensusClient` does the same: a `ConsensusError` raised after every retry failed in transit, or a `BroadcastResult` for a gateway error, carries `did`, `nonce`, and, when it may have reached the node, `transaction`; `await consensus.resubmit(error_or_result)` returns a `BroadcastResult`. Its own retries send the same bytes, and a retry refused because its nonce is used raises `ConsensusError` (the first attempt may have landed) instead of signing the write again under another nonce. Each `BroadcastResult` carries `http_status`, `did`, and `nonce`.
+`ConsensusClient` does the same: a `ConsensusError` raised after every retry failed in transit, or a `BroadcastResult` for a gateway error, carries `did`, `nonce`, and, when it may have reached the node, `transaction`; `await consensus.resubmit(error_or_result)` returns a `BroadcastResult`. Its own retries send the same bytes and renew the nonce's lease before each attempt. A retry refused because its nonce is used raises `ConsensusError` (the first attempt may have landed) instead of signing the write again under another nonce; a retry refused for anything else returns a `BroadcastResult` carrying `transaction`. A write whose result carries `transaction` is never signed again under another nonce. It keeps cancelled writes in `consensus.interrupted_writes` too. Each `BroadcastResult` carries `http_status`, `did`, and `nonce`.
 
 #### Waiting for writes to land
 

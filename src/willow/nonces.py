@@ -12,14 +12,17 @@ until something uses it.
 base. It hands out the lowest nonce in the window that is neither, under a
 lock; a nonce handed out more than 120 s ago (the node's admission hold) that
 hasn't landed is free again. It takes back a nonce whose transaction was
-refused without using it, so no gap is left behind.
+refused without using it, so no gap is left behind. It also records which
+hand-out each nonce last went to, after the base passes it too, so a write
+is never resubmitted under a nonce handed to another write since.
 """
 
+import itertools
 import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, FrozenSet, Iterable, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Set, Tuple
 
 from .errors import TransactionError
 
@@ -27,6 +30,9 @@ from .errors import TransactionError
 WINDOW = 24
 #: Seconds a nonce handed out stays taken while its transaction hasn't landed.
 LEASE_SECONDS = 120.0
+#: How many nonces below the base the record of which hand-out each went to
+#: is kept for.
+HANDOUT_HISTORY = 4096
 
 # CometBFT's answer to a transaction whose exact bytes are already in its
 # mempool cache (pending, or committed recently), as the API passes it on:
@@ -117,10 +123,30 @@ def parse_nonce_state(value: bytes) -> Tuple[int, FrozenSet[int]]:
 
 
 @dataclass
+class InterruptedWrite:
+    """A write cancelled (``asyncio.CancelledError``) after it was signed,
+    while its submission was in flight: it may have reached the node.
+
+    Its nonce stays taken until its lease runs out. The client keeps it in
+    ``interrupted_writes``, keyed by ``(did, nonce)``; pass it to the
+    client's ``resubmit`` to send the same ``transaction`` again under the
+    same nonce, so the write runs at most once. Don't call the write again:
+    under another nonce both copies could run.
+    """
+
+    did: str
+    nonce: int
+    transaction: Dict[str, Any]
+    _handout: Optional[int] = field(default=None, repr=False, compare=False)
+
+
+@dataclass
 class _Account:
     base: int = 0
     used: Set[int] = field(default_factory=set)
     handed: Dict[int, float] = field(default_factory=dict)
+    # The hand-out each nonce last went to, kept after the base passes it.
+    handout: Dict[int, int] = field(default_factory=dict)
 
 
 class NonceTracker:
@@ -134,6 +160,7 @@ class NonceTracker:
         self._clock = clock
         self._lock = threading.Lock()
         self._accounts: Dict[str, _Account] = {}
+        self._handouts = itertools.count(1)
 
     def _account(self, did: str) -> _Account:
         account = self._accounts.get(did)
@@ -150,6 +177,13 @@ class NonceTracker:
             n: at for n, at in account.handed.items()
             if n > account.base and n not in account.used and now - at < LEASE_SECONDS
         }
+        if len(account.handout) > 2 * HANDOUT_HISTORY:
+            floor = account.base - HANDOUT_HISTORY
+            account.handout = {n: h for n, h in account.handout.items() if n > floor}
+
+    def _hand_out(self, account: _Account, nonce: int, now: float) -> None:
+        account.handed[nonce] = now
+        account.handout[nonce] = next(self._handouts)
 
     def observe(self, did: str, base: int, used: Iterable[int] = ()) -> int:
         """Record ``did``'s base, and the nonces above it the node reports
@@ -176,7 +210,7 @@ class NonceTracker:
             self._refresh(account, base, now, used)
             for nonce in range(account.base + 1, account.base + WINDOW + 1):
                 if nonce not in account.used and nonce not in account.handed:
-                    account.handed[nonce] = now
+                    self._hand_out(account, nonce, now)
                     return nonce
             return None
 
@@ -186,46 +220,68 @@ class NonceTracker:
         with self._lock:
             account = self._account(did)
             if nonce > account.base:
-                account.handed[nonce] = self._clock()
+                self._hand_out(account, nonce, self._clock())
 
-    def handed_at(self, did: str, nonce: int) -> Optional[float]:
-        """When ``nonce`` was handed out, while its lease runs; else ``None``."""
+    def claim(self, did: str, base: int, nonce: int, used: Iterable[int] = ()) -> bool:
+        """Hand out ``nonce``, chosen by the caller, given the base (and the
+        nonces above it used) the node answered; ``False``, taking nothing,
+        when it is at or below the base, past the window, known used, or
+        handed out within its lease."""
         with self._lock:
             account = self._account(did)
-            self._refresh(account, account.base, self._clock())
-            return account.handed.get(nonce)
+            now = self._clock()
+            self._refresh(account, base, now, used)
+            if not account.base < nonce <= account.base + WINDOW:
+                return False
+            if nonce in account.used or nonce in account.handed:
+                return False
+            self._hand_out(account, nonce, now)
+            return True
 
-    def reclaim(self, did: str, nonce: int, handed_at: Optional[float]) -> bool:
-        """Take ``nonce`` again for a resubmission of the transaction it was
-        handed out for at ``handed_at`` (what ``handed_at()`` answered then),
-        renewing its lease; a nonce known used is not taken again.
+    def handout(self, did: str, nonce: int) -> Optional[int]:
+        """The hand-out ``nonce`` last went to (an opaque id), kept after
+        the base passes it; ``None`` when this tracker holds no record."""
+        with self._lock:
+            return self._account(did).handout.get(nonce)
 
-        Returns ``False`` when this tracker has since handed the nonce to
-        another transaction (the first one's lease ran out first).
+    def reclaim(self, did: str, nonce: int, handout: Optional[int]) -> bool:
+        """Take ``nonce`` again for a resubmission of the transaction it went
+        to in ``handout`` (what ``handout()`` answered then), renewing its
+        lease; a nonce known used is not taken again.
+
+        Returns ``False``, renewing nothing, when this tracker has since
+        handed the nonce to another transaction (the first one's lease ran
+        out first), whether or not that one has landed.
         """
         with self._lock:
             account = self._account(did)
             now = self._clock()
             self._refresh(account, account.base, now)
-            at = account.handed.get(nonce)
-            if at is not None and at != handed_at:
+            current = account.handout.get(nonce)
+            if current is not None and current != handout:
                 return False
             if nonce > account.base and nonce not in account.used:
                 account.handed[nonce] = now
+                if current is None:
+                    account.handout[nonce] = handout if handout is not None else next(self._handouts)
             return True
 
-    def settle(self, did: str, nonce: int, outcome: str) -> None:
+    def settle(self, did: str, nonce: int, outcome: str, handout: Optional[int] = None) -> None:
         """Record what a failed submission left ``nonce`` as (see
-        ``refusal_outcome``)."""
+        ``refusal_outcome``). Given the submission's ``handout``, a nonce
+        handed to another write since is not given back."""
         with self._lock:
             account = self._account(did)
-            if outcome == FREE:
+            ours = handout is None or account.handout.get(nonce, handout) == handout
+            if outcome == FREE and ours:
                 account.handed.pop(nonce, None)
+                account.handout.pop(nonce, None)
             elif outcome == USED:
                 account.handed.pop(nonce, None)
                 if nonce > account.base:
                     account.used.add(nonce)
 
-    def release(self, did: str, nonce: int) -> None:
-        """Give back a nonce handed out for a transaction that was never sent."""
-        self.settle(did, nonce, FREE)
+    def release(self, did: str, nonce: int, handout: Optional[int] = None) -> None:
+        """Give back a nonce handed out for a transaction that was never sent
+        (see ``settle``)."""
+        self.settle(did, nonce, FREE, handout)

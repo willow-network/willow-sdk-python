@@ -8,12 +8,14 @@ import asyncio
 import aiohttp
 import json
 import time
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Callable, Optional, Dict, Any, List, Tuple
 import logging
 
 from ..auth import _key_algorithm, sign_message, SignatureAlgorithm
 from ..errors import NonceWindowFullError, TransactionError
-from ..nonces import UNKNOWN, WINDOW, NonceTracker, already_in_cache, refusal_outcome
+from ..nonces import (
+    FREE, HELD, UNKNOWN, WINDOW, InterruptedWrite, NonceTracker, already_in_cache, refusal_outcome,
+)
 from ..signed_messages import did_document_body
 from .types import (
     RegisterDidTx, RegisterSubgroveTx, TransferTx, DataStoreTx,
@@ -49,6 +51,10 @@ class ConsensusClient:
         self._nonces = NonceTracker()
         self._nonce_poll_interval = 1.0
         self._nonce_wait_timeout = 60.0
+        #: Writes cancelled after they were signed, while their submission
+        #: was in flight, keyed by ``(did, nonce)`` (see ``InterruptedWrite``
+        #: and ``resubmit``).
+        self.interrupted_writes: Dict[Tuple[str, int], InterruptedWrite] = {}
     
     async def __aenter__(self):
         """Async context manager entry."""
@@ -486,10 +492,11 @@ class ConsensusClient:
         transaction CheckTx refuses gives its nonce back, unless the refusal
         says the nonce is held by a pending transaction or already used. When
         it is already used, no transaction under it can run, so it is signed
-        again under a fresh nonce, unless an earlier attempt of these bytes
-        failed in transit: that attempt may be what used it, so this raises
-        rather than run the write twice. See ``_broadcast_signed`` for a
-        submission that may have reached the node.
+        again under a fresh nonce, unless these bytes may have reached the
+        node: an earlier attempt failed in transit (this raises rather than
+        run the write twice), or the answer leaves open whether it reached
+        the node (the result carries ``transaction``, for ``resubmit``). See
+        ``_broadcast_signed``.
 
         ``algorithm`` selects the signing algorithm. It must be supplied by the
         caller because the self-certifying DID no longer encodes it; it cannot
@@ -520,7 +527,11 @@ class ConsensusClient:
                 self._nonces.release(signer, transaction.nonce)
                 raise
             result = await self._broadcast_signed(signer, transaction.nonce, tx_wrapper)
-            if result.success or not self._nonces.is_used(signer, transaction.nonce):
+            if (
+                result.success
+                or result.transaction is not None
+                or not self._nonces.is_used(signer, transaction.nonce)
+            ):
                 return result
             if result.resent:
                 error = ConsensusError(
@@ -529,6 +540,7 @@ class ConsensusClient:
                     f"({result.raw_log}); read what it wrote before sending it again"
                 )
                 error.did, error.nonce, error.transaction = signer, transaction.nonce, tx_wrapper
+                error._handout = self._nonces.handout(signer, transaction.nonce)  # type: ignore[attr-defined]
                 raise error
             if fixed_nonce:
                 return result
@@ -540,22 +552,36 @@ class ConsensusClient:
         """Broadcast a transaction signed under ``nonce`` of ``did``, and
         record what its answer leaves the nonce as.
 
-        Its retries send the same bytes. When every attempt fails in transit,
-        the nonce is given back if none can have left (the connection was
-        refused or timed out) and this is not a ``resubmission``; otherwise it
-        stays taken until its lease runs out, and the ``ConsensusError``
-        carries the signed ``transaction``. A gateway error with no CheckTx
-        answer keeps the nonce too, and its result carries ``transaction``.
+        Its retries send the same bytes, renewing the nonce's lease before
+        each. When every attempt fails in transit, the nonce is given back if
+        none can have left (the connection was refused or timed out) and this
+        is not a ``resubmission``; otherwise it stays taken until its lease
+        runs out, and the ``ConsensusError`` carries the signed
+        ``transaction``. A gateway error with no CheckTx answer keeps the
+        nonce too, and its result carries ``transaction``. So does any
+        refusal other than the nonce being used once these bytes may have
+        reached the node before (an earlier attempt failed in transit, or
+        this is a ``resubmission``): the earlier copy may be pending or have
+        landed, whatever the refusal says. A cancellation records the write
+        in ``interrupted_writes`` before it propagates.
         """
+        handout = self._nonces.handout(did, nonce)
+        renew: Callable[[], bool] = lambda: self._nonces.reclaim(did, nonce, handout)
         try:
-            result = await self._broadcast_transaction(transaction)
+            result = await self._broadcast_transaction(transaction, renew)
+        except asyncio.CancelledError as e:
+            write = InterruptedWrite(did, nonce, transaction, handout)
+            self.interrupted_writes[(did, nonce)] = write
+            e.did, e.nonce, e.transaction = did, nonce, transaction  # type: ignore[attr-defined]
+            e._handout = handout  # type: ignore[attr-defined]
+            raise
         except ConsensusError as e:
             e.did, e.nonce = did, nonce
             if getattr(e, "_sent", True) or resubmission:
                 e.transaction = transaction
-                e._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+                e._handout = handout  # type: ignore[attr-defined]
             else:
-                self._nonces.release(did, nonce)
+                self._nonces.release(did, nonce, handout)
             raise
         result.did, result.nonce = did, nonce
         if result.success:
@@ -565,10 +591,12 @@ class ConsensusClient:
             result.http_status,
             nonce,
         )
-        self._nonces.settle(did, nonce, outcome)
+        if (result.resent or resubmission) and outcome in (FREE, HELD):
+            outcome = UNKNOWN
+        self._nonces.settle(did, nonce, outcome, handout)
         if outcome == UNKNOWN:
             result.transaction = transaction
-            result._handed_at = self._nonces.handed_at(did, nonce)  # type: ignore[attr-defined]
+            result._handout = handout  # type: ignore[attr-defined]
         return result
 
     async def resubmit(self, failed: Any) -> BroadcastResult:
@@ -577,27 +605,33 @@ class ConsensusClient:
         ``failed`` is the ``ConsensusError`` a write raised, or the
         ``BroadcastResult`` it returned, with its ``transaction`` set: it
         failed in transit, or the API answered a gateway error, so the
-        transaction may have reached the node. This sends those exact bytes
-        again: whichever copy lands first spends the nonce, and the other is
-        refused, so the write runs at most once. Don't send it again as a new
-        write: under another nonce both copies could run.
+        transaction may have reached the node. It can also be an
+        ``InterruptedWrite`` from ``interrupted_writes`` (a write cancelled
+        while its submission was in flight); resubmitting a write removes it
+        from there. This sends those exact bytes again: whichever copy lands
+        first spends the nonce, and the other is refused, so the write runs
+        at most once. Don't send it again as a new write: under another nonce
+        both copies could run.
 
         Returns:
             The ``BroadcastResult``. When the node already holds an identical
             copy ("tx already exists in cache"), that counts as success, with
             no ``tx_hash``. A refusal that its nonce is already used, or at or
-            below the base, means a transaction under that nonce landed: the
-            earlier copy, since this client handed the nonce to no other
-            write. A copy refused in its block spends its nonce too, so read
-            what it wrote to know it took effect. CheckTx checks some rules
-            before the nonce, so another refusal can also follow from the
-            earlier copy having landed.
+            below the base, means some transaction used that nonce: this
+            write's earlier copy, or another one signed by the same DID
+            elsewhere. Read what the write wrote to learn whether it took
+            effect; a copy refused in its block spends its nonce too. Any
+            other refusal leaves the result's ``transaction`` set and the
+            nonce taken: CheckTx checks some rules before the nonce, so it
+            can follow from the earlier copy having landed, or the earlier
+            copy may still be pending.
 
         Raises:
             ValueError: ``failed`` carries no ``transaction``.
-            ConsensusError: This client has since handed the nonce to another
-                write (``resubmit`` came after the 120 s lease ran out), or
-                it failed in transit again (``resubmit`` it again).
+            ConsensusError: This client has handed the nonce to another write
+                since (``resubmit`` came after the 120 s lease ran out),
+                whether or not that write has landed, so nothing is sent;
+                or it failed in transit again (``resubmit`` it again).
         """
         transaction = getattr(failed, "transaction", None)
         did = getattr(failed, "did", None)
@@ -612,16 +646,21 @@ class ConsensusClient:
                 "resubmit takes the error or result of a write that may have reached "
                 "the node (its transaction set)"
             )
-        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handed_at", None)):
+        interrupted = self.interrupted_writes.get((did, nonce))
+        if interrupted is not None and interrupted.transaction == transaction:
+            del self.interrupted_writes[(did, nonce)]
+        if not self._nonces.reclaim(did, nonce, getattr(failed, "_handout", None)):
             raise ConsensusError(
                 f"nonce {nonce} of {did} was handed to another write after this one's "
                 f"lease ran out, so it can't be resubmitted under it; read what the write "
                 f"wrote to learn whether it took effect"
             )
-        failed._handed_at = self._nonces.handed_at(did, nonce)
+        failed._handout = self._nonces.handout(did, nonce)
         return await self._broadcast_signed(did, nonce, transaction, resubmission=True)
 
-    async def _broadcast_transaction(self, transaction: Dict[str, Any]) -> BroadcastResult:
+    async def _broadcast_transaction(
+        self, transaction: Dict[str, Any], renew: Optional[Callable[[], bool]] = None
+    ) -> BroadcastResult:
         """Submit a transaction via the API server's /tx/submit endpoint.
 
         The chain's on-the-wire format is bincode. The API server accepts
@@ -633,11 +672,14 @@ class ConsensusClient:
         ``max_retries`` times. CometBFT's "tx already exists in cache" (it
         holds these exact bytes, which CheckTx admitted) counts as success.
         The result's ``resent`` says whether an earlier attempt failed after
-        it may have reached the node.
+        it may have reached the node. ``renew``, called before each attempt,
+        renews the nonce's lease; when it answers ``False`` (the nonce went
+        to another write) no further attempt is made.
 
         Raises:
-            ConsensusError: Every attempt failed in transit. Its ``_sent`` is
-                whether any attempt may have reached the node.
+            ConsensusError: Every attempt failed in transit, or ``renew``
+                stopped the retries. Its ``_sent`` is whether any attempt may
+                have reached the node.
         """
         if not self.config.api_url:
             error = ConsensusError(
@@ -649,6 +691,12 @@ class ConsensusClient:
         url = f"{self.config.api_url.rstrip('/')}/tx/submit"
         maybe_sent = False
         for attempt in range(self.config.max_retries + 1):
+            if renew is not None and not renew():
+                error = ConsensusError(
+                    "tx submit stopped: the nonce's lease ran out and it was handed to another write"
+                )
+                error._sent = maybe_sent  # type: ignore[attr-defined]
+                raise error
             try:
                 async with self._session.post(url, json=transaction) as response:
                     status = response.status

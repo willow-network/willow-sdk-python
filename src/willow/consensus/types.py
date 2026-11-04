@@ -69,7 +69,8 @@ class BroadcastResult:
     earlier attempt of the same bytes failed in transit and may have reached
     the node. A write's result carries the ``did`` and ``nonce`` it was signed
     under, and, when it failed in a way that leaves open whether it reached
-    the node (a gateway error), the signed ``transaction`` to resubmit.
+    the node (a gateway error, or a refusal after an earlier attempt of the
+    same bytes may have reached it), the signed ``transaction`` to resubmit.
     """
     success: bool
     tx_hash: Optional[str] = None
