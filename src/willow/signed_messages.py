@@ -1,13 +1,20 @@
 """The messages data and file write transactions are signed over.
 
-Each message is a set of lines joined by ``\\n``, with no trailing newline:
-the kind first, then one ``Label: value`` line per field, the nonce last. It
-binds the transaction's nonce and every field the transaction writes.
-Variable-length bytes appear as the lowercase hex SHA-256 of the exact bytes
-the transaction carries; 32-byte fields appear as their lowercase hex.
+Each message is a set of lines joined by ``\\n`` (the byte 0x0A), with no
+trailing newline, as UTF-8: the kind first, then one ``Label: value`` line
+per field, the nonce last. It binds the transaction's nonce and every field
+the transaction writes. Text fields go in verbatim, with no escaping or
+normalization. Variable-length bytes appear as the lowercase hex SHA-256 of
+the exact bytes the transaction carries; 32-byte fields appear as their
+lowercase hex. Numbers are unsigned decimal.
 
-A text field holding a line break is refused (``ValueError``): the node
-refuses such a transaction, and the lines must read back one way only.
+A text field holding a line break (the byte 0x0A) is refused
+(``ValueError``): the node refuses such a transaction, and the lines must read
+back one way only.
+
+The nonce in the message is the nonce in the transaction. A write that lands
+in a block and is refused there after its signature and nonce verify still
+spends its nonce; to retry, sign again under the next free nonce.
 
 Ed25519 signs the message's UTF-8 bytes; secp256k1 signs their Keccak-256
 (see ``willow.auth.sign_challenge``).
@@ -28,14 +35,19 @@ __all__ = [
 def _field(label: str, value: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{label} must be a string")
+    # U+000A is the only code point whose UTF-8 holds the byte 0x0A.
     if "\n" in value:
         raise ValueError(f"{label} holds a line break, which a signed field can't")
     return f"{label}: {value}"
 
 
-def _unsigned(label: str, value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{label} must be a non-negative integer")
+_U32_MAX = 2**32 - 1
+_U64_MAX = 2**64 - 1
+
+
+def _unsigned(label: str, value: int, maximum: int = _U64_MAX) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise ValueError(f"{label} must be an integer from 0 to {maximum}")
     return value
 
 
@@ -139,8 +151,8 @@ def store_file_manifest_message(
         _field("ContentType", content_type),
         f"TotalSize: {_unsigned('TotalSize', total_size)}",
         f"ContentHash: {_hex('ContentHash', content_hash, 32)}",
-        f"ChunkCount: {_unsigned('ChunkCount', chunk_count)}",
-        f"ChunkSize: {_unsigned('ChunkSize', chunk_size)}",
+        f"ChunkCount: {_unsigned('ChunkCount', chunk_count, _U32_MAX)}",
+        f"ChunkSize: {_unsigned('ChunkSize', chunk_size, _U32_MAX)}",
         f"ChunkMerkleRoot: {_hex('ChunkMerkleRoot', chunk_merkle_root, 32)}",
         encryption_line,
         f"Nonce: {_unsigned('Nonce', nonce)}",

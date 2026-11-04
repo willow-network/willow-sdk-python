@@ -71,7 +71,9 @@ class FileOperations:
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``store_file_manifest_message`` over the manifest sent,
-                including ``nonce``.
+                including ``nonce``. A write refused in its block after its
+                signature verifies spends its nonce: retry under the next
+                free nonce, which signs anew.
 
         Raises:
             ValueError: If a signed text field holds a line break.
@@ -227,7 +229,9 @@ class FileOperations:
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``delete_file_manifest_message`` over the transaction sent,
-                including ``nonce``.
+                including ``nonce``. A write refused in its block after its
+                signature verifies spends its nonce: retry under the next
+                free nonce, which signs anew.
 
         Raises:
             ValueError: If a signed text field holds a line break.

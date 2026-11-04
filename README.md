@@ -162,7 +162,7 @@ headers = sign_request_with_nonce(did, private_key_hex, public_key_id, "POST", "
 
 ### Transaction signing (data and file writes)
 
-StoreData, StoreFileManifest, and DeleteFileManifest transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` with no trailing newline:
+StoreData, StoreFileManifest, and DeleteFileManifest transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` (the byte 0x0A) with no trailing newline, and the message is UTF-8. Text fields go in verbatim, with no escaping or normalization:
 
 ```
 StoreData
@@ -197,10 +197,11 @@ Owner: <owner_did>
 Nonce: <nonce>
 ```
 
-- `DataHash` is over the exact bytes sent in `data`: the JSON text's UTF-8 bytes.
+- `DataHash` is over the exact bytes sent in `data`: the JSON text's UTF-8 bytes. `ConsensusClient.store_data` sends `json.dumps(data, separators=(",", ":"), sort_keys=True)`, which escapes non-ASCII characters.
 - `Encryption` is `none` for a manifest without encryption, else `<key_epoch>:<hex 24-byte nonce>`.
 - The nonce in the message is the nonce in the transaction, so a transaction sent under a new nonce needs a new signature.
-- A subgrove ID, key, owner DID, filename, or content type holding a line break is refused with `ValueError` before anything is signed.
+- A write that lands in a block and is refused there (for example, data not found or no permission) after its signature and nonce verify still spends its nonce. To retry, sign again under the next free nonce. A write refused for its signature or nonce spends nothing.
+- A subgrove ID, key, owner DID, filename, or content type holding a line break (the byte 0x0A) is refused with `ValueError` before anything is signed.
 - Ed25519 signs the message's UTF-8 bytes; secp256k1 signs their Keccak-256.
 
 `ConsensusClient` and `client.files` build these messages; `store_data_message`, `store_file_manifest_message`, and `delete_file_manifest_message` return the exact text for a transaction you sign yourself.

@@ -37,7 +37,13 @@ SECP256K1_PUBLIC_KEY = KAT["secp256k1_public_key_compressed_hex"]
 PUBLIC_KEY_ID = KAT["public_key_id"]
 
 # The kinds this SDK sends. It sends no UpdateData or DeleteData transaction.
-SENDABLE = ("StoreData", "StoreFileManifest", "StoreFileManifest (encrypted)", "DeleteFileManifest")
+SENDABLE = (
+    "StoreData",
+    "StoreData (non-ASCII, large nonce)",
+    "StoreFileManifest",
+    "StoreFileManifest (encrypted)",
+    "DeleteFileManifest",
+)
 VECTORS = {v["name"]: v for v in KAT["vectors"]}
 
 
@@ -62,7 +68,7 @@ def _encryption(inputs):
 def _build(vector) -> str:
     i = vector["inputs"]
     name = vector["name"]
-    if name == "StoreData":
+    if name.startswith("StoreData"):
         return store_data_message(
             i["subgrove_id"], i["key"], i["owner_did"], i["data_utf8"].encode("utf-8"), i["nonce"]
         )
@@ -90,7 +96,7 @@ def _transaction(vector):
     """The SDK transaction for ``vector`` and its ``create_sign_message`` type."""
     i = vector["inputs"]
     name = vector["name"]
-    if name == "StoreData":
+    if name.startswith("StoreData"):
         return "DataStore", DataStoreTx(
             subgrove_id=i["subgrove_id"], key=i["key"], data=i["data_utf8"],
             owner_did=i["owner_did"], public_key_id=PUBLIC_KEY_ID, nonce=i["nonce"],
@@ -146,18 +152,25 @@ class TestKnownAnswers:
 
 
 # StoreFileManifestTx carries no encryption, so the encrypted vector has no transaction.
-@pytest.mark.parametrize("name", ["StoreData", "StoreFileManifest", "DeleteFileManifest"])
+@pytest.mark.parametrize("name", [n for n in SENDABLE if n != "StoreFileManifest (encrypted)"])
 def test_create_sign_message_is_the_known_answer(name):
     tx_type, tx = _transaction(VECTORS[name])
     assert create_sign_message(tx_type, tx) == VECTORS[name]["message"]
 
 
 class TestBuilders:
-    def test_store_data_hashes_the_utf8_of_text(self):
-        i = VECTORS["StoreData"]["inputs"]
+    @pytest.mark.parametrize("name", ["StoreData", "StoreData (non-ASCII, large nonce)"])
+    def test_store_data_hashes_the_utf8_of_text(self, name):
+        i = VECTORS[name]["inputs"]
         assert store_data_message(
             i["subgrove_id"], i["key"], i["owner_did"], i["data_utf8"], i["nonce"]
-        ) == VECTORS["StoreData"]["message"]
+        ) == VECTORS[name]["message"]
+
+    def test_text_goes_in_verbatim(self):
+        vector = VECTORS["StoreData (non-ASCII, large nonce)"]
+        message = _build(vector).encode("utf-8")
+        assert b"\nKey: na\xc3\xafve-\xd0\xba\xd0\xbb\xd1\x8e\xd1\x87\n" in message
+        assert message.endswith(b"\nNonce: 4294967297")
 
     def test_manifest_takes_hex_bytes_or_number_lists(self):
         vector = VECTORS["StoreFileManifest (encrypted)"]
@@ -177,6 +190,8 @@ class TestBuilders:
         dict(nonce=-1),
         dict(total_size="1048577"),
         dict(chunk_count=True),
+        dict(chunk_count=2**32),
+        dict(nonce=2**64),
         dict(content_hash=32),
     ])
     def test_manifest_refuses_values_the_transaction_cannot_carry(self, bad):
@@ -215,9 +230,12 @@ LINE_BREAK_CASES = [
 )
 def test_a_text_field_with_a_line_break_is_refused(builder, args, field):
     builder(**args)
-    for value in ("a\nb", "\n", "trailing\n"):
+    for value in ("a\nb", "\n", "trailing\n", "a\r\nb"):
         with pytest.raises(ValueError, match="line break"):
             builder(**dict(args, **{field: value}))
+    # Only the byte 0x0A is a line break, as the node reads it.
+    for value in ("a\rb", "a\u2028b", "a\u0085b"):
+        assert f": {value}\n" in builder(**dict(args, **{field: value}))
 
 
 def test_create_sign_message_refuses_a_line_break():
@@ -370,6 +388,28 @@ async def test_the_next_nonce_is_signed():
         delete_file_manifest_message(i["subgrove_id"], i["file_key"], i["owner_did"], i["nonce"] + 1),
         body, "Ed25519",
     )
+
+
+@pytest.mark.asyncio
+async def test_store_data_signs_non_ascii_text_and_a_large_nonce_as_sent():
+    vector = VECTORS["StoreData (non-ASCII, large nonce)"]
+    i = vector["inputs"]
+    client = _consensus_client(i["nonce"] - 1)
+    await client.store_data(
+        i["subgrove_id"], i["key"], json.loads(i["data_utf8"]), i["owner_did"], SEED, PUBLIC_KEY_ID
+    )
+
+    body = _only_submitted(client, "StoreData")
+    assert (body["key"], body["nonce"]) == (i["key"], i["nonce"])
+    message = store_data_message(
+        body["subgrove_id"], body["key"], body["owner_did"], bytes(body["data"]), body["nonce"]
+    )
+    assert _verifies(message, body, "Ed25519")
+    # The hash is over the data bytes sent: json.dumps escapes non-ASCII.
+    assert bytes(body["data"]) == b'{"msg":"h\\u00e9llo \\u4e16\\u754c"}'
+    sent_tx_type, sent_tx = _transaction(vector)
+    sent_tx.data = bytes(body["data"]).decode("utf-8")
+    assert create_sign_message(sent_tx_type, sent_tx) == message
 
 
 @pytest.mark.asyncio
