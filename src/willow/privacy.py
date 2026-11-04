@@ -285,8 +285,11 @@ class PrivacyOperations:
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
-            ValueError: A signed text field holds a line break, or a field is
-                out of range. Nothing is sent.
+            ValueError: A signed text field holds a line break, a field is
+                out of range, or the node would refuse the grant: the
+                subgrove ID is empty or holds ':', the grantee isn't a DID,
+                the ephemeral public key isn't 32 bytes, or the encrypted key
+                isn't 1 to 128 bytes. Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         tx = GrantSubgroveKeyTx(
@@ -319,6 +322,8 @@ class PrivacyOperations:
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
+            ValueError: The subgrove ID is empty or holds ':', or the revokee
+                isn't a DID: the node refuses either. Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         tx = RevokeSubgroveKeyTx(
@@ -357,8 +362,11 @@ class PrivacyOperations:
 
         Raises:
             NotAuthenticatedError: If the client is not authenticated.
-            ValueError: A signed text field holds a line break, or a field is
-                out of range. Nothing is sent.
+            ValueError: A signed text field holds a line break, a field is
+                out of range, or the node would refuse the rotation: the
+                subgrove ID is empty or holds ':', there are not 1 to 1000
+                grants, or a grant's grantee isn't a DID or its key material
+                isn't the size CheckTx takes. Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         tx = RotateSubgroveKeyTx(

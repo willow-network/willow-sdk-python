@@ -230,30 +230,41 @@ def _grant():
     return _transaction("GrantSubgroveKey")[1]["encrypted_key_grant"]
 
 
+# (name, build, a value the field takes, whether it takes any text without
+# a line break). A grantee must be a DID, and a grant's subgrove ID holds no
+# ':'; an indexing subgrove's ID is free text (a data or file subgrove's takes
+# no '\r', ' ', or ':').
 LINE_BREAK_CASES = [
-    # An indexing subgrove: a data or file subgrove's ID takes no '\r', ' ', or ':' either.
-    ("RegisterSubgrove subgrove_id", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (indexing)")[1], subgrove_id=v))),
-    ("RegisterSubgrove owner_did", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (data)")[1], owner_did=v))),
-    ("GrantSubgroveKey subgrove_id", lambda v: grant_subgrove_key_message(v, "did:willow:a", _grant(), 1)),
-    ("GrantSubgroveKey sender_did", lambda v: grant_subgrove_key_message("sg", v, _grant(), 1)),
-    ("GrantSubgroveKey grantee_did", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_did=v), 1)),
-    ("GrantSubgroveKey grantee_public_key_id", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_public_key_id=v), 1)),
-    ("GrantSubgroveKey granted_by", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), granted_by=v), 1)),
-    ("RotateSubgroveKey subgrove_id", lambda v: rotate_subgrove_key_message(v, "did:willow:a", 1, [_grant()], 1)),
-    ("RotateSubgroveKey sender_did", lambda v: rotate_subgrove_key_message("sg", v, 1, [_grant()], 1)),
-    ("RotateSubgroveKey grantee_did", lambda v: rotate_subgrove_key_message("sg", "did:willow:a", 1, [_grant(), dict(_grant(), grantee_did=v)], 1)),
-    ("UnregisterStorageNode node_did", lambda v: unregister_storage_node_message(v, 1)),
+    ("RegisterSubgrove subgrove_id", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (indexing)")[1], subgrove_id=v)), "did:willow:x", True),
+    ("RegisterSubgrove owner_did", lambda v: register_subgrove_message(dict(_transaction("RegisterSubgrove (data)")[1], owner_did=v)), "did:willow:x", True),
+    ("GrantSubgroveKey subgrove_id", lambda v: grant_subgrove_key_message(v, "did:willow:a", _grant(), 1), "sg-1", True),
+    ("GrantSubgroveKey sender_did", lambda v: grant_subgrove_key_message("sg", v, _grant(), 1), "did:willow:x", True),
+    ("GrantSubgroveKey grantee_did", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_did=v), 1), "did:willow:x", False),
+    ("GrantSubgroveKey grantee_public_key_id", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_public_key_id=v), 1), "did:willow:x", True),
+    ("GrantSubgroveKey granted_by", lambda v: grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), granted_by=v), 1), "did:willow:x", True),
+    ("RotateSubgroveKey subgrove_id", lambda v: rotate_subgrove_key_message(v, "did:willow:a", 1, [_grant()], 1), "sg-1", True),
+    ("RotateSubgroveKey sender_did", lambda v: rotate_subgrove_key_message("sg", v, 1, [_grant()], 1), "did:willow:x", True),
+    ("RotateSubgroveKey grantee_did", lambda v: rotate_subgrove_key_message("sg", "did:willow:a", 1, [_grant(), dict(_grant(), grantee_did=v)], 1), "did:willow:x", False),
+    ("UnregisterStorageNode node_did", lambda v: unregister_storage_node_message(v, 1), "did:willow:x", True),
 ]
 
 
-@pytest.mark.parametrize("build", [b for _, b in LINE_BREAK_CASES], ids=[n for n, _ in LINE_BREAK_CASES])
-def test_a_text_field_with_a_line_break_is_refused(build):
-    build("did:willow:x")
-    for value in ("a\nb", "\n", "trailing\n", "a\r\nb"):
+@pytest.mark.parametrize(
+    "build,valid,any_text",
+    [c[1:] for c in LINE_BREAK_CASES],
+    ids=[c[0] for c in LINE_BREAK_CASES],
+)
+def test_a_text_field_with_a_line_break_is_refused(build, valid, any_text):
+    build(valid)
+    for value in ("a\nb", "\n", "trailing\n", "a\r\nb", valid + "\n"):
         with pytest.raises(ValueError, match="line break"):
             build(value)
     for value in ("a\rb", "a b"):
-        build(value)
+        if any_text:
+            build(value)
+        else:
+            with pytest.raises(ValueError, match="not a DID"):
+                build(value)
 
 
 def test_registration_text_hashed_into_config_may_hold_a_line_break():
@@ -275,6 +286,91 @@ def test_revoke_keeps_the_nodes_message():
     assert revoke_subgrove_key_message("private-1", "did:willow:b", "did:willow:a", 4294967297) == (
         "RevokeSubgroveKey:private-1:did:willow:b:did:willow:a:4294967297"
     )
+
+
+# ---------------------------------------------------------------------------
+# The rules the node checks for grants, rotations, and revokes: refused
+# before anything is signed.
+# ---------------------------------------------------------------------------
+
+# Not DIDs the node takes: "did:willow:" then 1 or more ASCII letters,
+# digits, '-', or '_', at most 128 bytes.
+NOT_DIDS = [
+    "", "did:willow:", "did:key:a", "DID:willow:a", "did:willow:a:b", "did:willow:a b",
+    "did:willow:a.b", "did:willow:é", "did:willow:a\r", "did:willow:a#key-1",
+    "did:willow:" + "a" * 118,
+]
+LONGEST_DID = "did:willow:" + "a" * 117
+
+
+def test_the_longest_did_is_128_bytes():
+    assert len(LONGEST_DID.encode()) == 128
+
+
+@pytest.mark.parametrize("did", NOT_DIDS)
+def test_a_grant_or_rotation_to_a_grantee_that_isnt_a_did_is_refused(did):
+    with pytest.raises(ValueError, match="grantee_did .* not a DID"):
+        grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_did=did), 1)
+    with pytest.raises(ValueError, match=r"new_grants\[1\]\.grantee_did .* not a DID"):
+        rotate_subgrove_key_message("sg", "did:willow:a", 1, [_grant(), dict(_grant(), grantee_did=did)], 1)
+
+
+@pytest.mark.parametrize("did", NOT_DIDS)
+def test_a_revoke_of_or_by_a_did_that_isnt_one_is_refused(did):
+    with pytest.raises(ValueError, match="revokee_did .* not a DID"):
+        revoke_subgrove_key_message("sg", did, "did:willow:a", 1)
+    with pytest.raises(ValueError, match="sender_did .* not a DID"):
+        revoke_subgrove_key_message("sg", "did:willow:b", did, 1)
+
+
+def test_the_longest_did_is_taken():
+    grant_subgrove_key_message("sg", "did:willow:a", dict(_grant(), grantee_did=LONGEST_DID), 1)
+    rotate_subgrove_key_message("sg", "did:willow:a", 1, [dict(_grant(), grantee_did=LONGEST_DID)], 1)
+    revoke_subgrove_key_message("sg", LONGEST_DID, LONGEST_DID, 1)
+
+
+@pytest.mark.parametrize("subgrove_id,match", [("", "subgrove_id is required"), ("a:b", "must not contain ':'"), (":", "must not contain ':'")])
+def test_a_key_message_for_a_subgrove_id_the_node_refuses_is_refused(subgrove_id, match):
+    with pytest.raises(ValueError, match=match):
+        grant_subgrove_key_message(subgrove_id, "did:willow:a", _grant(), 1)
+    with pytest.raises(ValueError, match=match):
+        rotate_subgrove_key_message(subgrove_id, "did:willow:a", 1, [_grant()], 1)
+    with pytest.raises(ValueError, match=match):
+        revoke_subgrove_key_message(subgrove_id, "did:willow:b", "did:willow:a", 1)
+
+
+def test_a_grant_from_no_sender_is_refused():
+    with pytest.raises(ValueError, match="sender_did is required"):
+        grant_subgrove_key_message("sg", "", _grant(), 1)
+
+
+@pytest.mark.parametrize("field,size,ok", [
+    ("ephemeral_public_key", 31, False), ("ephemeral_public_key", 32, True), ("ephemeral_public_key", 33, False),
+    ("ephemeral_public_key", 0, False),
+    ("encrypted_key", 0, False), ("encrypted_key", 1, True), ("encrypted_key", 128, True), ("encrypted_key", 129, False),
+])
+def test_grant_key_material_takes_the_sizes_checktx_takes(field, size, ok):
+    grant = dict(_grant(), **{field: bytes(size)})
+    builds = [
+        lambda: grant_subgrove_key_message("sg", "did:willow:a", grant, 1),
+        lambda: rotate_subgrove_key_message("sg", "did:willow:a", 1, [_grant(), grant], 1),
+    ]
+    for build in builds:
+        if ok:
+            build()
+        else:
+            with pytest.raises(ValueError, match=field):
+                build()
+
+
+def test_a_rotation_takes_1_to_1000_grants():
+    with pytest.raises(ValueError, match="1 to 1000 grants, got 0"):
+        rotate_subgrove_key_message("sg", "did:willow:a", 1, [], 1)
+    grant = _grant()
+    message = rotate_subgrove_key_message("sg", "did:willow:a", 1, [grant] * 1000, 1)
+    assert "\nGrants: 1000\n" in message
+    with pytest.raises(ValueError, match="1 to 1000 grants, got 1001"):
+        rotate_subgrove_key_message("sg", "did:willow:a", 1, [grant] * 1001, 1)
 
 
 def test_a_new_nonce_is_a_new_message():
@@ -711,7 +807,98 @@ def test_the_storage_rules_leave_an_indexing_registration_alone():
     name = "RegisterSubgrove (indexing)"
     _, tx = _transaction(name)
     assert register_subgrove_message(tx) == VECTORS[name]["message"]
-    register_subgrove_message(dict(tx, subgrove_id="idx:2", schema=_INDEXED_SCHEMA))
+    register_subgrove_message(dict(tx, subgrove_id="idx:2", schema=_INDEXED_SCHEMA, admins=["admin"]))
+
+
+def _with_mode_list(tx, field, value):
+    tx = copy.deepcopy(tx)
+    ((_, mode),) = tx["mode"].items()
+    mode[field] = value
+    return tx
+
+
+@pytest.mark.parametrize("name", ["RegisterSubgrove (data)", "RegisterSubgrove (file)"])
+@pytest.mark.parametrize("did", NOT_DIDS)
+def test_a_storage_registration_whose_admins_writers_or_readers_arent_dids_is_not_signed(name, did):
+    _, tx = _transaction(name)
+    with pytest.raises(ValueError, match=r"admins\[1\] .* not a DID"):
+        register_subgrove_message(dict(tx, admins=["did:willow:b", did]))
+    with pytest.raises(ValueError, match=r"writers\[1\] .* not a DID"):
+        register_subgrove_message(_with_mode_list(tx, "writers", ["did:willow:a", did]))
+    with pytest.raises(ValueError, match=r"free_readers\[0\] .* not a DID"):
+        register_subgrove_message(_with_mode_list(tx, "free_readers", [did]))
+
+
+def test_a_storage_registration_takes_the_longest_did():
+    _, tx = _transaction("RegisterSubgrove (data)")
+    register_subgrove_message(_with_mode_list(dict(tx, admins=[LONGEST_DID]), "writers", [LONGEST_DID]))
+
+
+def _private(**grant):
+    name = "RegisterSubgrove (private, non-ASCII, large nonce)"
+    _, tx = _transaction(name)
+    return dict(tx, initial_owner_key_grant=dict(tx["initial_owner_key_grant"], **grant))
+
+
+def test_a_private_data_registration_grants_the_owner_key_epoch_0():
+    name = "RegisterSubgrove (private, non-ASCII, large nonce)"
+    assert register_subgrove_message(_private()) == VECTORS[name]["message"]
+    with pytest.raises(ValueError, match="key_epoch must be 0, got 1"):
+        register_subgrove_message(_private(key_epoch=1))
+    with pytest.raises(ValueError, match="must grant the owner"):
+        register_subgrove_message(_private(grantee_did="did:willow:b"))
+    with pytest.raises(ValueError, match="not a DID"):
+        register_subgrove_message(dict(_private(grantee_did="owner"), owner_did="owner"))
+
+
+def test_the_initial_grant_rules_apply_only_to_a_private_data_registration():
+    # Not private: the node stores no grant, so it checks none.
+    register_subgrove_message(dict(_private(key_epoch=1), privacy=None))
+    # A file subgrove stores no initial grant either.
+    _, file_tx = _transaction("RegisterSubgrove (file)")
+    _, private = _transaction("RegisterSubgrove (private, non-ASCII, large nonce)")
+    grant = dict(private["initial_owner_key_grant"], key_epoch=3, grantee_did="did:willow:b")
+    register_subgrove_message(dict(file_tx, privacy=private["privacy"], initial_owner_key_grant=grant))
+
+
+@pytest.mark.asyncio
+async def test_key_grants_the_node_refuses_are_not_sent():
+    client, seen = _willow_client(0)
+    with pytest.raises(ValueError, match="not a DID"):
+        await client.privacy.grant_subgrove_key("private-1", dict(_grant(), grantee_did="bob"))
+    with pytest.raises(ValueError, match="encrypted_key"):
+        await client.privacy.rotate_subgrove_key("private-1", 2, [dict(_grant(), encrypted_key=bytes(129))])
+    with pytest.raises(ValueError, match="must not contain ':'"):
+        await client.privacy.revoke_subgrove_key("private:1", "did:willow:b")
+    with pytest.raises(ValueError, match="revokee_did .* not a DID"):
+        await client.privacy.revoke_subgrove_key("private-1", "bob")
+    assert seen == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_registrations_the_node_refuses_are_not_sent():
+    client, seen = _willow_client(0)
+    request = {"subgrove_id": "sg-1", "name": "n", "owner_did": "did:willow:a", "schema": {"version": 1, "fields": {}}}
+    with pytest.raises(ValueError, match="writers.* not a DID"):
+        await client.registration.register_subgrove(dict(request, writers=["alice"]))
+    with pytest.raises(ValueError, match="free_readers.* not a DID"):
+        await client.registration.register_subgrove(dict(request, readers=["did:willow:a b"]))
+    assert seen == []
+    await client.close()
+
+    consensus = _consensus_client(0)
+    with pytest.raises(ValueError, match="admins.* not a DID"):
+        await consensus.register_subgrove("sg-1", "{}", "did:willow:a", SEED, PUBLIC_KEY_ID, admins=["root"])
+    _, private = _transaction("RegisterSubgrove (private, non-ASCII, large nonce)")
+    with pytest.raises(ValueError, match="key_epoch must be 0"):
+        await consensus.register_subgrove(
+            "private-1", private["schema"], "did:willow:a", SEED, PUBLIC_KEY_ID, private["mode"],
+            privacy=private["privacy"],
+            initial_owner_key_grant=dict(private["initial_owner_key_grant"], key_epoch=2),
+        )
+    assert consensus._session.submitted == []
+    assert consensus._session.read_nonces == 0
 
 
 @pytest.mark.asyncio

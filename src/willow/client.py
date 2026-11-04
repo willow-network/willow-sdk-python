@@ -594,9 +594,10 @@ class RegistrationOperations:
 
         Raises:
             ValueError: ``owner_did`` is not the client's identity, the
-                subgrove ID is not one the node takes, or the schema is
-                missing, declares indexes, has a type the node does not
-                take, or has a version outside u32. Nothing is sent.
+                subgrove ID is not one the node takes, a writer or reader
+                isn't a DID, or the schema is missing, declares indexes, has
+                a type the node does not take, or has a version outside u32.
+                Nothing is sent.
             TransactionError: CheckTx refused the transaction.
         """
         request = dict(request)

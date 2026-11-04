@@ -729,6 +729,53 @@ def register_subgrove_unsigned_bincode(tx: Any) -> bytes:
 # A subgrove ID the node takes for a data or file subgrove.
 _STORAGE_SUBGROVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
+# A DID where the node checks one: "did:willow:" then 1 or more ASCII
+# letters, digits, '-', or '_', at most 128 bytes in all.
+_DID = re.compile(r"did:willow:[A-Za-z0-9_-]+")
+_MAX_DID_BYTES = 128
+
+# The key material sizes CheckTx takes in a grant.
+_EPHEMERAL_KEY_BYTES = 32
+_MAX_ENCRYPTED_KEY_BYTES = 128
+_MAX_ROTATION_GRANTS = 1000
+
+
+def _did_rule(label: str, value: str) -> None:
+    """Refuse ``value`` unless it is a DID the node takes where it checks
+    one: ``did:willow:`` then 1 or more ASCII letters, digits, ``-``, or
+    ``_``, at most 128 bytes."""
+    if not (_DID.fullmatch(value) and len(value) <= _MAX_DID_BYTES):
+        raise ValueError(
+            f"{label} {value!r} is not a DID the node takes: 'did:willow:' then 1 or more "
+            f"ASCII letters, digits, '-', or '_', at most {_MAX_DID_BYTES} bytes"
+        )
+
+
+def _key_subgrove_rule(label: str, subgrove_id: str) -> None:
+    """Refuse a key grant, rotation, or revoke's subgrove ID the node
+    refuses: empty, or holding ':'."""
+    if not subgrove_id:
+        raise ValueError(f"{label} is required")
+    if ":" in subgrove_id:
+        raise ValueError(f"{label} must not contain ':'")
+
+
+def _grant_rules(label: str, grant: Dict[str, Any]) -> None:
+    """Refuse a grant CheckTx or its block refuses: a grantee that isn't a
+    DID (a revoke could not remove it), an ephemeral public key that isn't
+    32 bytes, or an encrypted key that isn't 1 to 128 bytes."""
+    _did_rule(f"{label}.grantee_did", grant["grantee_did"])
+    if len(grant["ephemeral_public_key"]) != _EPHEMERAL_KEY_BYTES:
+        raise ValueError(
+            f"{label}.ephemeral_public_key must be exactly {_EPHEMERAL_KEY_BYTES} bytes, "
+            f"got {len(grant['ephemeral_public_key'])}"
+        )
+    if not 1 <= len(grant["encrypted_key"]) <= _MAX_ENCRYPTED_KEY_BYTES:
+        raise ValueError(
+            f"{label}.encrypted_key must be 1 to {_MAX_ENCRYPTED_KEY_BYTES} bytes, "
+            f"got {len(grant['encrypted_key'])}"
+        )
+
 
 # The field types of the node's ``SchemaDefinition`` (``FieldType``, lowercase).
 SCHEMA_FIELD_TYPES = ("string", "number", "boolean", "array", "object", "bytes")
@@ -789,9 +836,10 @@ def _schema_definition_rules(text: str) -> None:
 def _storage_registration_rules(t: Dict[str, Any]) -> None:
     """Refuse a DataStorage or FileStorage registration the node refuses: a
     subgrove ID that isn't 1 to 64 ASCII letters, digits, ``-``, or ``_``
-    starting with a letter or digit, or a schema that doesn't parse as the
-    node's ``SchemaDefinition`` (see ``_schema_definition_rules``) or that
-    declares indexes."""
+    starting with a letter or digit, admins, writers, or free readers that
+    aren't DIDs, or a schema that doesn't parse as the node's
+    ``SchemaDefinition`` (see ``_schema_definition_rules``) or that declares
+    indexes."""
     if "BlockchainIndexing" in t["mode"]:
         return
     if not _STORAGE_SUBGROVE_ID.fullmatch(t["subgrove_id"]):
@@ -799,7 +847,29 @@ def _storage_registration_rules(t: Dict[str, Any]) -> None:
             f"subgrove_id {t['subgrove_id']!r} is not one the node takes: 1 to 64 ASCII "
             "letters, digits, '-', or '_', starting with a letter or digit"
         )
+    for i, admin in enumerate(t["admins"]):
+        _did_rule(f"admins[{i}]", admin)
+    ((kind, mode),) = t["mode"].items()
+    for i, writer in enumerate(mode["writers"]):
+        _did_rule(f"{kind}.writers[{i}]", writer)
+    for i, reader in enumerate(mode["free_readers"]):
+        _did_rule(f"{kind}.free_readers[{i}]", reader)
     _schema_definition_rules(t["schema"])
+
+
+def _initial_grant_rules(t: Dict[str, Any]) -> None:
+    """Refuse a private DataStorage registration whose
+    ``initial_owner_key_grant`` the node refuses: the grant must give the
+    owner the subgrove's first key, key epoch 0, and the owner must be a
+    DID."""
+    grant = t["initial_owner_key_grant"]
+    if "DataStorage" not in t["mode"] or t["privacy"] is None or grant is None:
+        return
+    if grant["key_epoch"] != 0:
+        raise ValueError(f"initial_owner_key_grant key_epoch must be 0, got {grant['key_epoch']}")
+    if grant["grantee_did"] != t["owner_did"]:
+        raise ValueError("initial_owner_key_grant must grant the owner (grantee_did is owner_did)")
+    _did_rule("initial_owner_key_grant.grantee_did", grant["grantee_did"])
 
 
 def register_subgrove_message(tx: Any) -> str:
@@ -816,11 +886,15 @@ def register_subgrove_message(tx: Any) -> str:
     ``normalize_register_subgrove(tx)`` and sign this message over it.
 
     Raises:
-        ValueError: A field is out of range or a line holds a line break, or
-            a DataStorage or FileStorage registration has a subgrove ID the
+        ValueError: A field is out of range or a line holds a line break; a
+            DataStorage or FileStorage registration has a subgrove ID the
             node refuses (not 1 to 64 ASCII letters, digits, ``-``, or ``_``
-            starting with a letter or digit), or a schema that doesn't parse
-            as the node's ``SchemaDefinition`` or declares indexes.
+            starting with a letter or digit), admins, writers, or free
+            readers that aren't DIDs (``did:willow:`` then 1 or more ASCII
+            letters, digits, ``-``, or ``_``, at most 128 bytes), or a schema
+            that doesn't parse as the node's ``SchemaDefinition`` or declares
+            indexes; or a private DataStorage registration's
+            ``initial_owner_key_grant`` is not key epoch 0 to the owner.
     """
     t = normalize_register_subgrove(tx)
     lines = [
@@ -829,6 +903,7 @@ def register_subgrove_message(tx: Any) -> str:
         _field("Owner", t["owner_did"]),
     ]
     _storage_registration_rules(t)
+    _initial_grant_rules(t)
     config = hashlib.sha256(register_subgrove_unsigned_bincode(t)).hexdigest()
     return "\n".join(lines + [f"Config: {config}", f"Nonce: {t['nonce']}"])
 
@@ -862,12 +937,26 @@ def grant_subgrove_key_message(subgrove_id: str, sender_did: str, grant: Any, no
         GrantedBy: <granted_by>
         GrantedAt: <granted_at>
         Nonce: <nonce>
+
+    Raises:
+        ValueError: A line holds a line break or a field is out of range, or
+            a rule the node checks fails: the subgrove ID is empty or holds
+            ':', the sender is empty, the grantee isn't a DID
+            (``did:willow:`` then 1 or more ASCII letters, digits, ``-``, or
+            ``_``, at most 128 bytes), the ephemeral public key isn't 32
+            bytes, or the encrypted key isn't 1 to 128 bytes.
     """
-    return "\n".join(
+    g = _key_grant("grant", grant)
+    lines = (
         ["GrantSubgroveKey", _field("Subgrove", subgrove_id), _field("Sender", sender_did)]
-        + _grant_lines(_key_grant("grant", grant))
+        + _grant_lines(g)
         + [f"Nonce: {_unsigned('Nonce', nonce)}"]
     )
+    _key_subgrove_rule("subgrove_id", subgrove_id)
+    if not sender_did:
+        raise ValueError("sender_did is required")
+    _grant_rules("grant", g)
+    return "\n".join(lines)
 
 
 def rotate_subgrove_key_message(
@@ -882,6 +971,13 @@ def rotate_subgrove_key_message(
         Grants: <number of new_grants>
         <each grant's seven lines, Grantee to GrantedAt, in order>
         Nonce: <nonce>
+
+    Raises:
+        ValueError: A line holds a line break or a field is out of range, or
+            a rule the node checks fails: the subgrove ID is empty or holds
+            ':', there are not 1 to 1000 grants, or a grant's grantee isn't
+            a DID, its ephemeral public key isn't 32 bytes, or its encrypted
+            key isn't 1 to 128 bytes.
     """
     if isinstance(new_grants, (str, bytes, Mapping)) or not isinstance(new_grants, (list, tuple)):
         raise TypeError("new_grants must be a list of grants")
@@ -892,19 +988,37 @@ def rotate_subgrove_key_message(
         f"NewEpoch: {_unsigned('NewEpoch', new_epoch, _U32_MAX)}",
         f"Grants: {len(new_grants)}",
     ]
-    for i, grant in enumerate(new_grants):
-        lines += _grant_lines(_key_grant(f"new_grants[{i}]", grant))
-    return "\n".join(lines + [f"Nonce: {_unsigned('Nonce', nonce)}"])
+    grants = [_key_grant(f"new_grants[{i}]", grant) for i, grant in enumerate(new_grants)]
+    for grant in grants:
+        lines += _grant_lines(grant)
+    lines.append(f"Nonce: {_unsigned('Nonce', nonce)}")
+    _key_subgrove_rule("subgrove_id", subgrove_id)
+    if not 1 <= len(grants) <= _MAX_ROTATION_GRANTS:
+        raise ValueError(f"new_grants must hold 1 to {_MAX_ROTATION_GRANTS} grants, got {len(grants)}")
+    for i, grant in enumerate(grants):
+        _grant_rules(f"new_grants[{i}]", grant)
+    return "\n".join(lines)
 
 
 def revoke_subgrove_key_message(subgrove_id: str, revokee_did: str, sender_did: str, nonce: int) -> str:
     """The message a RevokeSubgroveKey transaction is signed over:
     ``RevokeSubgroveKey:<subgrove_id>:<revokee_did>:<sender_did>:<nonce>``.
-    It binds every field the transaction carries."""
-    return (
+    It binds every field the transaction carries.
+
+    Raises:
+        ValueError: The subgrove ID is empty or holds ':', or the revokee or
+            sender isn't a DID (``did:willow:`` then 1 or more ASCII letters,
+            digits, ``-``, or ``_``, at most 128 bytes): the node refuses
+            these, so the message splits one way.
+    """
+    message = (
         f"RevokeSubgroveKey:{_text('subgrove_id', subgrove_id)}:{_text('revokee_did', revokee_did)}"
         f":{_text('sender_did', sender_did)}:{_unsigned('Nonce', nonce)}"
     )
+    _key_subgrove_rule("subgrove_id", subgrove_id)
+    _did_rule("revokee_did", revokee_did)
+    _did_rule("sender_did", sender_did)
+    return message
 
 
 def unregister_storage_node_message(node_did: str, nonce: int) -> str:

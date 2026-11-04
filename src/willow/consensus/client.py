@@ -169,9 +169,12 @@ class ConsensusClient:
         Raises:
             ValueError, TypeError: A field is missing or out of range, the
                 subgrove ID or owner DID holds a line break, or, for a data or
-                file subgrove, the subgrove ID is not one the node takes or
-                the schema does not parse as the node's ``SchemaDefinition``
-                (or declares indexes); nothing is sent.
+                file subgrove, the subgrove ID is not one the node takes, the
+                admins, writers, or free readers aren't DIDs, or the schema
+                does not parse as the node's ``SchemaDefinition`` (or
+                declares indexes), or a private data subgrove's
+                ``initial_owner_key_grant`` is not key epoch 0 to the owner;
+                nothing is sent.
         """
         tx = RegisterSubgroveTx(
             subgrove_id=subgrove_id,
