@@ -11,6 +11,8 @@ import pytest
 
 from willow import ProofVerificationError, UnsupportedError, WillowClient
 from willow.auth import generate_did
+from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash, value_hash
+from willow.grovedb.types import NULL_HASH
 from willow.types import HistoricalQueryResponse, QueryResponse
 
 with open(os.path.join(os.path.dirname(__file__), "fixtures", "grovedb_proofs.json")) as f:
@@ -84,6 +86,55 @@ async def test_get_raises_unless_the_proof_binds_the_value_served(kwargs, match)
     with pytest.raises(ProofVerificationError, match=match):
         await client.data.get("my-sub", "user:bob")
     await client.close()
+
+
+def _varint(n):
+    return bytes([n]) if n < 251 else b"\xfb" + n.to_bytes(2, "big")
+
+
+def _layer(merk, lowers=()):
+    out = _varint(len(merk)) + merk + _varint(len(lowers))
+    for key, lower in lowers:
+        out += _varint(len(key)) + key + lower
+    return out
+
+
+def _bobs_proof(element, data_merk=None):
+    """A proof that user:bob holds ``element`` under subgroves/my-sub/data
+    (whose merk proof is ``data_merk`` when given), and its root."""
+    key = b"user:bob"
+    layer = _layer(data_merk or b"\x03" + bytes([len(key)]) + key + len(element).to_bytes(2, "big") + element)
+    root = node_hash(kv_hash(key, element), NULL_HASH, NULL_HASH)
+    below = key
+    for segment in (b"data", b"my-sub", b"subgroves"):
+        tree = b"\x02\x01" + bytes([len(below)]) + below + b"\x00"
+        vh = combine_hash(value_hash(tree), root)
+        merk = b"\x04" + bytes([len(segment)]) + segment + len(tree).to_bytes(2, "big") + tree + vh
+        layer = _layer(merk, [(segment, layer)])
+        root = node_hash(kv_digest_to_kv_hash(segment, vh), NULL_HASH, NULL_HASH)
+        below = segment
+    return b"\x00" + layer + b"\x01", root
+
+
+@pytest.mark.asyncio
+async def test_get_fails_closed_on_a_malformed_proof():
+    payload = b'{"balance":250}'
+    proof, root = _bobs_proof(b"\x00" + bytes([len(payload)]) + payload + b"\x00")
+    client, _ = _get_client(proof={"proof": proof.hex(), "height": 1}, root=root)
+    assert await client.data.get("my-sub", "user:bob") == {"balance": 250}
+    await client.close()
+
+    deep = b"[" * 5000 + b"]" * 5000
+    deep_item, deep_root = _bobs_proof(b"\x00\xfb" + len(deep).to_bytes(2, "big") + deep + b"\x00")
+    for proof, root, match in (
+        (_bobs_proof(b"", data_merk=b"\x03")[0], BOB_ROOT, "Unexpected end"),  # a KV op cut short
+        (b"\x00" + b"\x00\x01\x01k" * 5000 + b"\x00\x00\x01", BOB_ROOT, "nest deeper"),
+        (deep_item, deep_root, "Proof verification failed"),  # JSON nested too deep to parse
+    ):
+        client, _ = _get_client(proof={"proof": proof.hex(), "height": 1}, root=root)
+        with pytest.raises(ProofVerificationError, match=match):
+            await client.data.get("my-sub", "user:bob")
+        await client.close()
 
 
 @pytest.mark.asyncio

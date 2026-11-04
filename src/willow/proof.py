@@ -120,10 +120,9 @@ def _value_matches(expected: Any, payload: bytes) -> bool:
     if isinstance(expected, (bytes, bytearray)):
         return bytes(expected) == payload
     try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        return json_values_equal(expected, json.loads(payload.decode("utf-8")))
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return False
-    return json_values_equal(expected, decoded)
 
 
 def _path_of(path: Union[None, PathQueryData, List[PathSegment]]) -> Optional[List[PathSegment]]:

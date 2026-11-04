@@ -137,16 +137,30 @@ class BincodeReader:
         return result
 
 
-def decode_layer_proof(reader: BincodeReader) -> LayerProof:
+# A proof nests one layer below another per path segment. A deeper proof
+# is refused, not recursed into.
+MAX_LAYER_DEPTH = 64
+
+
+def decode_layer_proof(reader: BincodeReader, depth: int = 0) -> LayerProof:
     """
     Decode a LayerProof from bincode.
 
     Args:
         reader: BincodeReader instance
+        depth: How many layers this one is nested below the root layer
 
     Returns:
         Decoded LayerProof
+
+    Raises:
+        GroveDBVerificationError: The bytes are not a LayerProof, or nest
+            layers more than ``MAX_LAYER_DEPTH`` deep.
     """
+    if depth > MAX_LAYER_DEPTH:
+        raise GroveDBVerificationError(
+            f"Proof layers nest deeper than {MAX_LAYER_DEPTH} levels"
+        )
     # merk_proof: Vec<u8>
     merk_proof = reader.read_bytes()
 
@@ -160,7 +174,7 @@ def decode_layer_proof(reader: BincodeReader) -> LayerProof:
         key_hex = bytes_to_hex(key)
 
         # Value is LayerProof (recursive)
-        layer_proof = decode_layer_proof(reader)
+        layer_proof = decode_layer_proof(reader, depth + 1)
 
         lower_layers[key_hex] = layer_proof
 

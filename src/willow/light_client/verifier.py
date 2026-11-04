@@ -318,9 +318,9 @@ class ProofVerifier:
         """
         try:
             _, item = verify_item_at_path(proof_bytes, path, key, trusted_root)
-        except GroveDBVerificationError:
+            return item.value == bytes(value)
+        except Exception:
             return False
-        return item.value == bytes(value)
 
     def verify_absence_proof(
         self,

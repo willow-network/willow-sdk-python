@@ -5,6 +5,7 @@ Main entry point for verifying GroveDB proofs.
 Handles nested layer verification and returns proven results.
 """
 
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from .types import (
@@ -92,12 +93,28 @@ def verify_grovedb_proof(
 
     Returns:
         Verification result with root hash and proven values
+
+    Raises:
+        GroveDBVerificationError: The proof is malformed or invalid.
     """
     if options is None:
         options = VerifyOptions()
 
-    proof = decode_grovedb_proof(proof_bytes)
-    return _verify_proof(proof, options)
+    with _fail_closed():
+        proof = decode_grovedb_proof(proof_bytes)
+        return _verify_proof(proof, options)
+
+
+@contextmanager
+def _fail_closed():
+    """Raise any error checking a proof as a GroveDBVerificationError, so
+    a malformed proof fails as an invalid one does."""
+    try:
+        yield
+    except GroveDBVerificationError:
+        raise
+    except Exception as e:
+        raise GroveDBVerificationError(f"Malformed proof: {type(e).__name__}: {e}") from e
 
 
 def _verify_proof(
@@ -471,9 +488,13 @@ def quick_verify(proof_bytes: bytes) -> CryptoHash:
 
     Returns:
         Root hash of the proof
+
+    Raises:
+        GroveDBVerificationError: The proof is malformed or invalid.
     """
-    proof = decode_grovedb_proof(proof_bytes)
-    return _quick_verify_layer(proof.proof.root_layer)
+    with _fail_closed():
+        proof = decode_grovedb_proof(proof_bytes)
+        return _quick_verify_layer(proof.proof.root_layer)
 
 
 def _quick_verify_layer(layer_proof: LayerProof) -> CryptoHash:

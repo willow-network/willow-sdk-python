@@ -305,14 +305,26 @@ class DataOperations:
             authenticated=True,
             read=True,
         )
-        data = data_response.get("data")
-
         proof_response = await self.client._request(
             "GET",
             f"/proof/{subgrove_id}/{key}",
             authenticated=True,
             read=True,
         )
+        try:
+            return await self._verified_value(subgrove_id, key, data_response, proof_response)
+        except ProofVerificationError:
+            raise
+        except Exception as e:
+            # A malformed answer fails as an unverified one does.
+            raise ProofVerificationError(f"Proof verification failed for key {key!r}: {e}") from e
+
+    async def _verified_value(
+        self, subgrove_id: str, key: str, data_response: Any, proof_response: Any
+    ) -> Any:
+        """The value ``data.get`` returns from the API's two answers, or
+        ``ProofVerificationError``."""
+        data = data_response.get("data")
         proof = proof_response.get("data")
         proof_hex = proof.get("proof") if isinstance(proof, dict) else None
         if not isinstance(proof_hex, str) or not proof_hex:

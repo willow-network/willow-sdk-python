@@ -21,7 +21,7 @@ from willow.grovedb import (
     verify_item_at_path,
     verify_items_at_path,
 )
-from willow.grovedb.bincode import BincodeReader
+from willow.grovedb.bincode import MAX_LAYER_DEPTH, BincodeReader
 from willow.grovedb.element import deserialize_element
 from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash
 from willow.grovedb.types import NULL_HASH, ItemElement, LayerProof, ReferenceElement, SumItemElement
@@ -135,6 +135,48 @@ def test_elements_decode_from_grovedbs_encoding():
 def test_trailing_bytes_after_a_proof_are_refused():
     with pytest.raises(GroveDBVerificationError, match="Trailing bytes"):
         decode_grovedb_proof(BOB_PROOF + b"\x00")
+
+
+@pytest.mark.parametrize("merk", [
+    b"\x03", b"\x04", b"\x05", b"\x06", b"\x07", b"\x0a", b"\x0b", b"\x0c", b"\x0d", b"\x0e",
+    b"\x07\x01k\x00\x00" + bytes(32),  # KVValueHashFeatureType without its feature type
+])
+def test_a_merk_op_cut_short_is_refused(merk):
+    proof = b"\x00" + _varint(len(merk)) + merk + b"\x00\x01"
+    for verify in (quick_verify, verify_grovedb_proof):
+        with pytest.raises(GroveDBVerificationError, match="Unexpected end"):
+            verify(proof)
+
+
+def _nested(levels):
+    """A proof of ``levels`` layers, each with an empty merk proof and one
+    lower layer under "k"."""
+    return b"\x00" + b"\x00\x01\x01k" * levels + b"\x00\x00" + b"\x01"
+
+
+def test_layers_nested_past_the_limit_are_refused():
+    decode_grovedb_proof(_nested(MAX_LAYER_DEPTH))
+    for proof in (_nested(MAX_LAYER_DEPTH + 1), _nested(5000)):
+        for verify in (decode_grovedb_proof, quick_verify, verify_grovedb_proof):
+            with pytest.raises(GroveDBVerificationError, match="nest deeper"):
+                verify(proof)
+        with pytest.raises(GroveDBVerificationError, match="nest deeper"):
+            verify_item_at_path(proof, ["k"], "k")
+        assert not ProofVerifier.verify_item_proof(proof.hex(), "k", b"v", ["k"]).valid
+        assert not LightClientProofVerifier().verify_inclusion_proof(b"k", b"v", proof, bytes(32), ["k"])
+
+
+def test_any_error_checking_a_proof_is_a_verification_error():
+    for verify in (quick_verify, verify_grovedb_proof):
+        with pytest.raises(GroveDBVerificationError, match="Malformed proof"):
+            verify("not bytes")
+    v = LightClientProofVerifier()
+    assert not v.verify_inclusion_proof(b"user:bob", "not bytes", BOB_PROOF, BOB_ROOT, BOB["path"])
+    assert not v.verify_inclusion_proof(b"user:bob", b"v", "not bytes", BOB_ROOT, BOB["path"])
+    deep = b"[" * 5000 + b"]" * 5000
+    assert not ProofVerifier.verify_item_proof(
+        _single_item_proof(_item(deep)).hex(), "k", {"a": 1}, ["d"]
+    ).valid
 
 
 def test_a_deep_partial_proof_is_not_refused_as_unbalanced():
