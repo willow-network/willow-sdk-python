@@ -591,22 +591,25 @@ async def test_register_did_that_may_have_reached_the_node_is_resubmitted():
     await client.close()
 
 
-def _with_rpc(client, node, fail=False):
-    """Serve the ABCI nonce-state query from ``node`` at http://rpc.test."""
-    api = client._http._transport.handler if hasattr(client._http._transport, "handler") else node.handler
-    reads = []
+def _rpc_handler(node, reads, fail=False):
+    """The ABCI nonce-state query answered from ``node``."""
 
     def handler(request):
-        if request.url.host == "rpc.test":
-            reads.append(json.loads(request.content)["params"]["path"])
-            if fail:
-                return httpx.Response(503)
-            value = base64.b64encode(node.nonce_state()).decode()
-            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"response": {"code": 0, "value": value}}})
-        return api(request)
+        assert request.url.host == "rpc.test"
+        reads.append(json.loads(request.content)["params"]["path"])
+        if fail:
+            return httpx.Response(503)
+        value = base64.b64encode(node.nonce_state()).decode()
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"response": {"code": 0, "value": value}}})
 
+    return handler
+
+
+def _with_rpc(client, node, fail=False):
+    """Serve the ABCI nonce-state query from ``node`` at http://rpc.test."""
+    reads = []
     client.consensus_rpc_url = "http://rpc.test"
-    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(_rpc_handler(node, reads, fail)))
     return reads
 
 
@@ -626,6 +629,34 @@ async def test_wait_until_landed_sees_a_nonce_above_a_gap_with_the_rpc_url():
     # A write takes the free nonce below, not one the node reports used.
     assert (await client.data.store_item("sg", "a", {}))["nonce"] == 2
     assert (await client.data.store_item("sg", "b", {}))["nonce"] == 4
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_the_api_key_goes_to_the_api_and_not_to_the_consensus_rpc(monkeypatch):
+    info = generate_did()
+    node = FakeNode(info["did"], base=1, used={3})
+    reads, seen = [], []
+    rpc = _rpc_handler(node, reads)
+    real_async_client = httpx.AsyncClient
+
+    def handler(request):
+        seen.append((request.url.host, request.headers.get("X-API-Key")))
+        return rpc(request) if request.url.host == "rpc.test" else node.handler(request)
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    client = WillowClient("http://api.test", api_key="wk_secret", consensus_rpc_url="http://rpc.test")
+    client.set_identity(info["did"], info["private_key"], info["public_key_id"])
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 2
+    await client.wait_until_landed({"did": node.did, "nonce": 3}, timeout=0)
+    assert reads == [f"/store/account_nonce_state/{node.did}"] * 2
+    assert ("rpc.test", None) in seen and ("api.test", "wk_secret") in seen
+    assert all(key is None for host, key in seen if host == "rpc.test")
+    assert all(key == "wk_secret" for host, key in seen if host == "api.test")
     await client.close()
 
 

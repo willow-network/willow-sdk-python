@@ -1073,7 +1073,8 @@ class WillowClient:
                 ``/store/account_nonce_state/{did}``), so
                 ``wait_until_landed`` sees a write land even while a lower
                 nonce is unused. Without it, the client reads only the base
-                (``GET /account/{did}/nonce``).
+                (``GET /account/{did}/nonce``). Requests to it carry no
+                ``X-API-Key``.
         """
         self.api_url = api_url.rstrip("/")
         self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
@@ -1119,6 +1120,8 @@ class WillowClient:
         # merged on top at call sites and do not replace the default.
         default_headers = {"X-API-Key": api_key} if api_key else {}
         self._http = httpx.AsyncClient(timeout=timeout, headers=default_headers)
+        # The consensus RPC is another host: its requests carry no API key.
+        self._rpc_http = httpx.AsyncClient(timeout=timeout)
 
         # Client-side completeness checks. The on-chain anchor is read from the
         # validator's CometBFT RPC (derived from api_url, typically :3031 ->
@@ -1164,6 +1167,7 @@ class WillowClient:
     async def close(self):
         """Close HTTP client."""
         await self._http.aclose()
+        await self._rpc_http.aclose()
 
     async def health(self) -> HealthStatus:
         """Check API health status.
@@ -1590,8 +1594,8 @@ class WillowClient:
 
     async def _query_nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
         """The ABCI query ``/store/account_nonce_state/{did}`` (see
-        ``parse_nonce_state``)."""
-        response = await self._http.post(
+        ``parse_nonce_state``), sent without the API key."""
+        response = await self._rpc_http.post(
             self.consensus_rpc_url or "",
             json={
                 "jsonrpc": "2.0",
