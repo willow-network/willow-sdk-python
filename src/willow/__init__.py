@@ -21,11 +21,26 @@ Example usage:
                 did_info["public_key_id"]
             )
 
-            # Register it (pre-fund the derived DID with the fee first)
-            await client.register_did(did_info["did_document"])
+            # Register it (pre-fund the derived DID with the fees first), and
+            # wait for it to land: the DID can sign nothing before it does
+            registration = await client.register_did(did_info["did_document"])
+            await client.wait_until_landed(registration)
 
-            # Store a JSON object under a key (a StoreData transaction)
-            await client.data.store("my-data", {"key": {"value": 1}})
+            # Register a subgrove it owns and writes to, and wait for it
+            subgrove = await client.registration.register_subgrove({
+                "dataset_id": "my-data",
+                "name": "My Data",
+                "schema": {"version": 1, "fields": {"value": {"type": "number"}}},
+                "owner_did": did_info["did"],
+                "writers": [did_info["did"]],
+                "readers": [],
+            })
+            await client.wait_until_landed(subgrove)
+
+            # Store a JSON object under a key (a StoreData transaction), and
+            # wait for it to land: a write returns once CheckTx accepts it
+            writes = await client.data.store("my-data", {"key": {"value": 1}})
+            await client.wait_until_landed(writes)
 
             # Read it back, verified against its proof and the consensus
             # node's header (raises ProofVerificationError when it can't be

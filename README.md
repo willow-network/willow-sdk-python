@@ -46,17 +46,34 @@ async def main():
             did_info["public_key_id"],
         )
 
-        # 3. Register the DID (pre-fund it with the registration fee first),
+        # 3. Register the DID (pre-fund it with the registration fees first),
         #    and wait for it to land: the DID can sign nothing before it does
         registration = await client.register_did(did_info["did_document"])
         await client.wait_until_landed(registration)
 
-        # 4. Store data: one StoreData transaction per key
-        await client.data.store("users", {
+        # 4. Register a subgrove the DID owns and writes to, and wait for it
+        #    to land before storing into it
+        subgrove = await client.registration.register_subgrove({
+            "dataset_id": "users",
+            "name": "Users",
+            "schema": {
+                "version": 1,
+                "fields": {"name": {"type": "string"}, "email": {"type": "string"}},
+            },
+            "owner_did": did_info["did"],
+            "writers": [did_info["did"]],
+            "readers": [],
+        })
+        await client.wait_until_landed(subgrove)
+
+        # 5. Store data: one StoreData transaction per key. A write returns
+        #    once CheckTx accepts it; wait for it to land before reading it
+        writes = await client.data.store("users", {
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
+        await client.wait_until_landed(writes)
 
-        # 5. Read it back, verified against its proof and the consensus
+        # 6. Read it back, verified against its proof and the consensus
         #    node's header (see What the SDK verifies);
         #    ProofVerificationError when it can't be verified
         user = await client.data.get("users", "user_1")
@@ -364,7 +381,8 @@ await client.data.batch_store("subgrove_id", [
     {"key": "key4", "value": {"field": "value4"}},
 ])
 
-# Get a single item, verified against its proof and the headers of the
+# Get a single item (once the write that stored it has landed: see Waiting
+# for writes to land), verified against its proof and the headers of the
 # consensus node you configure (consensus_rpc_url); ProofVerificationError
 # when it can't be verified, ProofHeightOutOfRangeError when it's stale
 item = await client.data.get("subgrove_id", "key1")
