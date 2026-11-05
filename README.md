@@ -109,7 +109,9 @@ from willow import WillowClient, RetryConfig
 # Simple
 client = WillowClient("http://localhost:3031")
 
-# With custom timeout
+# With custom timeout: the seconds each step of a request (connecting,
+# sending, each read of the answer) may take; a request as a whole ends
+# within three times that, however slowly the server answers
 client = WillowClient(api_url="http://localhost:3031", timeout=60.0)
 
 # With the CometBFT RPC of a node you trust: data.get verifies against its

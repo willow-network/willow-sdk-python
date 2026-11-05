@@ -1045,7 +1045,8 @@ class WillowClientBuilder:
         self._max_proof_lag_blocks = DEFAULT_MAX_PROOF_LAG_BLOCKS
 
     def timeout(self, timeout: float) -> "WillowClientBuilder":
-        """Set request timeout in seconds."""
+        """Set the seconds each step of a request may take; a request as a
+        whole ends within three times that (see ``WillowClient``)."""
         self._timeout = timeout
         return self
 
@@ -1139,7 +1140,10 @@ class WillowClient:
 
         Args:
             api_url: Base URL for Willow API
-            timeout: Request timeout in seconds
+            timeout: Seconds each step of a request may take (connecting,
+                sending, each read of the answer). A request as a whole
+                ends within three times that (``willow._body.DEADLINE_FACTOR``),
+                however slowly the server answers, raising ``NetworkError``.
             retry_config: Optional retry configuration
             proof_verification_options: Optional configuration of the global
                 proof verifier (``ProofVerifier``, ``verify_item_proof``,

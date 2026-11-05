@@ -18,8 +18,9 @@ where the node bounds that answer; where the request sets an answer's size
 is ``LARGE``, and an answer past it is refused: ask for less.
 """
 
+import asyncio
 import json
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import httpx
 
@@ -56,6 +57,13 @@ BLOCK = 32 << 20
 #: answers (proofs of as many slots as asked for).
 LARGE = 64 << 20
 
+#: A request through ``send`` ends within this many times its client's
+#: timeout (the longest of its connect, read, write, and pool timeouts):
+#: httpx's timeout bounds each step, not the request, so a server that sends
+#: one byte at a time, each within the timeout, could keep it pending
+#: without end.
+DEADLINE_FACTOR = 3
+
 _DROPPED_HEADERS = (b"content-encoding", b"content-length", b"transfer-encoding")
 
 
@@ -72,12 +80,15 @@ async def send(
     http: httpx.AsyncClient, method: str, url: str, *, limit: int, **kwargs: Any
 ) -> httpx.Response:
     """``http.request(method, url, **kwargs)``, asking for the answer
-    unencoded and reading at most ``limit`` bytes of its body.
+    unencoded and reading at most ``limit`` bytes of its body, within
+    ``DEADLINE_FACTOR`` times ``http``'s timeout.
 
     The response returned holds the body as sent, so ``json()``, ``text``,
     and ``raise_for_status()`` work as on any response.
 
     Raises:
+        httpx.ReadTimeout: No whole answer came within the deadline (the
+            request may have reached the server).
         ResponseEncodingError: The answer names a ``Content-Encoding`` other
             than ``identity``. Nothing of its body is read.
         ResponseTooLargeError: The body is longer than ``limit`` bytes, as
@@ -88,6 +99,25 @@ async def send(
     headers = httpx.Headers(kwargs.pop("headers", None))
     headers["Accept-Encoding"] = "identity"
     request = http.build_request(method, url, headers=headers, **kwargs)
+    deadline = _deadline(http)
+    try:
+        return await asyncio.wait_for(_read(http, request, limit), deadline)
+    except asyncio.TimeoutError:
+        raise httpx.ReadTimeout(
+            f"no whole answer within {deadline:g} s", request=request
+        ) from None
+
+
+def _deadline(http: httpx.AsyncClient) -> Optional[float]:
+    """``DEADLINE_FACTOR`` times ``http``'s longest timeout; ``None`` when it
+    has none."""
+    timeout = http.timeout
+    steps = [t for t in (timeout.connect, timeout.read, timeout.write, timeout.pool) if t is not None]
+    return DEADLINE_FACTOR * max(steps) if steps else None
+
+
+async def _read(http: httpx.AsyncClient, request: httpx.Request, limit: int) -> httpx.Response:
+    """``send``'s request sent and its answer read, with no deadline."""
     response = await http.send(request, stream=True)
     try:
         _refuse_encoded(response.headers.get_list("content-encoding"))
