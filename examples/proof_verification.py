@@ -2,7 +2,7 @@
 Willow Python SDK - Proof Verification Example
 
 Demonstrates what the SDK verifies, and how:
-1. A verified read (client.data.get), which raises when it can't verify
+1. A verified read (client.data.get_verified), which raises when it can't verify
 2. Checking a key's proof yourself, bound to its subgrove, key, and value
 3. Pinning a verifier to a root you trust
 4. Root-hash extraction (binds no key or value)
@@ -11,7 +11,9 @@ Demonstrates what the SDK verifies, and how:
 
 A proof shows a value is stored under a root hash. It proves the value
 only once that root is one you trust: the app_hash of the CometBFT header
-at the proof's height + 1.
+at the proof's height + 1. client.data.get reads that header from the
+consensus node at consensus_rpc_url, and trusts that node (the SDK does not
+verify commit signatures).
 
 Prerequisites:
 - pip install willow-sdk
@@ -35,24 +37,28 @@ from willow import (
 
 SUBGROVE = "items"
 KEY = "item-1"
+# The CometBFT RPC of a node you run or trust (not the API).
+CONSENSUS_RPC_URL = "http://localhost:26657"
 
 
 async def main():
     print("Willow Proof Verification Demo")
     print("=" * 50)
 
-    async with WillowClient("http://localhost:3031") as client:
+    async with WillowClient("http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL) as client:
         did_info = generate_did()
         client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"])
 
         # 1. A verified read: the value comes back only when its proof
-        #    proves it at KEY under the subgrove's data, against the light
-        #    client's header for the proof's state.
+        #    proves it at KEY under the subgrove's data, against the
+        #    consensus RPC's header for the proof's state, and that state is
+        #    current (ProofHeightOutOfRangeError when it isn't).
         print("\n1. Verified Read")
         print("-" * 40)
         try:
-            item = await client.data.get(SUBGROVE, KEY)
-            print(f"Verified value: {item}")
+            verified = await client.data.get_verified(SUBGROVE, KEY)
+            print(f"Verified value: {verified.value}")
+            print(f"Proven at header {verified.height}, root {verified.root_hash}")
         except ProofVerificationError as e:
             print(f"Not verified: {e}")
         except WillowError as e:

@@ -30,7 +30,11 @@ import asyncio
 from willow import WillowClient, generate_did
 
 async def main():
-    async with WillowClient("http://localhost:3031") as client:
+    # consensus_rpc_url: the CometBFT RPC of a node you run or trust (not the
+    # API). Verified reads check their proofs against its headers.
+    async with WillowClient(
+        "http://localhost:3031", consensus_rpc_url="http://localhost:26657"
+    ) as client:
         # 1. Generate a DID
         did_info = generate_did()
 
@@ -52,10 +56,14 @@ async def main():
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
 
-        # 5. Read it back, verified against its proof (see What the SDK
-        #    verifies); ProofVerificationError when it can't be verified
+        # 5. Read it back, verified against its proof and the consensus
+        #    node's header (see What the SDK verifies);
+        #    ProofVerificationError when it can't be verified
         user = await client.data.get("users", "user_1")
         print(f"User: {user}")
+
+        # Or read the value the API serves, without verification
+        user = await client.data.get_unverified("users", "user_1")
 
 asyncio.run(main())
 ```
@@ -658,7 +666,10 @@ willow-cli did register did.json
 
 # Data ops (reads the saved identity; stores are signed StoreData transactions)
 willow-cli data store my-subgrove items.json
-willow-cli data get my-subgrove user1               # verified, or exits with the reason
+
+# Verified: checked against the headers of a consensus node you trust, or
+# exits with the reason (--consensus-rpc-url, or WILLOW_CONSENSUS_RPC_URL)
+willow-cli --consensus-rpc-url http://localhost:26657 data get my-subgrove user1
 willow-cli data get my-subgrove user1 --unverified  # the value the API serves
 
 # Proof

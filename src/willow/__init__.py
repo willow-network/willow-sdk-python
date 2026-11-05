@@ -8,7 +8,11 @@ Example usage:
     from willow import WillowClient, generate_did
 
     async def main():
-        async with WillowClient("http://localhost:3031") as client:
+        # consensus_rpc_url: the CometBFT RPC of a node you trust, whose
+        # headers verified reads are checked against
+        async with WillowClient(
+            "http://localhost:3031", consensus_rpc_url="http://localhost:26657"
+        ) as client:
             # Generate a DID and set it as the client's identity
             did_info = generate_did()
             client.set_identity(
@@ -23,8 +27,9 @@ Example usage:
             # Store a JSON object under a key (a StoreData transaction)
             await client.data.store("my-data", {"key": {"value": 1}})
 
-            # Read it back, verified against its proof and a trusted root
-            # (raises ProofVerificationError when it can't be verified)
+            # Read it back, verified against its proof and the consensus
+            # node's header (raises ProofVerificationError when it can't be
+            # verified; data.get_unverified reads it without verification)
             value = await client.data.get("my-data", "key")
 
             # Query (the documents are not verified)

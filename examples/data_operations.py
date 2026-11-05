@@ -4,12 +4,15 @@ Willow Python SDK - Data Operations Example
 Comprehensive data operations:
 1. Store single items
 2. Batch store multiple items
-3. Get single item (with proof verification)
-4. Get unverified (performance mode)
-5. Query with filters / range / sort
+3. Get single item, verified against its proof and the headers of the
+   consensus node you configure (consensus_rpc_url)
+4. Get unverified (the value the API serves)
+5. Query with filters / range / sort (unverified)
 
-Each store is a StoreData transaction signed by the identity. Reads include
-automatic proof verification by default.
+Each store is a StoreData transaction signed by the identity. data.get
+verifies the value it returns, trusting the consensus node at
+consensus_rpc_url for its headers; get_unverified and query_unverified
+return what the API serves, unverified.
 
 Prerequisites:
 - pip install willow-sdk
@@ -21,11 +24,15 @@ import asyncio
 from willow import (
     WillowClient,
     generate_did,
+    ProofVerificationError,
     WillowError,
 )
 
 
 SUBGROVE = "products"
+# The CometBFT RPC of a node you run or trust (not the API): data.get checks
+# proofs against its headers.
+CONSENSUS_RPC_URL = "http://localhost:26657"
 
 
 async def main():
@@ -34,7 +41,7 @@ async def main():
 
     did_info = generate_did()
 
-    async with WillowClient("http://localhost:3031") as client:
+    async with WillowClient("http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL) as client:
         # Auth: the identity signs the DID's registration (pre-fund the DID
         # with the registration fee first) and every later transaction.
         client.set_identity(
@@ -110,13 +117,15 @@ async def main():
         # The writes above may land in any order; read them once they have.
         await client.wait_until_landed(written)
 
-        # 3. Get single item, verified against its proof and the light
-        #    client's header (ProofVerificationError when it can't be)
-        print("\n3. Get Single Item")
+        # 3. Get single item, verified against its proof and the header the
+        #    consensus RPC serves (ProofVerificationError when it can't be)
+        print("\n3. Get Single Item (verified)")
         print("-" * 40)
         try:
-            item = await client.data.get(SUBGROVE, "prod-001")
-            print(f"Retrieved (verified): {item}")
+            verified = await client.data.get_verified(SUBGROVE, "prod-001")
+            print(f"Retrieved (verified at header {verified.height}): {verified.value}")
+        except ProofVerificationError as e:
+            print(f"Not verified: {e}")
         except WillowError as e:
             print(f"Error: {e}")
 

@@ -79,3 +79,45 @@ def test_data_commands_sign_with_the_saved_algorithm(config_file, monkeypatch):
     result = CliRunner().invoke(cli.cli, ["data", "store", "sg", "-"], input='{"k": {}}')
     assert result.exit_code == 0, result.output
     assert identities[0][3] == "secp256k1"
+
+
+def test_a_verified_get_says_what_to_set_and_sends_nothing_without_a_consensus_rpc(config_file, monkeypatch):
+    CliRunner().invoke(cli.cli, ["did", "generate", "--save"])
+    monkeypatch.delenv("WILLOW_CONSENSUS_RPC_URL", raising=False)
+    result = CliRunner().invoke(cli.cli, ["--api-url", "http://127.0.0.1:9", "data", "get", "sg", "k"])
+    assert result.exit_code == 1
+    assert "no trusted header source" in result.output
+    assert "--consensus-rpc-url" in result.output and "--unverified" in result.output
+
+
+@pytest.mark.parametrize("args,env", [
+    (["--consensus-rpc-url", "http://rpc.test:26657"], {}),
+    ([], {"WILLOW_CONSENSUS_RPC_URL": "http://rpc.test:26657"}),
+])
+def test_a_verified_get_reads_headers_from_the_consensus_rpc_given(config_file, monkeypatch, args, env):
+    CliRunner().invoke(cli.cli, ["did", "generate", "--save"])
+    made = []
+
+    class Client:
+        def __init__(self, api_url, consensus_rpc_url=None):
+            made.append((api_url, consensus_rpc_url))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def set_identity(self, *args):
+            pass
+
+        class data:
+            @staticmethod
+            async def get(subgrove_id, key):
+                return {"v": 1}
+
+    monkeypatch.setattr(cli, "WillowClient", Client)
+    result = CliRunner().invoke(cli.cli, [*args, "data", "get", "sg", "k"], env=env)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"v": 1}
+    assert made == [("http://localhost:3031", "http://rpc.test:26657")]

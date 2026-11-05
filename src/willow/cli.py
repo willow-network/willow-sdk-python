@@ -54,11 +54,19 @@ def get_identity_or_exit() -> Tuple[str, str, str, str]:
 
 @click.group()
 @click.option("--api-url", default="http://localhost:3031", help="Willow API URL")
+@click.option(
+    "--consensus-rpc-url",
+    envvar="WILLOW_CONSENSUS_RPC_URL",
+    default=None,
+    help="CometBFT RPC URL of a node you trust (typically port 26657): verified reads check "
+         "their proofs against its headers. Also read from WILLOW_CONSENSUS_RPC_URL.",
+)
 @click.pass_context
-def cli(ctx, api_url):
+def cli(ctx, api_url, consensus_rpc_url):
     """Willow CLI - Interact with Willow from the command line."""
     ctx.ensure_object(dict)
     ctx.obj["api_url"] = api_url
+    ctx.obj["consensus_rpc_url"] = consensus_rpc_url
 
 
 @cli.group()
@@ -224,12 +232,14 @@ def store(ctx, subgrove_id, data_file):
 @click.option("--unverified", is_flag=True, help="Print the value the API serves, without verifying it.")
 @click.pass_context
 def get(ctx, subgrove_id, key, unverified):
-    """Get a single item from a subgrove, verified against its proof (or --unverified)."""
+    """Get a single item from a subgrove, verified against its proof and the
+    headers of --consensus-rpc-url (or --unverified)."""
 
     async def _get():
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
+        rpc_url = ctx.obj.get("consensus_rpc_url")
 
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with WillowClient(ctx.obj["api_url"], consensus_rpc_url=rpc_url) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 if unverified:
@@ -237,7 +247,15 @@ def get(ctx, subgrove_id, key, unverified):
                 else:
                     result = await client.data.get(subgrove_id, key)
             except ProofVerificationError as e:
-                click.echo(f"Not verified: {e}. Use --unverified to print the value unverified.", err=True)
+                if rpc_url:
+                    hint = "Use --unverified to print the value unverified."
+                else:
+                    hint = (
+                        "Pass --consensus-rpc-url <CometBFT RPC of a node you trust> (or set "
+                        "WILLOW_CONSENSUS_RPC_URL) to verify it, or --unverified to print the value "
+                        "unverified."
+                    )
+                click.echo(f"Not verified: {e}. {hint}", err=True)
                 sys.exit(1)
             click.echo(json.dumps(result, indent=2))
 
