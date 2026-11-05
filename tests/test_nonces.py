@@ -407,19 +407,80 @@ async def test_a_refused_write_says_which_keys_went_through_and_frees_its_nonce(
 
 
 @pytest.mark.asyncio
-async def test_a_nonce_used_out_of_order_is_signed_again_under_a_fresh_one():
-    # Nonce 1 landed out of order (sent by an earlier run); the base is still 0.
+async def test_a_nonce_used_out_of_order_fails_its_write_and_is_skipped_after():
+    # Nonces 1 and 3 landed out of order (sent elsewhere); the base is still
+    # 0, and without the consensus RPC the client reads only the base.
     client, node, info = _client(base=0, used={1, 3})
+    with pytest.raises(TransactionError, match="already used") as exc_info:
+        await client.data.store_item("sg", "k", {"v": 1})
+    assert exc_info.value.nonce == 1
+    assert node.nonces_sent() == [1]  # not signed again
     result = await client.data.store_item("sg", "k", {"v": 1})
-    assert node.nonces_sent() == [1, 2]
     assert result["nonce"] == 2
     _, body = node.sent[-1]
     message = store_data_message("sg", "k", info["did"], bytes(body["data"]), 2)
     assert verify_signature(message, bytes(body["signature"]).hex(), info["public_key"], "Ed25519")
     # Nonce 3 is used too: learned when refused, then skipped.
+    with pytest.raises(TransactionError, match="already used"):
+        await client.data.store_item("sg", "k2", {"v": 2})
     await client.data.store_item("sg", "k2", {"v": 2})
-    await client.data.store_item("sg", "k3", {"v": 3})
-    assert node.nonces_sent() == [1, 2, 3, 4, 5]
+    assert node.nonces_sent() == [1, 2, 3, 4]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_with_the_consensus_rpc_a_nonce_used_out_of_order_is_never_taken():
+    client, node, _ = _client(base=0, used={1, 3})
+    _with_rpc(client, node)
+    assert (await client.data.store_item("sg", "k", {"v": 1}))["nonce"] == 2
+    assert (await client.data.store_item("sg", "k2", {"v": 2}))["nonce"] == 4
+    assert node.nonces_sent() == [2, 4]
+    await client.close()
+
+
+def _passes_on_then_answers(node, log):
+    """An API that passes the next submission on to the node (CheckTx admits
+    it, so it can land) and answers ``log`` as CheckTx's refusal of it."""
+    real = node.handler
+    lies = [log]
+
+    def handler(request):
+        if request.url.path == "/tx/submit" and lies:
+            real(request)
+            body = json.loads(request.content)
+            ((_, tx),) = body.items()
+            return _ok({"tx_hash": "", "code": 1, "log": lies.pop().format(n=tx["nonce"])})
+        return real(request)
+
+    return handler
+
+
+_USED_LOGS = [
+    "Invalid nonce: {n} already used (replay)",
+    "Invalid nonce: {n} <= base nonce {n}",
+    "Subgrove not found: sg (nonce {n} spent)",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("log", _USED_LOGS)
+async def test_a_write_refused_as_used_is_not_signed_again_under_another_nonce(log):
+    # The API passes the write on (it lands under nonce 1) and answers that
+    # nonce 1 is used: signing it again under nonce 2 would run it twice.
+    client, node, _ = _client()
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(_passes_on_then_answers(node, log)))
+    with pytest.raises(TransactionError) as exc_info:
+        await client.data.store_item("sg", "k", {"a": 1})
+    error = exc_info.value
+    assert node.nonces_sent() == [1]  # one transaction: the write runs at most once
+    assert (error.did, error.nonce) == (node.did, 1)
+    assert error.transaction == {"StoreData": node.sent[0][1]}
+    assert "read what" in str(error) and log.format(n=1) in str(error)
+    assert error.raw_log == log.format(n=1)
+    # The nonce counts as used: the next write takes nonce 2, and waiting on
+    # the refused one returns at once.
+    await client.wait_until_landed(error, timeout=0)
+    assert (await client.data.store_item("sg", "k2", {}))["nonce"] == 2
     await client.close()
 
 
@@ -987,13 +1048,36 @@ async def test_consensus_writes_take_distinct_nonces_and_give_back_refused_ones(
 
 
 @pytest.mark.asyncio
-async def test_consensus_write_on_a_used_nonce_is_signed_again():
+async def test_consensus_write_on_a_used_nonce_is_not_signed_again():
     info = generate_did()
     node = FakeNode(info["did"], base=0, used={1})
     client = _consensus_client(node)
-    result = await client.store_data("sg", "a", {}, info["did"], info["private_key"], info["public_key_id"])
-    assert result.success
+    args = (info["did"], info["private_key"], info["public_key_id"])
+    with pytest.raises(ConsensusError, match="already used") as exc_info:
+        await client.store_data("sg", "a", {}, *args)
+    assert (exc_info.value.did, exc_info.value.nonce) == (info["did"], 1)
+    assert node.nonces_sent() == [1]
+    # The nonce counts as used: the write sent again takes nonce 2.
+    assert (await client.store_data("sg", "a", {}, *args)).nonce == 2
     assert node.nonces_sent() == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("log", _USED_LOGS)
+async def test_consensus_write_refused_as_used_is_not_signed_again_under_another_nonce(log):
+    # The API passes the transfer on (it lands under nonce 5) and answers
+    # that nonce 5 is used: signing it again under nonce 6 would pay twice.
+    info = generate_did()
+    node = FakeNode(info["did"], base=4)
+    client = _consensus_client(node)
+    node.handler = _passes_on_then_answers(node, log)
+    with pytest.raises(ConsensusError, match="read what") as exc_info:
+        await client.transfer(info["did"], "did:willow:b", 100, info["private_key"], info["public_key_id"])
+    error = exc_info.value
+    assert node.nonces_sent() == [5]  # one transfer
+    assert (error.did, error.nonce) == (info["did"], 5)
+    assert error.transaction == {"Transfer": node.sent[0][1]}
+    assert client._nonces.is_used(info["did"], 5)
 
 
 @pytest.mark.asyncio

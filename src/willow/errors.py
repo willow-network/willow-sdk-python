@@ -245,7 +245,11 @@ class TransactionError(ConsensusError):
     the ``did`` and ``nonce`` the transaction was signed under, and, when
     the answer leaves open whether it reached the node (a gateway error
     with no CheckTx answer, or a resubmission refused for anything but its
-    nonce being used), the signed ``transaction`` to resubmit.
+    nonce being used), the signed ``transaction`` to resubmit. A refusal
+    that the nonce is already used, at or below the base, or spent carries
+    the ``transaction`` too: some transaction used the nonce, which may be
+    this one, so the write is not signed again under another nonce; read
+    what it wrote before sending it again.
     """
 
     did: Optional[str] = None

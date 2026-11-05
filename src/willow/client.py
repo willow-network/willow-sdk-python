@@ -55,7 +55,7 @@ from .errors import (
     parse_api_error,
 )
 from .nonces import (
-    FREE, HELD, UNKNOWN, WINDOW, InterruptedWrite, NonceTracker, parse_nonce_state, refusal_outcome,
+    FREE, HELD, UNKNOWN, USED, InterruptedWrite, NonceTracker, parse_nonce_state, refusal_outcome,
 )
 from .consensus.types import (
     DataStoreTx,
@@ -1891,11 +1891,12 @@ class WillowClient:
         a nonce ``n`` this client hands out, or under ``nonce`` when given.
 
         A transaction CheckTx refuses gives its nonce back, unless the
-        refusal says the nonce is held by a pending transaction or already
-        used. When it is already used, no transaction under it can run, so it
-        is signed again under a fresh nonce (not when ``nonce`` was given).
-        See ``_submit_signed`` for a submission that may have reached the
-        node.
+        refusal says the nonce is held by a pending transaction, already
+        used, or spent. The write is never signed again under another nonce:
+        a refusal can follow from this very transaction having reached the
+        node (an API may pass it on and answer that its nonce is used), and a
+        second copy under another nonce would run it twice. See
+        ``_submit_signed`` for what each refusal carries.
 
         Raises:
             ValueError: ``nonce`` is outside the node's window, used, or
@@ -1909,24 +1910,13 @@ class WillowClient:
                     f"account's base, used, or handed to another write; leave it out and "
                     f"the client picks one"
                 )
-        error: Optional[TransactionError] = None
-        for _ in range(1 if nonce is not None else WINDOW):
-            n = nonce if nonce is not None else await self._take_nonce(did, read_base)
-            read_base = True  # a retry follows a nonce the base may have passed
-            try:
-                signed = sign(n)
-            except BaseException:
-                self._nonces.release(did, n)
-                raise
-            try:
-                return await self._submit_signed(did, n, signed)
-            except TransactionError as e:
-                # Signed under a nonce some other transaction used: it can't run.
-                if nonce is not None or e.transaction is not None or not self._nonces.is_used(did, n):
-                    raise
-                error = e
-        assert error is not None
-        raise error
+        n = nonce if nonce is not None else await self._take_nonce(did, read_base)
+        try:
+            signed = sign(n)
+        except BaseException:
+            self._nonces.release(did, n)
+            raise
+        return await self._submit_signed(did, n, signed)
 
     async def _submit_signed(
         self, did: str, nonce: int, transaction: Dict[str, Any], resubmission: bool = False
@@ -1942,9 +1932,12 @@ class WillowClient:
         lease runs out, and its error carries the signed ``transaction`` for
         ``resubmit``. So does a ``resubmission`` refused for anything but its
         nonce being used: the earlier copy may be pending or have landed,
-        whatever the refusal says. Every error carries the ``did`` and
-        ``nonce``. A cancellation records the write in
-        ``interrupted_writes`` before it propagates.
+        whatever the refusal says. A refusal that the nonce is already used,
+        at or below the base, or spent marks it used, and its error carries
+        the ``transaction`` and says to read what the write wrote before
+        sending it again: some transaction used the nonce, which may be this
+        one. Every error carries the ``did`` and ``nonce``. A cancellation
+        records the write in ``interrupted_writes`` before it propagates.
         """
         handout = self._nonces.handout(did, nonce)
 
@@ -1979,9 +1972,17 @@ class WillowClient:
             if outcome == UNKNOWN:
                 e.transaction = transaction
                 mark(e)
-            elif resubmission:
-                # Its nonce is used: an earlier copy may have landed under it.
-                e._resubmission = True  # type: ignore[attr-defined]
+            elif outcome == USED:
+                # Some transaction used its nonce: this one, if it reached the
+                # node before the answer (an earlier copy, or an API that
+                # passed it on), or another one the same DID signed.
+                e.transaction = transaction
+                e.message = (
+                    f"nonce {nonce} of {did} is used ({e.message}): some transaction used "
+                    f"it, which may be this one, so it was not signed again under another "
+                    f"nonce; read what the write wrote before sending it again"
+                )
+                e.args = (e.message,)
                 mark(e)
             raise
 
@@ -2012,13 +2013,13 @@ class WillowClient:
                 since (``resubmit`` came after the 120 s lease ran out),
                 whether or not that write has landed, so nothing is sent.
                 Read what the write wrote to learn whether it took effect.
-            TransactionError: CheckTx refused it. A refusal that its nonce
-                is already used, or at or below the base, means some
-                transaction used that nonce: this write's earlier copy, or
-                another one signed by the same DID elsewhere. Read what the
-                write wrote to learn whether it took effect; a copy refused
-                in its block spends its nonce too. Any other refusal carries
-                ``transaction`` again and leaves the nonce taken: CheckTx
+            TransactionError: CheckTx refused it; the error carries
+                ``transaction`` again. A refusal that its nonce is already
+                used, or at or below the base, means some transaction used
+                that nonce: this write's earlier copy, or another one signed
+                by the same DID elsewhere. Read what the write wrote to learn
+                whether it took effect; a copy refused in its block spends
+                its nonce too. Any other refusal leaves the nonce taken: CheckTx
                 checks some rules (a subgrove that exists, a funded balance)
                 before the nonce, so it can follow from the earlier copy
                 having landed, or the earlier copy may still be pending.
@@ -2123,9 +2124,10 @@ class WillowClient:
         ``transaction``). The error of a write that was never sent or that
         CheckTx refused (``transaction`` is ``None``), or a refused
         ``BroadcastResult``, raises ``ValueError``: it never ran, and a later
-        write may take its nonce. (The refusal of a ``resubmit`` whose nonce
-        is used is the exception: an earlier copy may have used it, and the
-        wait returns at once.) A write that never lands keeps its nonce
+        write may take its nonce. (A refusal that the nonce is used is the
+        exception: it carries ``transaction``, since this write may be the
+        one that used it, and the wait returns at once; read what it wrote
+        to learn whether it took effect.) A write that never lands keeps its nonce
         for 120 s; after that this client may hand the nonce to another
         write, and waiting on the first then raises (``ValueError`` before
         the wait, ``NotLandedError`` during it) instead of reporting the
@@ -2152,7 +2154,7 @@ class WillowClient:
             if not isinstance(did, str) or isinstance(nonce, bool) or not isinstance(nonce, int):
                 raise ValueError("each write must be the {..., did, nonce} result a write returned")
             refused = isinstance(write, BaseException) or getattr(write, "success", True) is False
-            if refused and getattr(write, "transaction", None) is None and not getattr(write, "_resubmission", False):
+            if refused and getattr(write, "transaction", None) is None:
                 raise ValueError(
                     f"nonce {nonce} of {did}: this write was never sent, or CheckTx refused it, so it "
                     f"never ran and there is nothing to wait for (a later write may take its nonce)"

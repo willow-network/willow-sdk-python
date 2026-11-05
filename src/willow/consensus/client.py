@@ -14,7 +14,7 @@ import logging
 from ..auth import _key_algorithm, sign_message, SignatureAlgorithm
 from ..errors import NonceWindowFullError, TransactionError
 from ..nonces import (
-    FREE, HELD, UNKNOWN, WINDOW, InterruptedWrite, NonceTracker, already_in_cache, refusal_outcome,
+    FREE, HELD, UNKNOWN, USED, InterruptedWrite, NonceTracker, already_in_cache, refusal_outcome,
 )
 from ..signed_messages import did_document_body
 from .types import (
@@ -490,61 +490,60 @@ class ConsensusClient:
         The nonce is the lowest one in the node's window this client hasn't
         handed out (see ``willow.nonces``); RegisterDid signs nonce 1. A
         transaction CheckTx refuses gives its nonce back, unless the refusal
-        says the nonce is held by a pending transaction or already used. When
-        it is already used, no transaction under it can run, so it is signed
-        again under a fresh nonce, unless these bytes may have reached the
-        node: an earlier attempt failed in transit (this raises rather than
-        run the write twice), or the answer leaves open whether it reached
-        the node (the result carries ``transaction``, for ``resubmit``). See
-        ``_broadcast_signed``.
+        says the nonce is held by a pending transaction, already used, or
+        spent. The write is never signed again under another nonce: a
+        refusal can follow from this very transaction having reached the
+        node (an earlier attempt failed in transit, or an API passed it on
+        and answered that its nonce is used), and a second copy under
+        another nonce would run it twice. A refusal that the nonce is used
+        raises (a RegisterDid's returns the refused result); one that leaves
+        open whether it reached the node carries ``transaction``, for
+        ``resubmit``. See ``_broadcast_signed``.
 
         ``algorithm`` selects the signing algorithm. It must be supplied by the
         caller because the self-certifying DID no longer encodes it; it cannot
         be recovered from the transaction's ``owner_did``.
 
         Raises:
-            ConsensusError: The submission failed in transit, or a resent
-                copy was refused because its nonce is used (the write may
-                have landed). It carries the ``did`` and ``nonce``, and the
-                signed ``transaction`` when it may have reached the node.
+            ConsensusError: The submission failed in transit, or CheckTx
+                refused it because its nonce is already used, at or below
+                the base, or spent: some transaction used the nonce, which
+                may be this one, so read what the write wrote before sending
+                it again. It carries the ``did`` and ``nonce``, and the
+                signed ``transaction`` when it may have reached the node or
+                its nonce is used.
         """
         # Refuse what can't be signed (a line break, a field out of range)
         # before taking a nonce.
         create_sign_message(tx_type, transaction)
-        fixed_nonce = tx_type == "RegisterDid"
-        result: Optional[BroadcastResult] = None
-        for _ in range(WINDOW):
-            if fixed_nonce:
-                self._nonces.hold(signer, transaction.nonce)
-            else:
-                transaction.nonce = await self._take_nonce(signer)
-            try:
-                transaction.signature = sign_message(
-                    create_sign_message(tx_type, transaction), private_key, algorithm
-                )
-                tx_wrapper = create_transaction_wrapper(tx_type, transaction)
-            except BaseException:
-                self._nonces.release(signer, transaction.nonce)
-                raise
-            result = await self._broadcast_signed(signer, transaction.nonce, tx_wrapper)
-            if (
-                result.success
-                or result.transaction is not None
-                or not self._nonces.is_used(signer, transaction.nonce)
-            ):
-                return result
-            if result.resent:
-                error = ConsensusError(
-                    f"nonce {transaction.nonce} of {signer} is used, and an earlier attempt of "
-                    f"this transaction failed in transit, so it may have landed under it "
-                    f"({result.raw_log}); read what it wrote before sending it again"
-                )
-                error.did, error.nonce, error.transaction = signer, transaction.nonce, tx_wrapper
-                error._handout = self._nonces.handout(signer, transaction.nonce)  # type: ignore[attr-defined]
-                raise error
-            if fixed_nonce:
-                return result
-        return result
+        if tx_type == "RegisterDid":
+            self._nonces.hold(signer, transaction.nonce)
+        else:
+            transaction.nonce = await self._take_nonce(signer)
+        try:
+            transaction.signature = sign_message(
+                create_sign_message(tx_type, transaction), private_key, algorithm
+            )
+            tx_wrapper = create_transaction_wrapper(tx_type, transaction)
+        except BaseException:
+            self._nonces.release(signer, transaction.nonce)
+            raise
+        nonce = transaction.nonce
+        result = await self._broadcast_signed(signer, nonce, tx_wrapper)
+        if not getattr(result, "_nonce_used", False) or tx_type == "RegisterDid":
+            return result
+        how = (
+            "an earlier attempt of this transaction failed in transit and may have landed under it"
+            if result.resent
+            else "some transaction used it, which may be this one"
+        )
+        error = ConsensusError(
+            f"nonce {nonce} of {signer} is used ({result.raw_log}): {how}, so it was not signed "
+            f"again under another nonce; read what it wrote before sending it again"
+        )
+        error.did, error.nonce, error.transaction = signer, nonce, tx_wrapper
+        error._handout = self._nonces.handout(signer, nonce)  # type: ignore[attr-defined]
+        raise error
 
     async def _broadcast_signed(
         self, did: str, nonce: int, transaction: Dict[str, Any], resubmission: bool = False
@@ -597,6 +596,7 @@ class ConsensusClient:
         if outcome == UNKNOWN:
             result.transaction = transaction
             result._handout = handout  # type: ignore[attr-defined]
+        result._nonce_used = outcome == USED  # type: ignore[attr-defined]
         return result
 
     async def resubmit(self, failed: Any) -> BroadcastResult:
