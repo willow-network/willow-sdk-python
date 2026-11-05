@@ -102,8 +102,9 @@ async def test_get_returns_the_value_its_proof_proves_under_the_trusted_root():
     client, seen = _get_client()
     assert await client.data.get("my-sub", "user:bob") == {"balance": 250}
     assert seen["requests"] == ["/data/my-sub/user:bob", "/proof/my-sub/user:bob"]
-    # The proof is of the state after block 41: header 42 carries its root.
-    assert seen["heights"] == [42]
+    # The latest header, then the header after the proof's block (41): 42
+    # carries the root of the state after 41.
+    assert seen["heights"] == [None, 42]
     await client.close()
 
 
@@ -290,7 +291,7 @@ async def test_get_waits_for_a_header_the_chain_hasnt_produced_yet():
     client, seen = _get_client(latest=latest)
     client._header_poll_interval = 0
     assert await client.data.get("my-sub", "user:bob") == {"balance": 250}
-    assert seen["heights"][0] == 42 and seen["heights"][-1] == 42 and None in seen["heights"]
+    assert seen["heights"][:2] == [None, 42] and seen["heights"][-1] == 42
     await client.close()
 
     client, _ = _get_client(latest=41)
@@ -312,7 +313,7 @@ async def test_get_refuses_a_header_at_another_height_or_without_an_app_hash():
         ))
         with pytest.raises(ProofVerificationError, match="No trusted root: the consensus RPC answered"):
             await client.data.get("my-sub", "user:bob")
-        assert asked == [f"{RPC}/header?height=42"]
+        assert asked and all(url.startswith(f"{RPC}/header") for url in asked)
         await client.close()
 
 
@@ -328,6 +329,108 @@ def test_completeness_reads_its_anchor_from_the_consensus_rpc():
     client = WillowClient("http://api.test:3031", consensus_rpc_url=RPC)
     assert client.completeness._rpc_url == RPC
     assert WillowClient("http://api.test:3031").completeness._rpc_url == "http://api.test:26657"
+
+
+# ---------------------------------------------------------------------------
+# A proof's state must be the chain's within max_proof_lag_blocks
+#
+# The API chooses the height it proves at: the last block with transactions.
+# A header G carries the state after block G - 1, and every header up to the
+# next block with transactions carries the same app_hash. So a proof's state
+# is current while a header within the lag of the latest still carries it.
+
+OTHER_ROOT = bytes(range(32))
+
+
+def _carried_until(last):
+    """Headers up to ``last`` carry bob's root; later ones another."""
+    return lambda height: BOB_ROOT if height <= last else OTHER_ROOT
+
+
+def _out_of_range(excinfo):
+    from willow import ProofHeightOutOfRangeError
+
+    return excinfo.type is ProofHeightOutOfRangeError and issubclass(ProofHeightOutOfRangeError, ProofVerificationError)
+
+
+@pytest.mark.asyncio
+async def test_get_refuses_a_state_the_chain_has_moved_past():
+    # A genuine proof of the state after block 41 (header 42 carries it),
+    # replayed when the chain is at 62 and that state changed at block 42.
+    client, _ = _get_client(latest=62, root_at=_carried_until(42))
+    with pytest.raises(ProofVerificationError, match="stale") as excinfo:
+        await client.data.get("my-sub", "user:bob")
+    assert _out_of_range(excinfo)
+    await client.close()
+    # 21 blocks behind is taken with max_proof_lag_blocks=21.
+    client, _ = _get_client(latest=62, root_at=_carried_until(42))
+    client.max_proof_lag_blocks = 21
+    assert await client.data.get("my-sub", "user:bob") == {"balance": 250}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_takes_an_old_proof_while_the_latest_header_still_carries_its_root():
+    # No block with transactions since block 41: every header since carries
+    # its state, so the proof is current at the latest header.
+    client, seen = _get_client(latest=500)
+    verified = await client.data.get_verified("my-sub", "user:bob")
+    assert verified.value == {"balance": 250}
+    assert verified.height == 500
+    assert verified.root_hash == BOB_ROOT.hex()
+    assert seen["heights"] == [None, 42]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_takes_the_newest_header_within_the_lag_that_carries_the_root():
+    # The state changed at block 90 (header 91): headers 81 to 100 are within
+    # the lag of 100, and 81 to 90 still carry the proof's root.
+    client, seen = _get_client(latest=100, root_at=_carried_until(90))
+    verified = await client.data.get_verified("my-sub", "user:bob")
+    assert (verified.value, verified.height) == ({"balance": 250}, 90)
+    assert seen["heights"][:3] == [None, 42, 81] and len(seen["heights"]) <= 3 + 5
+    await client.close()
+    # Changed at block 75: no header within the lag carries it.
+    client, _ = _get_client(latest=100, root_at=_carried_until(75))
+    with pytest.raises(ProofVerificationError, match="stale") as excinfo:
+        await client.data.get_verified("my-sub", "user:bob")
+    assert _out_of_range(excinfo)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_verified_names_the_header_its_value_is_proven_at():
+    # Within the lag: the header after the proof's block, or the latest when
+    # it still carries the root.
+    client, seen = _get_client(latest=50, root_at=_carried_until(45))
+    verified = await client.data.get_verified("my-sub", "user:bob")
+    assert (verified.value, verified.height, verified.root_hash) == ({"balance": 250}, 42, BOB_ROOT.hex())
+    assert seen["heights"] == [None, 42]
+    await client.close()
+    client, _ = _get_client(latest=42)
+    assert (await client.data.get_verified("my-sub", "user:bob")).height == 42
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_refuses_a_height_far_ahead_of_the_latest():
+    client, seen = _get_client(proof={"proof": BOB["proof_hex"], "height": 63}, latest=42)
+    client.timeout = 0
+    with pytest.raises(ProofVerificationError, match="ahead") as excinfo:
+        await client.data.get("my-sub", "user:bob")
+    assert _out_of_range(excinfo)
+    assert seen["heights"] == [None]
+    await client.close()
+
+
+def test_max_proof_lag_blocks_is_a_non_negative_integer():
+    assert WillowClient("http://api.test").max_proof_lag_blocks == 20
+    assert WillowClient("http://api.test", max_proof_lag_blocks=0).max_proof_lag_blocks == 0
+    assert WillowClient.builder("http://api.test").max_proof_lag_blocks(5).build().max_proof_lag_blocks == 5
+    for bad in (-1, True, 1.5, "20"):
+        with pytest.raises(ValueError, match="max_proof_lag_blocks"):
+            WillowClient("http://api.test", max_proof_lag_blocks=bad)
 
 
 # ---------------------------------------------------------------------------

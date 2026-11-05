@@ -355,9 +355,14 @@ await client.data.batch_store("subgrove_id", [
     {"key": "key4", "value": {"field": "value4"}},
 ])
 
-# Get a single item, verified against its proof and a trusted root
-# (ProofVerificationError when it can't be verified)
+# Get a single item, verified against its proof and the headers of the
+# consensus node you configure (consensus_rpc_url); ProofVerificationError
+# when it can't be verified, ProofHeightOutOfRangeError when it's stale
 item = await client.data.get("subgrove_id", "key1")
+
+# The same, with the header it is proven at
+verified = await client.data.get_verified("subgrove_id", "key1")
+print(verified.value, verified.height, verified.root_hash)
 
 # Get the value the API serves, without verification
 item = await client.data.get_unverified("subgrove_id", "key1")
@@ -509,7 +514,8 @@ else:
 
 ### What the SDK verifies
 
-- **`client.data.get(subgrove, key)`** reads the value and its proof from the API. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the node at `consensus_rpc_url` serves it (`GET /header?height=`). It waits up to the client's `timeout` for a header the chain hasn't produced yet. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified. Without `consensus_rpc_url` it raises `ProofVerificationError` ("no trusted header source: set consensus_rpc_url") before sending anything. `get_unverified` reads a value without verification.
+- **`client.data.get(subgrove, key)`** reads the value and its proof from the API. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the node at `consensus_rpc_url` serves it (`GET /header?height=`). It waits up to the client's `timeout` for a header the chain hasn't produced yet. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified.
+- **Freshness.** The API chooses the height it proves at, so a replayed old proof would otherwise verify as current. The node proves at the last block with transactions, and a block without transactions leaves the app hash as it was, so the header after that block and every header up to the next block with transactions carry the proof's root. A header `G` carries the state after block `G - 1`, and is recent when `latest - (G - 1)` is at most `max_proof_lag_blocks` (a `WillowClient` argument, 20 by default), where `latest` is the latest height the consensus RPC reports. `data.get` accepts a proof when a recent header carries its root, and raises `ProofHeightOutOfRangeError` (a `ProofVerificationError`, so you can tell a stale answer from a forged one) when none does, or when the proof names a height more than `max_proof_lag_blocks` ahead of the latest. `data.get_verified(subgrove, key)` returns a `VerifiedValue` with the `value`, the `height` of the newest header found that carries the root (the latest header when it still does; the value is as of that header's state, the state after block `height - 1`), and the `root_hash`. Without `consensus_rpc_url` it raises `ProofVerificationError` ("no trusted header source: set consensus_rpc_url") before sending anything. `get_unverified` reads a value without verification.
 - **What `data.get` trusts.** The SDK does not verify CometBFT commit signatures, validator sets, or header hashes. `data.get` trusts the node at `consensus_rpc_url` for its headers, the way a client trusts its own node, and trusts nothing the API serves: a forged value or proof from the API fails, but a dishonest consensus node can make a forged value verify. Run that node yourself, or use one you trust.
 - **The light client** (`LightClient`, `HeaderVerifier`) verifies no header: `verify_header` never succeeds, so it holds only the header it trusts on first use (the first one its endpoints serve, as served), one you pass to `initialize_with_trusted_header`, or ones you import. A proof checked against a header it holds is only as trustworthy as that header's source. `data.get` doesn't use it.
 - **`ProofVerifier.verify_item_proof(proof, key, value, path)`** (and the async `GroveDBProofVerifier.verify_item_proof` and `verify_item_proof`, which you await) is valid only when the proof descends to `path`, proves an Item at exactly `key` there whose bytes the root commits to, and the Item's payload is `value` (the same bytes, or the same JSON value). A proof of another key or path, or a lone root hash, is invalid. It returns the root the proof computes: compare it with a root you trust, or pin one with `ProofVerificationOptions(expected_root_hash=...)`.
@@ -568,6 +574,7 @@ from willow import (
     ValidationError,
     NotFoundError,
     PermissionDeniedError,
+    ProofHeightOutOfRangeError,
     ProofVerificationError,
     RateLimitError,
     UnsupportedError,
@@ -579,6 +586,8 @@ except NotAuthenticatedError:
     print("Call client.set_identity(...) first")
 except NotFoundError as e:
     print(f"Data not found: {e}")
+except ProofHeightOutOfRangeError as e:
+    print(f"Stale: {e}")  # the proof's state is not the chain's current one
 except ProofVerificationError as e:
     print(f"Not verified: {e}")  # client.data.get_unverified reads it unverified
 except PermissionDeniedError as e:

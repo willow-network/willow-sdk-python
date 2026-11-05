@@ -9,6 +9,7 @@ import base64
 import httpx
 import json as _json
 import logging
+from dataclasses import dataclass
 from typing import Callable, Optional, Dict, Any, FrozenSet, List, Set, Tuple
 
 from .types import (
@@ -48,6 +49,7 @@ from .errors import (
     NonceWindowFullError,
     NotAuthenticatedError,
     NotLandedError,
+    ProofHeightOutOfRangeError,
     ProofVerificationError,
     TransactionError,
     parse_api_error,
@@ -113,6 +115,28 @@ def _envelope_data(body: Any) -> Any:
             raise WillowError(body.get("error") or "Request failed")
         return body.get("data")
     return body
+
+
+#: How many blocks behind the consensus RPC's latest height a verified read's
+#: state may be (see ``DataOperations.get_verified``), unless the client's
+#: ``max_proof_lag_blocks`` says otherwise.
+DEFAULT_MAX_PROOF_LAG_BLOCKS = 20
+
+
+@dataclass(frozen=True)
+class VerifiedValue:
+    """A value ``data.get_verified`` verified, and where.
+
+    ``value`` is the value the proof proves. ``height`` is the height of the
+    newest header found that carries the proof's root as its ``app_hash``
+    (the latest header when it still carries it), as the consensus RPC
+    serves it: the value is as of that header's state, the state after
+    block ``height - 1``. ``root_hash`` is that root, as hex.
+    """
+
+    value: Any
+    height: int
+    root_hash: str
 
 
 _NO_TRUSTED_HEADER_SOURCE = (
@@ -273,23 +297,8 @@ class DataOperations:
     @require_auth
     async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
         """Get a single item from a subgrove, verified against its proof and
-        the header the configured consensus RPC serves.
-
-        Reads the value (``GET /data/{subgrove_id}/{key}``) and its proof
-        (``GET /proof/{subgrove_id}/{key}``) from the API. The proof must
-        prove an Item at ``key`` under the subgrove's data path
-        (``subgrove_data_path(subgrove_id)``) whose JSON is the value served,
-        and the root it computes must be the ``app_hash`` of the CometBFT
-        header at the proof's ``height + 1`` (the state after block
-        ``height``), as the node at ``consensus_rpc_url`` serves it
-        (``GET /header?height=``). It returns the value the proof proves.
-        Anything missing or different raises; nothing is returned
-        unverified.
-
-        Trust: the SDK does not verify CometBFT commit signatures. It trusts
-        the consensus node you configure for its headers, as a client trusts
-        its own node, and nothing the API serves. Point ``consensus_rpc_url``
-        at a node you run or trust, not at the API.
+        the headers the configured consensus RPC serves: ``get_verified``'s
+        value. See ``get_verified`` for what is checked and trusted.
 
         Args:
 
@@ -300,6 +309,61 @@ class DataOperations:
             The data item
 
         Raises:
+            ProofHeightOutOfRangeError: The proof's state is not current
+                (see ``get_verified``).
+            ProofVerificationError: It isn't verified (see ``get_verified``).
+            WillowError: A read was refused (a key that isn't there, say).
+        """
+        return (await self.get_verified(subgrove_id, key)).value
+
+    @require_auth
+    async def get_verified(self, subgrove_id: str, key: str) -> VerifiedValue:
+        """Get a single item from a subgrove, verified against its proof and
+        the headers the configured consensus RPC serves, with the header it
+        is proven at.
+
+        Reads the value (``GET /data/{subgrove_id}/{key}``) and its proof
+        (``GET /proof/{subgrove_id}/{key}``) from the API. The proof must
+        prove an Item at ``key`` under the subgrove's data path
+        (``subgrove_data_path(subgrove_id)``) whose JSON is the value served,
+        and the root it computes must be the ``app_hash`` of the CometBFT
+        header at the proof's ``height + 1`` (the state after block
+        ``height``), as the node at ``consensus_rpc_url`` serves it
+        (``GET /header?height=``). A header the chain hasn't produced yet is
+        waited for, up to the client's ``timeout``.
+
+        The API chooses the height, so a replayed old proof would otherwise
+        verify as current. The proof's state must be current within the
+        client's ``max_proof_lag_blocks`` (default 20) of the latest height
+        the consensus RPC reports. The node proves at the last block with
+        transactions, and a block without transactions leaves the app hash
+        as it was, so a header ``G`` (which carries the state after block
+        ``G - 1``) is recent when ``latest - (G - 1) <= max_proof_lag_blocks``,
+        and the proof is accepted when a recent header carries its root:
+        the header after its block, the latest header, or one between. A
+        proof no recent header carries, or one naming a height more than
+        ``max_proof_lag_blocks`` ahead of the latest, raises
+        ``ProofHeightOutOfRangeError``.
+
+        Trust: the SDK does not verify CometBFT commit signatures. It trusts
+        the consensus node you configure for its headers and its latest
+        height, as a client trusts its own node, and nothing the API serves.
+        Point ``consensus_rpc_url`` at a node you run or trust, not at the
+        API.
+
+        Args:
+
+            subgrove_id: Subgrove/dataset identifier
+            key: Item key
+
+        Returns:
+            A ``VerifiedValue``: the value the proof proves, the height of
+            the newest header found that carries its root, and the root.
+            Nothing is returned unverified.
+
+        Raises:
+            ProofHeightOutOfRangeError: The proof's state is not current, as
+                above (the proof may be genuine but stale).
             ProofVerificationError: No ``consensus_rpc_url`` is configured
                 (raised before any request), the API returned no proof or no
                 height, the proof doesn't prove the value served at ``key``
@@ -331,8 +395,8 @@ class DataOperations:
 
     async def _verified_value(
         self, subgrove_id: str, key: str, data_response: Any, proof_response: Any
-    ) -> Any:
-        """The value ``data.get`` returns from the API's two answers, or
+    ) -> VerifiedValue:
+        """What ``data.get_verified`` returns from the API's two answers, or
         ``ProofVerificationError``."""
         data = data_response.get("data")
         proof = proof_response.get("data")
@@ -363,13 +427,8 @@ class DataOperations:
                 f"The value the API served for key {key!r} is not the value its proof proves"
             )
 
-        trusted_root = await self.client._trusted_app_hash(height + 1)
-        if root_hash != trusted_root:
-            raise ProofVerificationError(
-                f"Root hash mismatch for key {key!r}: the proof computes {root_hash.hex()}, "
-                f"the header at height {height + 1} has app_hash {trusted_root.hex()}"
-            )
-        return proven
+        proven_at = await self.client._header_carrying(root_hash, height, f"key {key!r}")
+        return VerifiedValue(value=proven, height=proven_at, root_hash=root_hash.hex())
 
     @require_auth
     async def get_unverified(self, subgrove_id: str, key: str) -> Dict[str, Any]:
@@ -959,6 +1018,7 @@ class WillowClientBuilder:
         self._proof_options: Optional[ProofVerificationOptions] = None
         self._light_client_config: Optional[Dict[str, Any]] = None
         self._consensus_rpc_url: Optional[str] = None
+        self._max_proof_lag_blocks = DEFAULT_MAX_PROOF_LAG_BLOCKS
 
     def timeout(self, timeout: float) -> "WillowClientBuilder":
         """Set request timeout in seconds."""
@@ -993,6 +1053,12 @@ class WillowClientBuilder:
         self._consensus_rpc_url = url
         return self
 
+    def max_proof_lag_blocks(self, blocks: int) -> "WillowClientBuilder":
+        """Set how many blocks behind the consensus RPC's latest height a
+        verified read's state may be (see ``DataOperations.get_verified``)."""
+        self._max_proof_lag_blocks = blocks
+        return self
+
     def build(self) -> "WillowClient":
         """Build and return the WillowClient instance."""
         return WillowClient(
@@ -1002,6 +1068,7 @@ class WillowClientBuilder:
             proof_verification_options=self._proof_options,
             indexer_url=self._indexer_url,
             consensus_rpc_url=self._consensus_rpc_url,
+            max_proof_lag_blocks=self._max_proof_lag_blocks,
         )
 
 
@@ -1042,6 +1109,7 @@ class WillowClient:
         indexer_url: Optional[str] = None,
         api_key: Optional[str] = None,
         consensus_rpc_url: Optional[str] = None,
+        max_proof_lag_blocks: int = DEFAULT_MAX_PROOF_LAG_BLOCKS,
     ):
         """Initialize Willow client.
 
@@ -1079,7 +1147,20 @@ class WillowClient:
                 ``GET /account/{did}/nonce``), and
                 ``completeness`` reads its on-chain anchors from it.
                 Requests to it carry no ``X-API-Key``.
+            max_proof_lag_blocks: How many blocks behind the latest height
+                ``consensus_rpc_url`` reports a verified read's state may be
+                (see ``DataOperations.get_verified``): a non-negative
+                integer, 20 by default.
         """
+        if (
+            isinstance(max_proof_lag_blocks, bool)
+            or not isinstance(max_proof_lag_blocks, int)
+            or max_proof_lag_blocks < 0
+        ):
+            raise ValueError(
+                f"max_proof_lag_blocks must be a non-negative integer, not {max_proof_lag_blocks!r}"
+            )
+        self.max_proof_lag_blocks = max_proof_lag_blocks
         self.api_url = api_url.rstrip("/")
         self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
         self.timeout = timeout
@@ -1547,6 +1628,68 @@ class WillowClient:
             produced = latest[0] >= height
             if not produced:
                 await asyncio.sleep(self._header_poll_interval)
+
+    async def _header_carrying(self, root: bytes, height: int, what: str) -> int:
+        """The height of the newest header found that carries ``root``, the
+        root of a proof of the state after block ``height``, when that state
+        is current (see ``DataOperations.get_verified``).
+
+        Raises:
+            ProofHeightOutOfRangeError: ``height`` is more than
+                ``max_proof_lag_blocks`` ahead of the latest, or no header
+                within that lag of it carries ``root``.
+            ProofVerificationError: The header after block ``height`` doesn't
+                carry ``root``, or the consensus RPC serves no header needed.
+        """
+        lag = self.max_proof_lag_blocks
+        latest = await self._consensus_header()
+        if latest is None:
+            raise ProofVerificationError("No trusted root: the consensus RPC served no latest header")
+        latest_height, latest_root = latest
+        if height - latest_height > lag:
+            raise ProofHeightOutOfRangeError(
+                f"The proof for {what} is of the state after block {height}, "
+                f"{height - latest_height} blocks ahead of the chain's latest ({latest_height}); "
+                f"at most max_proof_lag_blocks ({lag}) is accepted"
+            )
+        after = height + 1
+        trusted_root = await self._trusted_app_hash(after)
+        if root != trusted_root:
+            raise ProofVerificationError(
+                f"Root hash mismatch for {what}: the proof computes {root.hex()}, "
+                f"the header at height {after} has app_hash {trusted_root.hex()}"
+            )
+        if latest_height >= after and latest_root == root:
+            return latest_height
+        if latest_height - height <= lag:
+            return after
+
+        async def carries(h: int) -> bool:
+            header = await self._consensus_header(h)
+            if header is None:
+                raise ProofVerificationError(f"No trusted root: the consensus RPC serves no header at height {h}")
+            return header[1] == root
+
+        # The header after the proof's block is not recent: a header G is
+        # recent when latest - (G - 1) <= lag. A header carries one app hash
+        # from the block that wrote it until the next block with
+        # transactions, so the oldest recent header carries the root if any
+        # recent one does; then find the newest that does.
+        oldest = latest_height - lag + 1
+        if oldest > latest_height or not await carries(oldest):
+            raise ProofHeightOutOfRangeError(
+                f"The proof for {what} is stale: it is of the state after block {height}, "
+                f"{latest_height - height} blocks behind the chain's latest ({latest_height}), and no "
+                f"header within max_proof_lag_blocks ({lag}) of it carries its root"
+            )
+        low, high = oldest, latest_height - 1
+        while low < high:
+            middle = (low + high + 1) // 2
+            if await carries(middle):
+                low = middle
+            else:
+                high = middle - 1
+        return low
 
     async def get_root_hash_local(self) -> str:
         """Get the current local root hash from the node.

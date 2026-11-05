@@ -37,6 +37,8 @@ Example usage:
 from .client import (
     WillowClient,
     WillowClientBuilder,
+    VerifiedValue,
+    DEFAULT_MAX_PROOF_LAG_BLOCKS,
     DataOperations,
     RegistrationOperations,
     ProofOperations,
@@ -95,6 +97,7 @@ from .errors import (
     NotFoundError,
     PermissionDeniedError,
     ProofVerificationError,
+    ProofHeightOutOfRangeError,
     UnsupportedError,
     LightClientError,
     CryptoError,
@@ -332,6 +335,8 @@ __all__ = [
     # Client
     "WillowClient",
     "WillowClientBuilder",
+    "VerifiedValue",
+    "DEFAULT_MAX_PROOF_LAG_BLOCKS",
     "DataOperations",
     "RegistrationOperations",
     "ProofOperations",
@@ -372,6 +377,7 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "ProofVerificationError",
+    "ProofHeightOutOfRangeError",
     "UnsupportedError",
     "LightClientError",
     "CryptoError",

@@ -138,6 +138,17 @@ class ProofVerificationError(WillowError):
     pass
 
 
+class ProofHeightOutOfRangeError(ProofVerificationError):
+    """A proof of a state that is not current: no header within
+    ``max_proof_lag_blocks`` of the chain's latest carries its root (a stale
+    or replayed answer), or it names a height that far ahead of the latest.
+
+    The proof itself may be genuine; catch this before
+    ``ProofVerificationError`` to tell a stale answer from a forged one.
+    """
+    pass
+
+
 class UnsupportedError(WillowError):
     """The SDK does not support this operation.
 
