@@ -1,13 +1,15 @@
 """Computed Fields Module.
 
-This module provides SDK-layer computation of derived fields from proven data.
+This module provides SDK-layer computation of derived fields from base data.
 It enables drop-in compatibility with The Graph's query interfaces by computing
-derived values (like price ratios) from cryptographically proven base data.
+derived values (like price ratios) client-side. The SDK applies them to
+``query_unverified`` results, which it does not verify: a derived value is
+only as trustworthy as the data it is computed from.
 
 Design Philosophy:
 - GKR circuits prove the underlying data (reserves, volumes, balances)
 - Division and other derived calculations are done client-side
-- Same trust model: proven inputs + deterministic computation = trustworthy outputs
+- Deterministic computation: a derived value is as trustworthy as its inputs
 - Same API: queries return the same fields The Graph would return
 
 Example:

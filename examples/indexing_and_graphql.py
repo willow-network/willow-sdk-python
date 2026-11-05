@@ -9,8 +9,8 @@ Demonstrates blockchain indexing features:
 5. List indexers
 6. Get verification stats
 
-Willow provides blockchain indexing with cryptographic proofs for every
-query result, enabling trustless verification.
+The SDK returns these answers as the API or indexer serves them: it does not
+verify GraphQL or SQL answers, or any proof they carry.
 
 Prerequisites:
 - pip install willow-sdk
@@ -132,11 +132,8 @@ async def main():
             print(f"Error: {e}")
 
     print("\n" + "=" * 50)
-    print("Key Benefits of Willow:")
-    print("- Cryptographic proofs for every query")
-    print("- Trustless verification of indexed data")
-    print("- Decentralized indexer network")
-    print("- Automatic reorg handling")
+    print("The answers above are as served: the SDK verifies a single key")
+    print("with client.data.get, not GraphQL or SQL answers.")
 
 
 if __name__ == "__main__":

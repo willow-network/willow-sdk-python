@@ -6,7 +6,7 @@ Demonstrates the core workflow:
 2. Connect to a Willow node
 3. Register the DID
 4. Set the identity for per-request signing
-5. Store and query data with automatic proof verification
+5. Store data, and query it (query results are not verified)
 
 Prerequisites:
 - pip install willow-sdk
@@ -51,9 +51,8 @@ async def main():
         await client.wait_until_landed(registration)
         print("  DID registered")
 
-        # 5. Store data (automatic proof verification on reads).
-        # In a real app you'd register the subgrove/dataset first; see
-        # app_registration.py.
+        # 5. Store data. In a real app you'd register the subgrove/dataset
+        # first; see app_registration.py.
         print("\nStoring data...")
         try:
             await client.data.store(
@@ -65,7 +64,8 @@ async def main():
             print(f"  Note: {e} (subgrove may need registration first)")
 
         # 6. Query data. Query results are not verified; client.data.get
-        #    verifies a single key.
+        #    verifies a single key, given a consensus_rpc_url to check
+        #    against (see data_operations.py).
         print("\nQuerying data...")
         try:
             result = await client.data.query_unverified(

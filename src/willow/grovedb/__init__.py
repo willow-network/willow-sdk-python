@@ -1,8 +1,8 @@
 """
 GroveDB Proof Verification
 
-Pure Python implementation of GroveDB Merkle proof verification.
-This enables fully trustless verification without native Rust bindings.
+Pure Python implementation of GroveDB Merkle proof verification, without
+native Rust bindings. A proof proves a value only under a root you trust.
 
 Usage:
     from willow.grovedb import verify_grovedb_proof, verify_proof_against_root

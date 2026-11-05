@@ -572,7 +572,8 @@ class DataOperations:
         """Query historical indexed data from a checkpoint.
 
         Routes through consensus to available indexer nodes that serve
-        historical data for this checkpoint.
+        historical data for this checkpoint. The answer, its proof, and its
+        state root are what the API serves: the SDK verifies none of them.
 
         Args:
             subgrove_id: Subgrove/dataset identifier
@@ -735,7 +736,10 @@ class ProofOperations:
         self.client = client
 
     async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
-        """Get Merkle proof for a data item.
+        """Get the API's Merkle proof for a data item, unverified.
+
+        Check it with ``ProofVerifier.verify_item_proof`` against a root you
+        trust, or use ``data.get``, which does.
 
         Args:
 
@@ -743,7 +747,7 @@ class ProofOperations:
             key: Item key
 
         Returns:
-            Proof data including proof hex and value
+            Proof data including proof hex and value, as the API serves it
         """
         # Nonce-signed when an identity is set, for the DID's read rights.
         response = await self.client._request(
@@ -881,7 +885,7 @@ class IndexingOperations:
 
         The ``source`` argument makes the trust model part of the API:
 
-        - :attr:`QuerySource.VALIDATOR` — consensus-verified chain-tip.
+        - :attr:`QuerySource.VALIDATOR` — the validator's chain-tip data.
           Raises :class:`ValidatorHasNoDataError` for ``VerifyOnly`` subgroves.
         - :attr:`QuerySource.INDEXER` — historical/analytics via an indexer.
           Raises :class:`NoIndexersReachableError` if none serves the subgrove.
@@ -898,7 +902,8 @@ class IndexingOperations:
 
         Returns:
             :class:`RoutedQueryResult` wrapping the :class:`GraphQLResponse`
-            along with which backend served it.
+            along with which backend served it. The answer, and any proof it
+            carries, is what that backend serves: the SDK verifies neither.
         """
         request_data: Dict[str, Any] = {"query": query}
         if variables:
@@ -933,7 +938,9 @@ class IndexingOperations:
             source: Routing preference (default: ``AUTO``)
 
         Returns:
-            :class:`RoutedQueryResult` wrapping the :class:`SqlResponse`.
+            :class:`RoutedQueryResult` wrapping the :class:`SqlResponse`. The
+            answer, and any proof it carries, is what the backend serves:
+            the SDK verifies neither.
         """
         request = SqlRequest(query=query, include_proof=include_proof)
         body = request.model_dump(exclude_none=True)
