@@ -6,6 +6,7 @@ Provides direct transaction broadcasting to CometBFT consensus layer.
 
 import asyncio
 import aiohttp
+import base64
 import json
 import time
 from typing import Callable, Optional, Dict, Any, List, Tuple
@@ -28,6 +29,21 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _tx_hash_bytes(tx_hash: str) -> bytes:
+    """A transaction hash's bytes, from hex with or without ``0x``.
+
+    Raises:
+        ValueError: It isn't hex.
+    """
+    if not isinstance(tx_hash, str):
+        raise ValueError(f"a transaction hash is hex text, not {type(tx_hash).__name__}")
+    text = tx_hash[2:] if tx_hash.startswith(("0x", "0X")) else tx_hash
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        raise ValueError(f"a transaction hash is hex: {tx_hash!r}") from None
+
 
 # Transport failures before a request is sent: it never reached the API.
 _NEVER_SENT = tuple(
@@ -405,17 +421,24 @@ class ConsensusClient:
 
     async def get_transaction_status(self, tx_hash: str) -> TransactionStatus:
         """
-        Get the status of a transaction.
-        
+        Get the status of a transaction, as the consensus RPC's ``tx``
+        method answers it (its word: nothing in the answer is verified).
+
         Args:
-            tx_hash: Transaction hash
-            
+            tx_hash: Transaction hash, as hex (``0x`` optional): the
+                ``tx_hash`` a submission answers
+
         Returns:
-            TransactionStatus enum value
+            TransactionStatus enum value: ``NOT_FOUND`` while the RPC has no
+            such transaction in a block (or can't be read)
+
+        Raises:
+            ValueError: ``tx_hash`` isn't hex. Nothing is sent.
         """
+        hash_bytes = _tx_hash_bytes(tx_hash)
         try:
             # Query transaction from CometBFT
-            result = await self._query_transaction(tx_hash)
+            result = await self._query_transaction(hash_bytes)
             
             if result is None:
                 return TransactionStatus.NOT_FOUND
@@ -440,12 +463,16 @@ class ConsensusClient:
         Wait for a transaction to be confirmed.
         
         Args:
-            tx_hash: Transaction hash to wait for
+            tx_hash: Transaction hash to wait for, as hex (see
+                ``get_transaction_status``)
             timeout_secs: Maximum time to wait
             poll_interval: How often to poll for status
-            
+
         Returns:
             Final TransactionStatus
+
+        Raises:
+            ValueError: ``tx_hash`` isn't hex. Nothing is sent.
         """
         start_time = time.time()
         
@@ -787,13 +814,25 @@ class ConsensusClient:
                 logger.warning(f"RPC attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(self.config.retry_delay_secs * (attempt + 1))
     
-    async def _query_transaction(self, tx_hash: str) -> Optional[Dict[str, Any]]:
-        """Query a transaction by hash."""
+    async def _query_transaction(self, tx_hash: bytes) -> Optional[Dict[str, Any]]:
+        """The consensus RPC's ``tx`` answer for the transaction whose hash is
+        ``tx_hash``; ``None`` when it answers none, or one for another hash.
+
+        A JSON-RPC body carries the ``hash`` parameter, a ``[]byte``, in
+        base64 (only the URI form, ``/tx?hash=0x...``, takes hex)."""
         try:
-            result = await self._rpc_request("tx", {"hash": tx_hash, "prove": False})
-            return result
+            result = await self._rpc_request(
+                "tx", {"hash": base64.b64encode(tx_hash).decode("ascii"), "prove": False}
+            )
         except Exception:
             return None
+        answered = result.get("hash") if isinstance(result, dict) else None
+        try:
+            if not isinstance(answered, str) or bytes.fromhex(answered) != tx_hash:
+                return None
+        except ValueError:
+            return None
+        return result
     
     async def _take_nonce(self, did: str) -> int:
         """A nonce for ``did``'s next transaction: the lowest one in the
