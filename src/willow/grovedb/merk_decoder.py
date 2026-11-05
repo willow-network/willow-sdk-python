@@ -207,9 +207,10 @@ class MerkDecoder:
             return SummedMerkNode(sum=value)
 
         elif feature_code == FEATURE_BIG_SUMMED:
-            # Big sum is encoded as 16 bytes (i128) in little-endian
+            # Big sum is encoded as 16 bytes (i128), big-endian, as merk
+            # writes it (write_i128::<BigEndian>)
             sum_bytes = self._read_bytes(16)
-            sum_value = int.from_bytes(sum_bytes, byteorder='little', signed=True)
+            sum_value = int.from_bytes(sum_bytes, byteorder='big', signed=True)
             return BigSummedMerkNode(sum=sum_value)
 
         elif feature_code == FEATURE_COUNTED:

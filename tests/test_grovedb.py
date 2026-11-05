@@ -559,6 +559,18 @@ class TestMerkDecoder:
 
         assert len(ops) == 2
 
+    @pytest.mark.parametrize("big_sum", [1, -2, 2**100 + 7])
+    def test_a_big_sum_feature_type_is_a_big_endian_i128(self, big_sum):
+        # merk writes BigSummedMerkNode's sum with write_i128::<BigEndian>.
+        key, value, value_hash = b"k", b"\x00", bytes(32)
+        data = (
+            bytes([0x07, len(key)]) + key + len(value).to_bytes(2, "big") + value + value_hash
+            + b"\x02" + big_sum.to_bytes(16, "big", signed=True)
+        )
+        (op,) = decode_merk_ops(data)
+        assert isinstance(op, PushOp)
+        assert op.node.feature_type == BigSummedMerkNode(sum=big_sum)
+
     def test_unknown_op_code(self):
         """Test unknown op code raises error."""
         data = bytes([0xff])
