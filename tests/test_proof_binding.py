@@ -21,6 +21,7 @@ from willow.grovedb import (
     verify_grovedb_proof,
     verify_item_at_path,
     verify_items_at_path,
+    verify_proof_against_root,
 )
 from willow.grovedb.bincode import MAX_LAYER_DEPTH, BincodeReader
 from willow.grovedb.element import deserialize_element
@@ -309,6 +310,43 @@ def test_a_subtree_carried_as_a_kv_node_is_not_an_item():
     # to the subtree's value hash.
     tampered, payload, root = _tree_as_item(lambda key, element, _vh: _kv_op(key, element))
     _assert_no_item_at_p_t(tampered, payload, root, "63 bytes long")
+
+
+def _kv_ref_value_hash_op(key, referenced, nvh):
+    return b"\x06" + bytes([len(key)]) + key + len(referenced).to_bytes(2, "big") + referenced + nvh
+
+
+# A subtree at "t" whose root node's kv hash starts with 0x5f (95), as 1 in
+# 256 subtree roots do: its root, a hash over 96 bytes, is then the value hash
+# of the 95 bytes after that first byte.
+REF_CONTENT = _item(b'{"n":14}')
+
+
+def test_a_subtree_carried_as_a_reference_is_not_returned_as_its_value():
+    # A KVRefValueHash node's value hash is combine_hash(nvh, value_hash(V)),
+    # with nvh carried beside V; a subtree's is combine_hash(value_hash(its
+    # element), root). With V the 95 bytes above, the two are the same.
+    kvh = kv_hash(b"r", REF_CONTENT)
+    assert kvh[0] == 95
+    sub_root = node_hash(kvh, NULL_HASH, NULL_HASH)
+    tree = _tree(b"r")
+    vh = combine_hash(value_hash(tree), sub_root)
+    honest = b"\x00" + _layer(_kv_value_hash_op(b"t", tree, vh), [(b"t", _layer(_kv_op(b"r", REF_CONTENT)))]) + b"\x01"
+    root = verify_grovedb_proof(honest).root_hash
+    forged_value = kvh[1:] + NULL_HASH + NULL_HASH
+    assert len(forged_value) == 95 and value_hash(forged_value) == sub_root
+    forged = b"\x00" + _layer(_kv_ref_value_hash_op(b"t", forged_value, value_hash(tree))) + b"\x01"
+    (entry,) = verify_proof_against_root(forged, root).results
+    assert entry["key"] == b"t" and entry["node_type"] == "KVRefValueHash"
+    assert entry["value"] is None and entry["element"] is None
+    assert entry["ambiguous_value"] == forged_value
+    # One byte either side, a reference's value is bound and returned.
+    for size in (94, 96):
+        referenced = b"v" * size
+        nvh = value_hash(b"reference element")
+        proof = b"\x00" + _layer(_kv_ref_value_hash_op(b"t", referenced, nvh)) + b"\x01"
+        (entry,) = verify_grovedb_proof(proof).results
+        assert entry["value"] == referenced and entry["ambiguous_value"] is None
 
 
 def _single_item_proof(element):

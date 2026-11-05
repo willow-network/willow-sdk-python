@@ -228,9 +228,10 @@ def _verify_layer_proof(
                 "element": element if bound and deserialize_elements else None,
                 "tree": tree,
                 "node_type": proved.node_type,
-                # A KV node's bytes held back from "value" for their length
-                # alone (see AMBIGUOUS_ELEMENT_LENGTH).
-                "ambiguous_value": proved.value if _is_ambiguous_kv(proved) else None,
+                # A KV node's element, or a KVRefValueHash node's referenced
+                # value, held back from "value" for its length alone (see
+                # AMBIGUOUS_ELEMENT_LENGTH and AMBIGUOUS_REFERENCED_LENGTH).
+                "ambiguous_value": proved.value if _is_ambiguous(proved) else None,
             })
 
     # A lower layer under a key this layer doesn't prove is bound to nothing.
@@ -261,9 +262,32 @@ _VALUE_HASH_NODES = ("KVValueHash", "KVValueHashFeatureType")
 # a 63-byte element from a subtree whose hashes are ground to match.
 AMBIGUOUS_ELEMENT_LENGTH = 63
 
+# A ``KVRefValueHash`` node's value hash is ``combine_hash(nvh,
+# value_hash(v))``, with ``nvh`` carried beside the referenced value ``v``. A
+# non-empty subtree's is ``combine_hash(value_hash(element), root)``, and its
+# root is a node hash, blake3 over 96 bytes (kv hash, left, right). For a
+# 95-byte ``v`` (one length byte, 95 bytes) the two inputs are the same
+# length, so when the root's kv hash starts with that length byte (1 subtree
+# root in 256) the root is the value hash of the 95 bytes after it, and a
+# proof can carry the subtree as a reference to those bytes. No other
+# length gives a match without a preimage: the value hash such a node must
+# reproduce is a hash over 64 bytes whose second half is ``value_hash(v)``.
+# In a subtree's, that half is the root, a node hash over 96 bytes; in a
+# 63-byte element's (the only element whose value hash is over 64 bytes), it
+# is the element's own last 32 bytes, which are the value hash of nothing
+# known unless the element's writer put one there.
+AMBIGUOUS_REFERENCED_LENGTH = 95
 
-def _is_ambiguous_kv(proved: ProvedKeyValue) -> bool:
-    return proved.node_type == "KV" and len(proved.value) == AMBIGUOUS_ELEMENT_LENGTH
+
+def _is_ambiguous(proved: ProvedKeyValue) -> bool:
+    """Whether a node's bytes go unbound for their length alone: a ``KV``
+    node's 63-byte element, or a ``KVRefValueHash`` node's 95-byte
+    referenced value."""
+    if proved.node_type == "KV":
+        return len(proved.value) == AMBIGUOUS_ELEMENT_LENGTH
+    if proved.node_type == "KVRefValueHash":
+        return len(proved.value) == AMBIGUOUS_REFERENCED_LENGTH
+    return False
 
 
 def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: List[bytes]) -> bool:
@@ -273,9 +297,11 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
     grovedb proves an Item it matches as a ``KV`` node, a reference as a
     ``KVRefValueHash`` node, and a subtree (or a sum item) as a
     ``KVValueHash`` node. A ``KV`` node's hash is computed from its bytes,
-    and a ``KVRefValueHash`` node's from the referenced bytes it carries, so
-    both are bound, except a ``KV`` node's bytes of exactly
-    ``AMBIGUOUS_ELEMENT_LENGTH`` (63): their value hash has the form of a
+    and a ``KVRefValueHash`` node's from the referenced bytes it carries
+    (beside the reference's own value hash), so both are bound, except a
+    ``KV`` node's bytes of exactly ``AMBIGUOUS_ELEMENT_LENGTH`` (63) and a
+    ``KVRefValueHash`` node's referenced bytes of exactly
+    ``AMBIGUOUS_REFERENCED_LENGTH`` (95): their hashes have the form of a
     subtree's, so they may stand for a subtree (``False``). A
     ``KVValueHash`` node carries its value hash beside its bytes, and only
     the hash enters the root:
@@ -289,8 +315,8 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
       element, so the node's bytes may stand for a subtree. Bytes that do
       not hash to the node's value hash are refused.
     """
-    if proved.node_type == "KV":
-        return not _is_ambiguous_kv(proved)
+    if proved.node_type in ("KV", "KVRefValueHash"):
+        return not _is_ambiguous(proved)
     if proved.node_type not in _VALUE_HASH_NODES:
         return True
     tree = element is not None and is_tree_element(element)
@@ -325,6 +351,12 @@ def _unbound_reason(entry: Dict[str, Any]) -> Optional[str]:
             f"its element is {AMBIGUOUS_ELEMENT_LENGTH} bytes long, and the value hash of "
             f"{AMBIGUOUS_ELEMENT_LENGTH} bytes has the form of a subtree's, so the proof does not "
             "tell it from a subtree"
+        )
+    if entry["node_type"] == "KVRefValueHash" and entry["value"] is None:
+        return (
+            f"its node (KVRefValueHash) carries a reference, and its {AMBIGUOUS_REFERENCED_LENGTH}-byte "
+            "referenced value hashes to a value of the form of a subtree root's, so the proof does "
+            "not tell it from a subtree; grovedb proves an Item as a KV node"
         )
     return None
 
