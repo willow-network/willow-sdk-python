@@ -152,7 +152,9 @@ class WillowIndexers:
             return list(self._cache.data)
 
         url = f"{self._api_url}/indexers"
-        resp = await _body.send(self._http, "GET", url, limit=_body.SMALL)
+        # The list isn't paged and the chain bounds no registration's endpoint or
+        # subgrove list, so any indexer could push it past the small cap.
+        resp = await _body.send(self._http, "GET", url, limit=_body.LARGE)
         resp.raise_for_status()
         body = resp.json()
         data_items = body.get("data") or []

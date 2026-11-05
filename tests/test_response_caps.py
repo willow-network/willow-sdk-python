@@ -202,3 +202,18 @@ async def test_a_list_the_api_does_not_page_reads_past_the_small_cap():
         assert await client.registration.list_subgroves() == []
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_indexer_discovery_reads_past_the_small_cap():
+    import httpx as _httpx
+    from willow.indexers import WillowIndexers
+
+    body = _padded({"success": True, "data": [], "error": None}, SMALL + 1)
+
+    def handler(request):
+        return _httpx.Response(200, content=body)
+
+    async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as http:
+        indexers = WillowIndexers(http, "http://api.test")
+        assert await indexers.list() == []
