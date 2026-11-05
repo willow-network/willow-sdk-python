@@ -728,7 +728,7 @@ class RegistrationOperations:
         Returns:
             List of subgrove registrations
         """
-        response = await self.client._request("GET", "/subgroves")
+        response = await self.client._request("GET", "/subgroves", limit=_body.LARGE)
         return [SubgroveRegistration(**sg) for sg in response.get("data", [])]
 
     # Alias for compatibility
@@ -761,7 +761,7 @@ class RegistrationOperations:
             and reads, and each grant as the API returns it.
         """
         # The API answers { success, data: [Permission, ...] }.
-        response = await self.client._request("GET", f"/did/{did}/permissions")
+        response = await self.client._request("GET", f"/did/{did}/permissions", limit=_body.LARGE)
         return DidPermissions.from_permissions(
             did, [Permission(**p) for p in response.get("data") or []]
         )
@@ -871,7 +871,7 @@ class ValidatorOperations:
         Returns:
             List of validator information
         """
-        response = await self.client._request("GET", "/validators")
+        response = await self.client._request("GET", "/validators", limit=_body.LARGE)
         return [ValidatorInfo(**v) for v in response.get("data", [])]
 
     async def get(self, validator_did: str) -> ValidatorInfo:
@@ -889,7 +889,7 @@ class ValidatorOperations:
     async def _active_validators(self) -> List[Dict[str, Any]]:
         # GET /validators lists the active, unjailed validators, each with
         # its total_stake. The API has no separate total or count route.
-        response = await self.client._request("GET", "/validators")
+        response = await self.client._request("GET", "/validators", limit=_body.LARGE)
         return list(response.get("data") or [])
 
     async def get_total_staked(self) -> int:
@@ -1005,7 +1005,7 @@ class IndexingOperations:
             List of subgrove information
         """
         # The indexed subgroves, in the same shape as GET /subgroves/{id}.
-        response = await self.client._request("GET", "/subgroves/indexed")
+        response = await self.client._request("GET", "/subgroves/indexed", limit=_body.LARGE)
         return [SubgroveInfo(**sg) for sg in response.get("data", [])]
 
     async def get_subgrove(self, subgrove_id: str) -> SubgroveInfo:
@@ -1039,7 +1039,7 @@ class IndexingOperations:
         Returns:
             List of indexer information
         """
-        response = await self.client._request("GET", "/indexers")
+        response = await self.client._request("GET", "/indexers", limit=_body.LARGE)
         return [IndexerInfo(**idx) for idx in response.get("data", [])]
 
     async def get_indexer(self, indexer_did: str) -> IndexerInfo:

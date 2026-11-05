@@ -184,3 +184,21 @@ async def test_a_consensus_submission_whose_answer_is_too_long_may_have_reached_
     with pytest.raises(ConsensusError, match="limit for its route") as exc_info:
         await client._broadcast_transaction({"StoreData": {}})
     assert exc_info.value._sent
+
+
+@pytest.mark.asyncio
+async def test_a_list_the_api_does_not_page_reads_past_the_small_cap():
+    # The chain bounds no data subgrove's schema or access lists, so one
+    # registration can fill a transaction and any account can push a list
+    # past 4 MiB.
+    body = _padded({"success": True, "data": [], "error": None}, SMALL + 1)
+    assert len(body) > SMALL
+
+    def handler(request):
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    client = _client(handler)
+    try:
+        assert await client.registration.list_subgroves() == []
+    finally:
+        await client.close()

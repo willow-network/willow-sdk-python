@@ -27,15 +27,12 @@ import httpx
 from .errors import ResponseEncodingError, ResponseTooLargeError
 
 #: An answer of fixed shape, or a list the node keeps short: an account's
-#: nonce, a balance, the token's info, the fee schedule, validators,
-#: indexers, the health check, a ``/tx/submit`` answer, a DID's permissions,
-#: key grants, subgrove information, state roots, a file manifest or a page
-#: of the file list (at most 100 files), ERC-8004 answers, and CometBFT's
-#: headers, status, and ABCI queries. These answers are a few KB; 4 MiB is
-#: the chain's ``max_tx_bytes``, the most one transaction writes. The subgrove,
-#: validator, and indexer lists aren't paged, so they grow with the chain: a
-#: subgrove's entry is about 1 KB unless its schema is long, so 4 MiB holds
-#: thousands.
+#: nonce, a balance, the token's info, the fee schedule, one validator or
+#: indexer, the health check, a ``/tx/submit`` answer, a key grant, subgrove
+#: information, state roots, a file manifest or a page of the file list (at
+#: most 100 files), ERC-8004 answers, and CometBFT's headers, status, and ABCI
+#: queries. These answers are a few KB; 4 MiB is the chain's ``max_tx_bytes``,
+#: the most one transaction writes.
 SMALL = 4 << 20
 #: A file chunk: the storage node's upload route takes a body of at most
 #: 2 MiB (axum's default body limit), so it stores no longer chunk.
@@ -54,7 +51,11 @@ BLOCK = 32 << 20
 #: ``/query`` page (100 documents unless the query sets a limit, each at
 #: most ``max_data_payload_bytes``, 512 KiB: 50 MiB), GraphQL and SQL
 #: answers, a historical query, a block's matched logs, and Ethereum state
-#: answers (proofs of as many slots as asked for).
+#: answers (proofs of as many slots as asked for). Also the lists the API
+#: doesn't page (subgroves, validators, indexers, a subgrove's key grants, a
+#: DID's permissions), which grow with the chain: the chain doesn't bound a
+#: data or file subgrove's schema or access lists, so one registration can
+#: fill a transaction, and any account can make a list pass 4 MiB.
 LARGE = 64 << 20
 
 #: A request through ``send`` ends within this many times its client's

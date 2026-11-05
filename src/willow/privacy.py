@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from . import _body
 from .consensus.types import GrantSubgroveKeyTx, RevokeSubgroveKeyTx, RotateSubgroveKeyTx
 from .errors import WillowError
 from .utils import require_auth
@@ -243,6 +244,7 @@ class PrivacyOperations:
             f"/key-grants/{subgrove_id}",
             authenticated=True,
             read=True,
+            limit=_body.LARGE,
         )
         return list(response.get("data") or [])
 
