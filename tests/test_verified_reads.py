@@ -11,6 +11,7 @@ import pytest
 
 from willow import ProofVerificationError, UnsupportedError, WillowClient
 from willow.auth import generate_did
+from willow.completeness import CompletenessError
 from willow.grovedb import GroveDBVerificationError, verify_item_at_path
 from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash, value_hash
 from willow.grovedb.types import NULL_HASH
@@ -328,7 +329,31 @@ async def test_get_root_hash_is_the_consensus_rpcs_latest_app_hash():
 def test_completeness_reads_its_anchor_from_the_consensus_rpc():
     client = WillowClient("http://api.test:3031", consensus_rpc_url=RPC)
     assert client.completeness._rpc_url == RPC
-    assert WillowClient("http://api.test:3031").completeness._rpc_url == "http://api.test:26657"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_url", ["https://api.willow.tech", "http://api.test:3031"])
+async def test_completeness_without_the_consensus_rpc_raises_before_any_request(api_url):
+    # Without consensus_rpc_url there is no trusted source for the anchor:
+    # one read from the API's host would let the API forge it.
+    sent = []
+
+    def handler(request):
+        sent.append(str(request.url))
+        return httpx.Response(200, json={"result": {"response": {"code": 0, "value": ""}}})
+
+    client = WillowClient(api_url, indexer_url="http://indexer.test")
+    transport = httpx.MockTransport(handler)
+    client._http = client._rpc_http = client._indexer_http = httpx.AsyncClient(transport=transport)
+    client.completeness._http = client.completeness._rpc_http = client._http
+    for check in (
+        client.completeness.fetch_anchor("sg", 7),
+        client.completeness.verify_block_completeness("sg", 7),
+    ):
+        with pytest.raises(CompletenessError, match="consensus_rpc_url"):
+            await check
+    assert sent == []
+    await client.close()
 
 
 # ---------------------------------------------------------------------------

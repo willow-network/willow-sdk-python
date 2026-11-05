@@ -66,10 +66,10 @@ async def test_the_completeness_anchor_read_carries_no_api_key():
         seen.append((request.url.host, request.headers.get("x-api-key")))
         return httpx.Response(200, json={"result": {"response": {"code": 1, "log": "none"}}})
 
-    client = WillowClient("http://api.test:3031", api_key="wk_secret")
+    client = WillowClient("http://api.test:3031", api_key="wk_secret", consensus_rpc_url="http://rpc.test:26657")
     client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     client.completeness._rpc_http = client._rpc_http
     with pytest.raises(Exception):
         await client.completeness.fetch_anchor("sg", 1)
-    assert seen == [("api.test", None)]
+    assert seen == [("rpc.test", None)]
     await client.close()

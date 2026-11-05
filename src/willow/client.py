@@ -1157,7 +1157,8 @@ class WillowClient:
                 ``wait_until_landed`` sees a write land even while a lower
                 nonce is unused (without it, only the base, from
                 ``GET /account/{did}/nonce``), and
-                ``completeness`` reads its on-chain anchors from it.
+                ``completeness`` reads its on-chain anchors from it (and
+                raises ``CompletenessError`` without it).
                 Requests to it carry no ``X-API-Key``.
             max_proof_lag_blocks: How many blocks behind the latest height
                 ``consensus_rpc_url`` reports a verified read's state may be
@@ -1228,12 +1229,12 @@ class WillowClient:
         self._indexer_http = httpx.AsyncClient(timeout=timeout)
 
         # Client-side completeness checks. The on-chain anchor is read from
-        # consensus_rpc_url (or, without it, the URL derived from api_url,
-        # :3031 -> :26657) without the API key; the matched-log preimage
+        # consensus_rpc_url, without the API key, and never from the API's
+        # host: without it the anchor reads raise. The matched-log preimage
         # comes from the configured indexer.
         self.completeness = CompletenessOperations(
             self._http,
-            self.consensus_rpc_url or self.api_url.replace(":3031", ":26657"),
+            self.consensus_rpc_url,
             self.indexer_url,
             rpc_http=self._rpc_http,
         )

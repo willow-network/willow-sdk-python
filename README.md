@@ -21,7 +21,7 @@ pip install -e .
 
 Every write is a signed transaction submitted to the API server's `POST /tx/submit`: DID registration, subgrove registration, data and file writes, and key grants. The API accepts no writes over its REST routes. `api_url` is therefore **required** whenever you submit a tx.
 
-`consensus_rpc_url` is the CometBFT RPC (typically port 26657) of a node you run or trust: the client's trusted source of chain state. `data.get` checks proofs against the headers it serves and raises without it; the client reads from it which nonces are used (see Nonces), and the completeness checks read their on-chain anchors from it. Point it at a consensus node, not at the API: a header the API serves can't verify what the API serves.
+`consensus_rpc_url` is the CometBFT RPC (typically port 26657) of a node you run or trust: the client's trusted source of chain state. `data.get` checks proofs against the headers it serves and raises without it; the client reads from it which nonces are used (see Nonces), and the completeness checks read their on-chain anchors from it and raise `CompletenessError` without it. Point it at a consensus node, not at the API: a header the API serves can't verify what the API serves.
 
 ## Quick Start
 
