@@ -46,8 +46,8 @@ def execute_ops(
         The resulting tree
     """
     stack: List[Tree] = []
+    # The last key pushed, either way: merk checks each key against it.
     last_key: Optional[bytes] = None
-    last_key_inverted = False
 
     def pop() -> Tree:
         if not stack:
@@ -56,14 +56,13 @@ def execute_ops(
 
     for op in ops:
         if isinstance(op, PushOp):
-            # Verify key ordering (ascending)
+            # Verify key ordering (ascending from the last key pushed)
             key = _get_node_key(op.node)
-            if key and last_key and not last_key_inverted:
+            if key is not None and last_key is not None:
                 if compare_bytes(key, last_key) <= 0:
                     raise GroveDBVerificationError("Incorrect key ordering")
-            if key:
+            if key is not None:
                 last_key = key
-                last_key_inverted = False
 
             if visit_node:
                 visit_node(op.node)
@@ -71,14 +70,13 @@ def execute_ops(
             stack.append(Tree(op.node))
 
         elif isinstance(op, PushInvertedOp):
-            # Verify key ordering (descending for inverted)
+            # Verify key ordering (descending from the last key pushed)
             key = _get_node_key(op.node)
-            if key and last_key and last_key_inverted:
+            if key is not None and last_key is not None:
                 if compare_bytes(key, last_key) >= 0:
                     raise GroveDBVerificationError("Incorrect key ordering inverted")
-            if key:
+            if key is not None:
                 last_key = key
-                last_key_inverted = True
 
             if visit_node:
                 visit_node(op.node)

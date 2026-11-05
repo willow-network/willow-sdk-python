@@ -752,6 +752,21 @@ class TestExecutor:
         assert tree.left is not None
         assert tree.right is None
 
+    @pytest.mark.parametrize("ops,match", [
+        # A Push after a PushInverted, and the other way round: merk compares
+        # each key with the last one pushed, whichever way it was pushed.
+        ([PushInvertedOp(node=KVNode(key=b"b", value=b"v")), PushOp(node=KVNode(key=b"a", value=b"v")), ChildOp()],
+         "Incorrect key ordering"),
+        ([PushOp(node=KVNode(key=b"a", value=b"v")), PushInvertedOp(node=KVNode(key=b"b", value=b"v")), ChildOp()],
+         "Incorrect key ordering inverted"),
+    ])
+    def test_key_order_is_checked_against_the_last_key_either_way(self, ops, match):
+        with pytest.raises(GroveDBVerificationError, match=match):
+            execute_ops(ops, collapse=False)
+        # In order, the same ops run.
+        ops[0].node.key, ops[1].node.key = ops[1].node.key, ops[0].node.key
+        execute_ops(ops, collapse=False)
+
     def test_execute_empty_stack_error(self):
         """Test error on empty stack operations."""
         ops = [ParentOp()]  # No nodes to operate on
