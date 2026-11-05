@@ -319,7 +319,7 @@ for write in list(client.interrupted_writes.values()):
 
 #### Waiting for writes to land
 
-Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, lists of them, or a write's error, and returns once each nonce is used:
+Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, lists of them, or the error of a write that may have reached the node (its `transaction` set), and returns once each nonce is used. The error of a write that was never sent or that CheckTx refused (`transaction` is `None`) raises `ValueError`: that write never ran, and a later write may take its nonce. A write that never lands keeps its nonce for 120 s; if this client hands the nonce to another write after that, waiting on the first raises (`ValueError` before the wait, `NotLandedError` during it) instead of reporting the other write's landing as its own:
 
 ```python
 registration = await client.register_did(did_info["did_document"])

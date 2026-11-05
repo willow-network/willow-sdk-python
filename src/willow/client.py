@@ -139,6 +139,11 @@ class VerifiedValue:
     root_hash: str
 
 
+class _WriteResult(dict):
+    """A write's ``{tx_hash, code, log, did, nonce}``, remembering the
+    hand-out of its nonce it was sent under (see ``wait_until_landed``)."""
+
+
 _NO_TRUSTED_HEADER_SOURCE = (
     "no trusted header source: set consensus_rpc_url to the CometBFT RPC of a node you trust "
     "(data.get_unverified reads the value without verification)"
@@ -1931,23 +1936,29 @@ class WillowClient:
         ``interrupted_writes`` before it propagates.
         """
         handout = self._nonces.handout(did, nonce)
+
+        def mark(write: Any) -> Any:
+            write._handout = handout
+            write._tracker = self._nonces
+            return write
+
         try:
             response = await self._post_transaction(transaction)
         except asyncio.CancelledError as e:
-            self.interrupted_writes[(did, nonce)] = InterruptedWrite(did, nonce, transaction, handout)
+            self.interrupted_writes[(did, nonce)] = mark(InterruptedWrite(did, nonce, transaction, handout))
             e.did, e.nonce, e.transaction = did, nonce, transaction  # type: ignore[attr-defined]
-            e._handout = handout  # type: ignore[attr-defined]
+            mark(e)
             raise
         except NetworkError as e:
             e.did, e.nonce = did, nonce
             if getattr(e, "_sent", True) or resubmission:
                 e.transaction = transaction
-                e._handout = handout  # type: ignore[attr-defined]
+                mark(e)
             else:
                 self._nonces.release(did, nonce, handout)
             raise
         try:
-            return dict(_tx_submit_result(response), did=did, nonce=nonce)
+            return mark(_WriteResult(_tx_submit_result(response), did=did, nonce=nonce))
         except TransactionError as e:
             e.did, e.nonce = did, nonce
             outcome = refusal_outcome(e, response.status_code, nonce)
@@ -1956,7 +1967,11 @@ class WillowClient:
             self._nonces.settle(did, nonce, outcome, handout)
             if outcome == UNKNOWN:
                 e.transaction = transaction
-                e._handout = handout  # type: ignore[attr-defined]
+                mark(e)
+            elif resubmission:
+                # Its nonce is used: an earlier copy may have landed under it.
+                e._resubmission = True  # type: ignore[attr-defined]
+                mark(e)
             raise
 
     async def resubmit(self, failed: Any) -> Dict[str, Any]:
@@ -2092,11 +2107,27 @@ class WillowClient:
         to know it took effect. A RegisterDid uses its nonce only when it
         succeeds.
 
+        Only a write that may run can be waited on: one CheckTx accepted, or
+        one that may have reached the node (its error carries
+        ``transaction``). The error of a write that was never sent or that
+        CheckTx refused (``transaction`` is ``None``), or a refused
+        ``BroadcastResult``, raises ``ValueError``: it never ran, and a later
+        write may take its nonce. (The refusal of a ``resubmit`` whose nonce
+        is used is the exception: an earlier copy may have used it, and the
+        wait returns at once.) A write that never lands keeps its nonce
+        for 120 s; after that this client may hand the nonce to another
+        write, and waiting on the first then raises (``ValueError`` before
+        the wait, ``NotLandedError`` during it) instead of reporting the
+        other write's landing as its own.
+
         Raises:
-            NotLandedError: A nonce wasn't used within ``timeout`` seconds.
-            ValueError: A write carries no ``did`` and ``nonce``.
+            NotLandedError: A nonce wasn't used within ``timeout`` seconds,
+                or this client handed it to another write while waiting.
+            ValueError: A write carries no ``did`` and ``nonce``, never ran,
+                or its nonce has been given back or handed to another write
+                by this client.
         """
-        targets: Dict[str, Set[int]] = {}
+        targets: Dict[str, Dict[int, List[Any]]] = {}
         pending: List[Any] = list(writes)
         while pending:
             write = pending.pop()
@@ -2109,13 +2140,32 @@ class WillowClient:
                 did, nonce = getattr(write, "did", None), getattr(write, "nonce", None)
             if not isinstance(did, str) or isinstance(nonce, bool) or not isinstance(nonce, int):
                 raise ValueError("each write must be the {..., did, nonce} result a write returned")
-            targets.setdefault(did, set()).add(nonce)
+            refused = isinstance(write, BaseException) or getattr(write, "success", True) is False
+            if refused and getattr(write, "transaction", None) is None and not getattr(write, "_resubmission", False):
+                raise ValueError(
+                    f"nonce {nonce} of {did}: this write was never sent, or CheckTx refused it, so it "
+                    f"never ran and there is nothing to wait for (a later write may take its nonce)"
+                )
+            if not self._still_its_nonce(write, did, nonce):
+                raise ValueError(
+                    f"nonce {nonce} of {did} was given back or handed to another write after this "
+                    f"write's lease ran out: waiting on it would wait on that write; read what this "
+                    f"write wrote to learn whether it took effect"
+                )
+            targets.setdefault(did, {}).setdefault(nonce, []).append(write)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         for did, nonces in targets.items():
             while True:
                 base, used = await self._nonce_state(did)
                 base = self._nonces.observe(did, base, used)
+                for n, those in nonces.items():
+                    if not all(self._still_its_nonce(write, did, n) for write in those):
+                        raise NotLandedError(
+                            f"nonce {n} of {did} was handed to another write after this write's "
+                            f"lease ran out, before it landed: read what it wrote to learn whether "
+                            f"it took effect"
+                        )
                 waiting = sorted(n for n in nonces if not self._nonces.is_used(did, n))
                 if not waiting:
                     break
@@ -2125,6 +2175,14 @@ class WillowClient:
                         f"{timeout} s: the account's base nonce is {base}"
                     )
                 await asyncio.sleep(poll_interval)
+
+    def _still_its_nonce(self, write: Any, did: str, nonce: int) -> bool:
+        """Whether this client hasn't given back or handed to another write
+        the nonce a write it sent went out under (``True`` for a write it
+        didn't send)."""
+        if getattr(write, "_tracker", None) is not self._nonces:
+            return True
+        return self._nonces.still_handed_to(did, nonce, getattr(write, "_handout", None))
 
     async def _request(
         self,

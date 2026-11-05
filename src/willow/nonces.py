@@ -244,6 +244,19 @@ class NonceTracker:
         with self._lock:
             return self._account(did).handout.get(nonce)
 
+    def still_handed_to(self, did: str, nonce: int, handout: Optional[int]) -> bool:
+        """Whether ``nonce`` of ``did`` still went last to ``handout`` (what
+        ``handout()`` answered for a write): ``False`` once it was given back
+        or handed to another write since. A nonce whose record is no longer
+        kept (more than ``HANDOUT_HISTORY`` below the base) counts as still
+        its own."""
+        with self._lock:
+            account = self._account(did)
+            current = account.handout.get(nonce)
+            if current is None:
+                return nonce <= account.base - HANDOUT_HISTORY
+            return current == handout
+
     def reclaim(self, did: str, nonce: int, handout: Optional[int]) -> bool:
         """Take ``nonce`` again for a resubmission of the transaction it went
         to in ``handout`` (what ``handout()`` answered then), renewing its

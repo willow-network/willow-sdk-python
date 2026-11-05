@@ -475,6 +475,98 @@ async def test_wait_until_landed_takes_a_batch_and_times_out():
     await client.close()
 
 
+# wait_until_landed waits only on a write that may run, under a nonce still its own.
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_a_write_that_never_left_raises():
+    # It never left, so its nonce went back; the next write takes it and lands.
+    client, node, _ = _client(base=1)
+    _flaky(client, node, [httpx.ConnectError("refused")])
+    with pytest.raises(NetworkError) as exc_info:
+        await client.data.store_item("sg", "a", {})
+    assert exc_info.value.transaction is None
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 2
+    node.land()
+    with pytest.raises(ValueError, match="never ran"):
+        await client.wait_until_landed(exc_info.value, timeout=0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_a_write_checktx_refused_raises():
+    from willow.consensus.types import BroadcastResult
+
+    client, node, _ = _client(base=1)
+    node.refusals.append("insufficient balance")
+    with pytest.raises(TransactionError) as exc_info:
+        await client.data.store_item("sg", "a", {})
+    assert exc_info.value.transaction is None
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 2
+    node.land()
+    with pytest.raises(ValueError, match="never ran"):
+        await client.wait_until_landed(exc_info.value, timeout=0)
+    refused = BroadcastResult(
+        success=False, error_code=1, error_message="insufficient balance", did=node.did, nonce=2
+    )
+    with pytest.raises(ValueError, match="never ran"):
+        await client.wait_until_landed(refused, timeout=0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_a_write_whose_nonce_went_to_another_write_raises():
+    # Accepted, then dropped from the mempool: its lease runs out, and the
+    # next write takes its nonce and lands.
+    clock = _Clock()
+    client, node, _ = _client(base=1)
+    client._nonces = NonceTracker(clock)
+    first = await client.data.store_item("sg", "a", {})
+    node.pending.clear()
+    clock.now += LEASE_SECONDS
+    second = await client.data.store_item("sg", "b", {})
+    assert first["nonce"] == second["nonce"] == 2
+    node.land()
+    with pytest.raises(ValueError, match="handed to another write"):
+        await client.wait_until_landed(first, timeout=0)
+    await client.wait_until_landed(second, timeout=0)
+
+    # The error of a write that may have reached the node, likewise.
+    _flaky(client, node, [httpx.ReadTimeout("timed out")])
+    with pytest.raises(NetworkError) as exc_info:
+        await client.data.store_item("sg", "c", {})
+    assert exc_info.value.transaction is not None and exc_info.value.nonce == 3
+    node.pending.clear()
+    clock.now += LEASE_SECONDS
+    assert (await client.data.store_item("sg", "d", {}))["nonce"] == 3
+    node.land()
+    with pytest.raises(ValueError, match="handed to another write"):
+        await client.wait_until_landed(exc_info.value, timeout=0)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_wait_stops_when_the_nonce_goes_to_another_write():
+    # Accepted, then dropped. While it is waited on, its lease runs out and
+    # another write takes its nonce and lands.
+    clock = _Clock()
+    client, node, _ = _client(base=1)
+    client._nonces = NonceTracker(clock)
+    first = await client.data.store_item("sg", "a", {})
+    node.pending.clear()
+
+    def another_write_takes_it_and_lands(node):
+        node.on_nonce_read = None
+        clock.now += LEASE_SECONDS
+        assert client._nonces.take(node.did, node.base) == 2
+        node.base = 2
+
+    node.on_nonce_read = another_write_takes_it_and_lands
+    with pytest.raises(NotLandedError, match="handed to another write"):
+        await client.wait_until_landed(first, timeout=300, poll_interval=0)
+    await client.close()
+
+
 def _flaky(client, node, failures):
     """Fail the next submissions as ``failures`` says: an exception raised
     before the node sees the request, or ``("after", exc)`` to raise once the
