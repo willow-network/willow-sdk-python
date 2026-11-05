@@ -414,13 +414,27 @@ async def test_get_takes_the_newest_header_within_the_lag_that_carries_the_root(
     client, seen = _get_client(latest=100, root_at=_carried_until(90))
     verified = await client.data.get_verified("my-sub", "user:bob")
     assert (verified.value, verified.height) == ({"balance": 250}, 90)
-    assert seen["heights"][:3] == [None, 42, 81] and len(seen["heights"]) <= 3 + 5
+    # The oldest recent header (81) first, then the one after the proof's block.
+    assert seen["heights"][:3] == [None, 81, 42] and len(seen["heights"]) <= 3 + 5
     await client.close()
     # Changed at block 75: no header within the lag carries it.
     client, _ = _get_client(latest=100, root_at=_carried_until(75))
     with pytest.raises(ProofVerificationError, match="stale") as excinfo:
         await client.data.get_verified("my-sub", "user:bob")
     assert _out_of_range(excinfo)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_proof_is_out_of_range_when_the_header_after_its_block_is_pruned():
+    # A genuine proof of the state after block 41, which changed at block 42;
+    # the chain is at 1000, and the consensus node keeps no header below 900.
+    client, seen = _get_client(latest=1000, root_at=lambda h: None if h < 900 else OTHER_ROOT)
+    client.timeout = 0
+    with pytest.raises(ProofVerificationError, match="stale") as excinfo:
+        await client.data.get("my-sub", "user:bob")
+    assert _out_of_range(excinfo)
+    assert 42 not in seen["heights"]
     await client.close()
 
 

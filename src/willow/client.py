@@ -1679,6 +1679,29 @@ class WillowClient:
                 f"at most max_proof_lag_blocks ({lag}) is accepted"
             )
         after = height + 1
+
+        async def carries(h: int) -> bool:
+            header = await self._consensus_header(h)
+            if header is None:
+                raise ProofVerificationError(f"No trusted root: the consensus RPC serves no header at height {h}")
+            return header[1] == root
+
+        # When the header after the proof's block is not recent (a header G
+        # is recent when latest - (G - 1) <= lag) and the latest doesn't
+        # carry the root, the proof is current only if a recent header
+        # carries it. A header carries one app hash from the block that
+        # wrote it until the next block with transactions, so the oldest
+        # recent header carries the root if any recent one does. This is
+        # checked first: a node that prunes old headers may no longer serve
+        # the one after a stale proof's block.
+        oldest = latest_height - lag + 1
+        stale = latest_height - height > lag and latest_root != root
+        if stale and (oldest > latest_height or not await carries(oldest)):
+            raise ProofHeightOutOfRangeError(
+                f"The proof for {what} is stale: it is of the state after block {height}, "
+                f"{latest_height - height} blocks behind the chain's latest ({latest_height}), and no "
+                f"header within max_proof_lag_blocks ({lag}) of it carries its root"
+            )
         trusted_root = await self._trusted_app_hash(after)
         if root != trusted_root:
             raise ProofVerificationError(
@@ -1690,24 +1713,8 @@ class WillowClient:
         if latest_height - height <= lag:
             return after
 
-        async def carries(h: int) -> bool:
-            header = await self._consensus_header(h)
-            if header is None:
-                raise ProofVerificationError(f"No trusted root: the consensus RPC serves no header at height {h}")
-            return header[1] == root
-
-        # The header after the proof's block is not recent: a header G is
-        # recent when latest - (G - 1) <= lag. A header carries one app hash
-        # from the block that wrote it until the next block with
-        # transactions, so the oldest recent header carries the root if any
-        # recent one does; then find the newest that does.
-        oldest = latest_height - lag + 1
-        if oldest > latest_height or not await carries(oldest):
-            raise ProofHeightOutOfRangeError(
-                f"The proof for {what} is stale: it is of the state after block {height}, "
-                f"{latest_height - height} blocks behind the chain's latest ({latest_height}), and no "
-                f"header within max_proof_lag_blocks ({lag}) of it carries its root"
-            )
+        # The oldest recent header carries the root (checked above): find
+        # the newest that does.
         low, high = oldest, latest_height - 1
         while low < high:
             middle = (low + high + 1) // 2
