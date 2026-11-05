@@ -147,6 +147,8 @@ class _Account:
     handed: Dict[int, float] = field(default_factory=dict)
     # The hand-out each nonce last went to, kept after the base passes it.
     handout: Dict[int, int] = field(default_factory=dict)
+    # The highest base a trusted source (the consensus RPC) answered.
+    trusted_base: Optional[int] = None
 
 
 class NonceTracker:
@@ -192,6 +194,19 @@ class NonceTracker:
             account = self._account(did)
             self._refresh(account, base, self._clock(), used)
             return account.base
+
+    def trust_base(self, did: str, base: int) -> None:
+        """Record ``did``'s base as a trusted source (the consensus RPC)
+        answered it. A base that only other answers (the API's) raised above
+        the highest trusted one drops back to it, so an API that answers a
+        base too high can't keep every nonce handed out past the node's
+        window."""
+        with self._lock:
+            account = self._account(did)
+            if account.trusted_base is None or base > account.trusted_base:
+                account.trusted_base = base
+            if account.base > account.trusted_base:
+                account.base = account.trusted_base
 
     def is_used(self, did: str, nonce: int) -> bool:
         """Whether ``nonce`` of ``did`` is known used: at or below the highest

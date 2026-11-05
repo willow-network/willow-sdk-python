@@ -761,6 +761,38 @@ def _with_rpc(client, node, fail=False):
 
 
 @pytest.mark.asyncio
+async def test_a_base_the_api_answered_too_high_gives_way_to_the_consensus_rpcs():
+    # The nonce-state query fails once, and the API answers a base far above
+    # the account's: the write signs past the window and is refused. Once
+    # the consensus RPC answers again, its base replaces the API's.
+    client, node, _ = _client(base=1)
+    reads = []
+    client.consensus_rpc_url = "http://rpc.test"
+    healthy = _rpc_handler(node, reads)
+    failing = {"left": 1}
+
+    def rpc(request):
+        if failing["left"]:
+            failing["left"] -= 1
+            return httpx.Response(503)
+        return healthy(request)
+
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(rpc))
+    real = node.handler
+
+    def api(request):
+        if request.url.path.endswith("/nonce"):
+            return _ok({"did": node.did, "nonce": 10**9})
+        return real(request)
+
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(api))
+    with pytest.raises(TransactionError, match="too far ahead"):
+        await client.data.store_item("sg", "a", {})
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_wait_until_landed_sees_a_nonce_above_a_gap_with_the_rpc_url():
     # Nonce 2 was abandoned (never landed); nonce 3 landed. The base stays 1.
     client, node, _ = _client(base=1)

@@ -1776,11 +1776,14 @@ class WillowClient:
 
         With ``consensus_rpc_url``, from the ABCI query
         ``/store/account_nonce_state/{did}``; without it, or when that query
-        fails, the base alone from ``GET /account/{did}/nonce``.
+        fails, the base alone from ``GET /account/{did}/nonce``. A base the
+        consensus RPC answers replaces a higher one only the API answered.
         """
         if self.consensus_rpc_url:
             try:
-                return await self._query_nonce_state(did)
+                base, used = await self._query_nonce_state(did)
+                self._nonces.trust_base(did, base)
+                return base, used
             except (WillowError, httpx.HTTPError, ValueError) as e:
                 logger.warning(f"Could not read the nonce state of {did} over RPC, reading the base: {e}")
         return await self._account_nonce(did), frozenset()
