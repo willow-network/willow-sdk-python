@@ -139,6 +139,24 @@ async def test_get_fails_closed_on_a_malformed_proof():
 
 
 @pytest.mark.asyncio
+async def test_get_refuses_an_item_attached_under_a_hash_node():
+    # The data layer is the honest root as a Hash node with a forged Item
+    # attached under it: the proof reproduces the trusted root.
+    key = b"user:bob"
+    real = b"\x00" + bytes([15]) + b'{"balance":250}' + b"\x00"
+    forged = b"\x00" + bytes([18]) + b'{"balance":999999}' + b"\x00"
+    real_data_root = node_hash(kv_hash(key, real), NULL_HASH, NULL_HASH)
+    _, root = _bobs_proof(real)
+    kv = b"\x03" + bytes([len(key)]) + key + len(forged).to_bytes(2, "big") + forged
+    proof, forged_root = _bobs_proof(real, data_merk=b"\x01" + real_data_root + kv + b"\x11")
+    assert forged_root == root
+    client, _ = _get_client(proof={"proof": proof.hex(), "height": 41}, root=root, served={"balance": 999999})
+    with pytest.raises(ProofVerificationError, match="Hash node can't have children"):
+        await client.data.get("my-sub", "user:bob")
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_get_returns_a_value_whose_item_is_63_bytes():
     # A 60-byte JSON text is a 63-byte Item. A proof can't tell 63 bytes
     # from a subtree's or a reference's value hash, but a subgrove's data

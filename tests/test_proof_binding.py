@@ -346,6 +346,94 @@ def test_tampered_envelopes_are_refused():
             verify_item_at_path(bytes.fromhex(fx[name]), fx["path"], fx["key"])
 
 
+# ---------------------------------------------------------------------------
+# A Hash node is opaque: its hash is the whole subtree's, so it can't have
+# children. A node attached under one would be proven while the root ignores it.
+
+# Each op that attaches a node to a parent, with the pushes it pops: the KV
+# node ``kv`` ends up a child of the Hash node ``h``.
+_ATTACH_TO_HASH = {
+    "Parent": lambda h, kv: kv + h + b"\x10",
+    "Child": lambda h, kv: h + kv + b"\x11",
+    "ParentInverted": lambda h, kv: kv + h + b"\x12",
+    "ChildInverted": lambda h, kv: h + kv + b"\x13",
+}
+
+BOB_KEY = b"user:bob"
+BOB_ITEM = _item(b'{"balance":250}')
+BOB_DATA_ROOT = node_hash(kv_hash(BOB_KEY, BOB_ITEM), NULL_HASH, NULL_HASH)
+FORGED_KV = _kv_op(BOB_KEY, _item(b'{"balance":999999}'))
+
+
+def _under_subgrove(data_merk, data_root, top=lambda merk: merk):
+    """A proof of the merk proof ``data_merk`` (whose root is ``data_root``)
+    as the data layer of subgroves/my-sub, and the root it reproduces;
+    ``top`` rewrites the root layer's merk proof."""
+    layer, root, below = _layer(data_merk), data_root, BOB_KEY
+    for segment in (b"data", b"my-sub", b"subgroves"):
+        tree = _tree(below)
+        vh = combine_hash(value_hash(tree), root)
+        merk = _kv_value_hash_op(segment, tree, vh)
+        layer = _layer(top(merk) if segment == b"subgroves" else merk, [(segment, layer)])
+        root = node_hash(kv_digest_to_kv_hash(segment, vh), NULL_HASH, NULL_HASH)
+        below = segment
+    return b"\x00" + layer + b"\x01", root
+
+
+HONEST_BOB, HONEST_BOB_ROOT = _under_subgrove(_kv_op(BOB_KEY, BOB_ITEM), BOB_DATA_ROOT)
+
+
+def _assert_forgery_refused(forged, root):
+    path = subgrove_data_path("my-sub")
+    for only_items in (False, True):
+        with pytest.raises(GroveDBVerificationError, match="Hash node can't have children"):
+            verify_item_at_path(forged, path, BOB_KEY, root, only_items_at_path=only_items)
+    with pytest.raises(GroveDBVerificationError, match="Hash node can't have children"):
+        verify_items_at_path(forged, path, root)
+    for verify in (quick_verify, verify_grovedb_proof):
+        with pytest.raises(GroveDBVerificationError, match="Hash node can't have children"):
+            verify(forged)
+    assert not ProofVerifier.verify_item_proof(forged.hex(), BOB_KEY, {"balance": 999999}, path).valid
+    assert not LightClientProofVerifier().verify_inclusion_proof(
+        BOB_KEY, b'{"balance":999999}', forged, root, path
+    )
+
+
+@pytest.mark.parametrize("op", sorted(_ATTACH_TO_HASH))
+def test_a_node_under_a_hash_node_is_refused_at_the_data_path(op):
+    root, item = verify_item_at_path(HONEST_BOB, subgrove_data_path("my-sub"), BOB_KEY)
+    assert root == HONEST_BOB_ROOT and item.value == b'{"balance":250}'
+    # The data layer is the honest one's root as a Hash node, with a forged
+    # Item attached under it: the same root.
+    forged, root = _under_subgrove(_ATTACH_TO_HASH[op](b"\x01" + BOB_DATA_ROOT, FORGED_KV), BOB_DATA_ROOT)
+    assert root == HONEST_BOB_ROOT
+    _assert_forgery_refused(forged, root)
+
+
+@pytest.mark.parametrize("op", sorted(_ATTACH_TO_HASH))
+def test_a_node_under_a_hash_node_is_refused_at_the_root_layer(op):
+    # The root layer is the real root as a Hash node with an invented
+    # subgroves subtree under it, whose lower layers prove a forged Item.
+    forged_data_root = node_hash(kv_hash(BOB_KEY, _item(b'{"balance":999999}')), NULL_HASH, NULL_HASH)
+    forged, _ = _under_subgrove(
+        FORGED_KV, forged_data_root,
+        top=lambda merk: _ATTACH_TO_HASH[op](b"\x01" + HONEST_BOB_ROOT, merk),
+    )
+    _assert_forgery_refused(forged, HONEST_BOB_ROOT)
+
+
+def test_a_kvhash_node_keeps_its_children():
+    # A KVHash node's hash covers its children: a proof may attach to it.
+    from willow.grovedb import execute_ops
+    from willow.grovedb.types import ChildOp, KVHashNode, KVNode, ParentOp, PushOp
+
+    kvh = bytes(range(32))
+    left, right = KVNode(b"a", BOB_ITEM), KVNode(b"c", BOB_ITEM)
+    tree = execute_ops([PushOp(left), PushOp(KVHashNode(kvh)), ParentOp(), PushOp(right), ChildOp()])
+    leaf = lambda k: node_hash(kv_hash(k, BOB_ITEM), NULL_HASH, NULL_HASH)
+    assert tree.hash() == node_hash(kvh, leaf(b"a"), leaf(b"c"))
+
+
 def test_a_lower_layer_off_the_path_is_refused():
     proof = decode_grovedb_proof(BOB_PROOF)
     root_layer = proof.proof.root_layer
