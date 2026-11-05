@@ -348,7 +348,7 @@ def _key_grant_node(request):
         data = {
             "grantee_did": "did:willow:a", "key_epoch": 2, "grantee_public_key_id": "did:willow:a#key-1",
             "ephemeral_public_key": list(range(32)), "encrypted_key": list(range(48)),
-            "granted_by": "did:willow:owner", "granted_at": 1700000000,
+            "granted_by": "did:willow:owner", "granted_at": 1,
         }
     elif path == "/key-grants/sg":
         data = ["did:willow:a", "did:willow:b"]

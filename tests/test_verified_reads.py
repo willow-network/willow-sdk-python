@@ -35,7 +35,7 @@ def _header(height, app_hash):
     upper-case hex, heights as strings)."""
     return {"jsonrpc": "2.0", "id": -1, "result": {"header": {
         "version": {"block": "11", "app": "0"}, "chain_id": "willow-chain", "height": str(height),
-        "time": "2026-01-01T00:00:00.000000000Z",
+        "time": "1970-01-01T00:00:01.000000000Z",
         "last_block_id": {"hash": "AB" * 32, "parts": {"total": 1, "hash": "CD" * 32}},
         "last_commit_hash": "", "data_hash": "", "validators_hash": "EF" * 32,
         "next_validators_hash": "EF" * 32, "consensus_hash": "01" * 32,
