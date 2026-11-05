@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, Union
 
 from eth_hash.auto import keccak
 
+from . import _body
+
 if TYPE_CHECKING:  # pragma: no cover
     import httpx
 
@@ -251,7 +253,7 @@ class CompletenessOperations:
             "method": "abci_query",
             "params": {"path": path, "data": "", "height": "0", "prove": False},
         }
-        resp = await self._rpc_http.post(self._rpc_url, json=rpc_request)
+        resp = await _body.send(self._rpc_http, "POST", self._rpc_url, limit=_body.SMALL, json=rpc_request)
         resp.raise_for_status()
         envelope = resp.json()
         if "error" in envelope and envelope["error"]:
@@ -287,7 +289,7 @@ class CompletenessOperations:
             f"{self._indexer_url}/completeness/{subgrove_id}/{block_number}/"
             "matched-logs"
         )
-        resp = await self._http.get(url)
+        resp = await _body.send(self._http, "GET", url, limit=_body.LARGE)
         if resp.status_code != 200:
             detail = ""
             try:

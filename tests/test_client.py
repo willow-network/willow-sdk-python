@@ -5,6 +5,8 @@ import json
 import pytest
 import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
+
+from _mock_http import MockHttp
 from willow import (
     WillowClient,
     generate_did,
@@ -60,9 +62,8 @@ def client():
 
 @pytest.fixture
 def mock_http_client():
-    """Create mock HTTP client."""
-    mock = AsyncMock()
-    return mock
+    """An httpx client whose answers come from its ``request`` mock."""
+    return MockHttp()
 
 
 @pytest.fixture
@@ -223,6 +224,7 @@ class TestWillowClient:
             captured["headers"] = headers
             return mock_response
 
+        client._http = MockHttp()
         client._http.request = AsyncMock(side_effect=fake_request)
 
         await client.privacy.list_key_grantees("my-subgrove")

@@ -465,10 +465,23 @@ def _expect_signed(name, body, algorithm="Ed25519"):
         assert bytes(body["signature"]).hex() == vector["secp256k1_compact_signature_hex"]
 
 
+class _Body:
+    """aiohttp's ``StreamReader`` over ``data``."""
+
+    def __init__(self, data):
+        self._data = data
+
+    async def read(self, n=-1):
+        n = len(self._data) if n < 0 else n
+        chunk, self._data = self._data[:n], self._data[n:]
+        return chunk
+
+
 class _Response:
     def __init__(self, payload):
         self.status = 200
         self._payload = payload
+        self.content = _Body(json.dumps(payload).encode())
 
     async def json(self, content_type="application/json"):
         return self._payload
@@ -601,6 +614,7 @@ async def test_consensus_submit_reports_a_plain_text_refusal():
     class PlainText(_Response):
         def __init__(self):
             self.status = 422
+            self.content = _Body(b"Failed to deserialize the JSON body into the target type: missing field `name`")
 
         async def json(self, content_type="application/json"):
             raise ValueError("not JSON")

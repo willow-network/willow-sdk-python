@@ -24,6 +24,7 @@ from typing import Any, Generic, List, Optional, TypeVar
 
 import httpx
 
+from . import _body
 from .types import IndexerInfo, IndexerStatus
 
 
@@ -151,7 +152,7 @@ class WillowIndexers:
             return list(self._cache.data)
 
         url = f"{self._api_url}/indexers"
-        resp = await self._http.get(url)
+        resp = await _body.send(self._http, "GET", url, limit=_body.SMALL)
         resp.raise_for_status()
         body = resp.json()
         data_items = body.get("data") or []

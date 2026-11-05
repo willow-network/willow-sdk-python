@@ -954,10 +954,23 @@ async def test_without_the_nonce_state_query_the_base_is_read_from_the_api():
 # ---------------------------------------------------------------------------
 
 
+class _Body:
+    """aiohttp's ``StreamReader`` over ``data``."""
+
+    def __init__(self, data):
+        self._data = data
+
+    async def read(self, n=-1):
+        n = len(self._data) if n < 0 else n
+        chunk, self._data = self._data[:n], self._data[n:]
+        return chunk
+
+
 class _Response:
     def __init__(self, payload, status=200):
         self.status = status
         self._payload = payload
+        self.content = _Body(json.dumps(payload).encode())
 
     async def json(self, content_type="application/json"):
         return self._payload

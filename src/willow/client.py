@@ -51,9 +51,11 @@ from .errors import (
     NotLandedError,
     ProofHeightOutOfRangeError,
     ProofVerificationError,
+    ResponseTooLargeError,
     TransactionError,
     parse_api_error,
 )
+from . import _body
 from .nonces import (
     FREE, HELD, UNKNOWN, USED, InterruptedWrite, NonceTracker, parse_nonce_state, refusal_outcome,
 )
@@ -383,12 +385,14 @@ class DataOperations:
             f"/data/{subgrove_id}/{key}",
             authenticated=True,
             read=True,
+            limit=_body.TX,
         )
         proof_response = await self.client._request(
             "GET",
             f"/proof/{subgrove_id}/{key}",
             authenticated=True,
             read=True,
+            limit=_body.TX,
         )
         try:
             return await self._verified_value(subgrove_id, key, data_response, proof_response)
@@ -455,6 +459,7 @@ class DataOperations:
             f"/data/{subgrove_id}/{key}",
             authenticated=True,
             read=True,
+            limit=_body.TX,
         )
         return response["data"]
 
@@ -519,6 +524,7 @@ class DataOperations:
             json=query_dict,
             authenticated=True,
             read=True,
+            limit=_body.LARGE,
         )
         query_response = QueryResponse(**response["data"])
 
@@ -589,7 +595,8 @@ class DataOperations:
         response = await self.client._request(
             "POST",
             f"/historical/query/{subgrove_id}/{checkpoint_id}",
-            json=query_request.model_dump(exclude_none=True)
+            json=query_request.model_dump(exclude_none=True),
+            limit=_body.LARGE,
         )
         return HistoricalQueryResponse(**response["data"])
 
@@ -754,6 +761,7 @@ class ProofOperations:
             "GET",
             f"/proof/{subgrove_id}/{key}",
             read=True,
+            limit=_body.TX,
         )
         return ProofData(**response["data"]).model_dump()
 
@@ -1285,7 +1293,7 @@ class WillowClient:
             Health status information
         """
         try:
-            response = await self._http.request("GET", f"{self.api_url}/health")
+            response = await _body.send(self._http, "GET", f"{self.api_url}/health", limit=_body.SMALL)
         except httpx.NetworkError as e:
             raise NetworkError(f"Network error: {str(e)}")
         except httpx.TimeoutException:
@@ -1327,7 +1335,9 @@ class WillowClient:
             payload = _encode_json_body(body)
             headers = {"Content-Type": "application/json"}
             headers.update(self._nonce_headers("POST", url, payload))
-            resp = await self._http.post(url, content=payload, headers=headers)
+            resp = await _body.send(
+                self._http, "POST", url, limit=_body.LARGE, content=payload, headers=headers
+            )
             if resp.status_code == 404 or resp.status_code == 403:
                 reason = "not available"
                 try:
@@ -1351,7 +1361,7 @@ class WillowClient:
             # The API key goes only to an indexer_url the caller configured,
             # never to an indexer discovery found.
             http = self._http if self.indexers.has_explicit_override() else self._indexer_http
-            resp = await http.post(url, json=body, headers=headers)
+            resp = await _body.send(http, "POST", url, limit=_body.LARGE, json=body, headers=headers)
             resp.raise_for_status()
             return _envelope_data(resp.json()) or {}
 
@@ -1572,12 +1582,15 @@ class WillowClient:
             raise ProofVerificationError(_NO_TRUSTED_HEADER_SOURCE)
         where = "the latest header" if height is None else f"the header at height {height}"
         try:
-            response = await self._rpc_http.get(
+            response = await _body.send(
+                self._rpc_http,
+                "GET",
                 f"{self.consensus_rpc_url}/header",
+                limit=_body.SMALL,
                 params=None if height is None else {"height": str(height)},
             )
             body = response.json()
-        except (httpx.HTTPError, ValueError, RecursionError) as e:
+        except (httpx.HTTPError, ResponseTooLargeError, ValueError, RecursionError) as e:
             raise ProofVerificationError(f"No trusted root: reading {where} from the consensus RPC failed: {e}") from e
         if isinstance(body, dict) and body.get("error") is not None and body.get("result") is None:
             return None
@@ -1800,8 +1813,11 @@ class WillowClient:
     async def _query_nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
         """The ABCI query ``/store/account_nonce_state/{did}`` (see
         ``parse_nonce_state``), sent without the API key."""
-        response = await self._rpc_http.post(
+        response = await _body.send(
+            self._rpc_http,
+            "POST",
             self.consensus_rpc_url or "",
+            limit=_body.SMALL,
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -2060,9 +2076,11 @@ class WillowClient:
                 out, or no pooled connection came free), else ``True``.
         """
         try:
-            return await self._http.request(
+            return await _body.send(
+                self._http,
                 "POST",
                 f"{self.api_url}/tx/submit",
+                limit=_body.SMALL,
                 content=_encode_json_body(tx),
                 headers={"Content-Type": "application/json"},
             )
@@ -2205,6 +2223,7 @@ class WillowClient:
         json: Optional[Any] = None,
         authenticated: bool = False,
         read: bool = False,
+        limit: int = _body.SMALL,
     ) -> Dict[str, Any]:
         """Make HTTP request to Willow API.
 
@@ -2222,6 +2241,8 @@ class WillowClient:
             read: A read the DID's read rights apply to (``GET /data``,
                 ``GET /proof``, ``POST /query``): nonce-signed whenever an
                 identity is set
+            limit: The most bytes of the answer read (see ``willow._body``);
+                a longer one raises ``ResponseTooLargeError``
 
         Returns:
             Response data
@@ -2229,6 +2250,7 @@ class WillowClient:
         Raises:
             WillowError: On API errors
             NetworkError: On network errors
+            ResponseTooLargeError: The answer is longer than ``limit``
             NotAuthenticatedError: If authentication required but not present
         """
         url = f"{self.api_url}{path}"
@@ -2248,11 +2270,8 @@ class WillowClient:
             elif authenticated:
                 headers.update(self._legacy_headers(method, url))
 
-            response = await self._http.request(
-                method,
-                url,
-                content=body,
-                headers=headers
+            response = await _body.send(
+                self._http, method, url, limit=limit, content=body, headers=headers
             )
 
             # Handle errors. The auth middleware refuses with a bare status

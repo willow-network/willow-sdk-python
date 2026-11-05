@@ -14,6 +14,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone
 import logging
 
+from .. import _body
 from .types import (
     LightBlock, Header, TrustedHeader, QueryProof, VerificationResult,
     LightClientConfig, LightClientError
@@ -441,8 +442,8 @@ class LightClient:
             if response.status != 200:
                 raise Exception(f"HTTP {response.status}")
             
-            data = await response.json()
-            
+            data = await _body.json_aiohttp(response, _body.BLOCK)
+
             if 'result' not in data or 'block' not in data['result']:
                 raise Exception("Invalid response format")
             

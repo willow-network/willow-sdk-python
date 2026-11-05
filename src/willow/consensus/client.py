@@ -11,8 +11,9 @@ import time
 from typing import Callable, Optional, Dict, Any, List, Tuple
 import logging
 
+from .. import _body
 from ..auth import _key_algorithm, sign_message, SignatureAlgorithm
-from ..errors import NonceWindowFullError, TransactionError
+from ..errors import NonceWindowFullError, ResponseTooLargeError, TransactionError
 from ..nonces import (
     FREE, HELD, UNKNOWN, USED, InterruptedWrite, NonceTracker, already_in_cache, refusal_outcome,
 )
@@ -700,13 +701,14 @@ class ConsensusClient:
             try:
                 async with self._session.post(url, json=transaction) as response:
                     status = response.status
+                    raw = await _body.read_aiohttp(response, _body.SMALL)
                     try:
-                        body = await response.json(content_type=None)
-                    except ValueError:
+                        body = json.loads(raw)
+                    except (ValueError, RecursionError):
                         # A body the API refused to decode answers in plain text.
                         body = None
                     if not isinstance(body, dict):
-                        text = (await response.text()).strip()
+                        text = raw.decode("utf-8", "replace").strip()
                         msg = text or f"HTTP {status}"
                         return BroadcastResult(
                             success=False, error_message=msg, raw_log=msg,
@@ -748,7 +750,10 @@ class ConsensusClient:
         raise error
     
     async def _rpc_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Make a JSON-RPC request to CometBFT."""
+        """Make a JSON-RPC request to CometBFT, reading at most
+        ``willow._body.TX`` bytes of a ``tx`` answer and ``SMALL`` of any
+        other."""
+        limit = _body.TX if method == "tx" else _body.SMALL
         rpc_request = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -763,14 +768,14 @@ class ConsensusClient:
                     json=rpc_request
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        
+                        data = await _body.json_aiohttp(response, limit)
+
                         if 'error' in data:
                             raise ConsensusError(f"RPC error: {data['error']}")
                         
                         return data.get('result', {})
                     else:
-                        error_text = await response.text()
+                        error_text = (await _body.read_aiohttp(response, _body.SMALL)).decode("utf-8", "replace")
                         raise ConsensusError(f"HTTP {response.status}: {error_text}")
                         
             except Exception as e:
@@ -836,7 +841,7 @@ class ConsensusClient:
                 if response.status != 200:
                     raise ConsensusError(f"Failed to fetch nonce: HTTP {response.status}")
 
-                data = await response.json()
+                data = await _body.json_aiohttp(response, _body.SMALL)
 
                 if not data.get('success') or 'data' not in data:
                     raise ConsensusError(data.get('error', 'Failed to fetch nonce'))
@@ -845,5 +850,5 @@ class ConsensusClient:
                 if isinstance(nonce, bool) or not isinstance(nonce, int):
                     raise ConsensusError(f"The API answered no nonce for {did}")
                 return nonce
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, ResponseTooLargeError, ValueError) as e:
             raise ConsensusError(f"Failed to fetch nonce: {e}")

@@ -10,6 +10,8 @@ from typing import List, Optional
 
 import aiohttp
 
+from .. import _body
+
 
 @dataclass
 class AgentService:
@@ -187,7 +189,7 @@ class Erc8004Client:
             async with session.get(
                 f"{self._api_url}/agents", params=params
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -215,7 +217,7 @@ class Erc8004Client:
             async with session.get(
                 f"{self._api_url}/agent/{did}/registration.json"
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -240,7 +242,7 @@ class Erc8004Client:
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 return body.get("data", {}).get("eth_address")
@@ -253,7 +255,7 @@ class Erc8004Client:
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 return body.get("data", {}).get("did")
@@ -266,7 +268,7 @@ class Erc8004Client:
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body.get("data")
@@ -286,7 +288,7 @@ class Erc8004Client:
             async with session.get(
                 f"{self._api_url}/agent/{did}/reputation-attestation"
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -310,7 +312,7 @@ class Erc8004Client:
                 f"{self._api_url}/agent/{did}/reputation-history",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -342,7 +344,7 @@ class Erc8004Client:
                 f"{self._api_url}/agent/{did}/validation-status",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -379,7 +381,7 @@ class Erc8004Client:
                 f"{self._api_url}/agent/{did}/validation-summary",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]

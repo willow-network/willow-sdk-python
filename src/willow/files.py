@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import httpx
 
-from .errors import TransactionError, WillowError, parse_api_error
+from . import _body
+from .errors import ResponseTooLargeError, TransactionError, WillowError, parse_api_error
 from .nonces import already_in_cache
 from .signed_messages import (
     delete_file_manifest_message,
@@ -194,7 +195,12 @@ class FileOperations:
                 )
                 while True:
                     try:
-                        resp = await client.post(url, content=chunk)
+                        resp = await _body.send(client, "POST", url, limit=_body.SMALL, content=chunk)
+                    except ResponseTooLargeError as e:
+                        raise _chunk_error(
+                            f"the storage node's answer to chunk {i} of {file_key} was too long: {e}",
+                            submission, i,
+                        ) from e
                     except httpx.HTTPError as e:
                         raise _chunk_error(
                             f"chunk {i} of {file_key} did not reach the storage node: {e}",
@@ -241,7 +247,8 @@ class FileOperations:
                     f"{storage_node_endpoint}/chunk/{subgrove_id}/{file_key}/{i}"
                     f"?content_hash={manifest.content_hash}"
                 )
-                resp = await client.get(url)
+                # A chunk is at most the storage node's 2 MiB body limit.
+                resp = await _body.send(client, "GET", url, limit=_body.CHUNK)
                 resp.raise_for_status()
                 chunks.append(resp.content)
 
@@ -269,8 +276,11 @@ class FileOperations:
             WillowError: The API refused the read; its ``error`` is the message.
         """
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _body.send(
+                client,
+                "GET",
                 f"{self._api_url}/files/{subgrove_id}/{file_key}",
+                limit=_body.SMALL,
                 headers=self._get_headers(),
             )
         return FileManifest(**_file_route_body(resp))
@@ -282,8 +292,11 @@ class FileOperations:
             WillowError: The API refused the read; its ``error`` is the message.
         """
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _body.send(
+                client,
+                "GET",
                 f"{self._api_url}/files/{subgrove_id}",
+                limit=_body.SMALL,
                 headers=self._get_headers(),
             )
         return [FileManifest(**f) for f in _file_route_body(resp).get("files", [])]
@@ -437,8 +450,11 @@ class FileOperations:
             TransactionError: Unless CheckTx accepted the transaction.
         """
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            resp = await _body.send(
+                client,
+                "POST",
                 f"{self._api_url}/tx/submit",
+                limit=_body.SMALL,
                 json=tx,
                 headers=self._get_headers(),
             )

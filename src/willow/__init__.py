@@ -116,6 +116,7 @@ from .errors import (
     InsufficientFundsError,
     NonceWindowFullError,
     NotLandedError,
+    ResponseTooLargeError,
     parse_api_error,
 )
 from .nonces import InterruptedWrite
@@ -396,6 +397,7 @@ __all__ = [
     "InsufficientFundsError",
     "NonceWindowFullError",
     "NotLandedError",
+    "ResponseTooLargeError",
     "parse_api_error",
     "InterruptedWrite",
     # Enums

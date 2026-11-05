@@ -61,6 +61,22 @@ class NetworkError(WillowError):
     transaction: Optional[Any] = None
 
 
+class ResponseTooLargeError(NetworkError):
+    """An answer longer than the SDK's cap for its route (``limit`` bytes):
+    the SDK stopped reading it.
+
+    The cap bounds the bytes read of one answer (after any
+    ``Content-Encoding`` is decoded), not the memory decoding them takes,
+    which can be a multiple of it. Raised by a write's submission, the
+    transaction may have reached the node: like any ``NetworkError`` after
+    connecting, it carries ``transaction`` for ``resubmit``.
+    """
+
+    def __init__(self, limit: int):
+        super().__init__(f"the answer is over the SDK's {limit >> 20} MiB limit for its route")
+        self.limit = limit
+
+
 class HttpError(WillowError):
     """HTTP-level errors with status code.
 
