@@ -192,8 +192,10 @@ class PrivacyOperations:
     ) -> EncryptedKeyGrant:
         """Get the current user's key grant for a subgrove.
 
-        Retrieves the encryption key grant issued to the authenticated DID
-        for the specified subgrove.
+        Retrieves the encryption key grant issued to the identity's DID for
+        the specified subgrove (``GET /key-grants/{subgrove_id}/{did}``,
+        nonce-signed: the node names a caller only for that form). The
+        grant is what the API serves; it is not verified.
 
         Args:
             subgrove_id: Subgrove identifier.
@@ -210,6 +212,7 @@ class PrivacyOperations:
             "GET",
             f"/key-grants/{subgrove_id}/{did}",
             authenticated=True,
+            read=True,
         )
         return EncryptedKeyGrant.from_dict(response["data"])
 
@@ -219,9 +222,11 @@ class PrivacyOperations:
     ) -> List[str]:
         """List the DIDs holding a key grant for a subgrove.
 
-        Only the subgrove owner or an admin can list grantees. Read one
-        grantee's grant with ``GET /key-grants/{subgrove_id}/{did}`` (the
-        grantee's own through ``get_my_key_grant``).
+        ``GET /key-grants/{subgrove_id}``, nonce-signed: only the subgrove's
+        owner can list grantees. Read one grantee's grant with
+        ``GET /key-grants/{subgrove_id}/{did}`` (the grantee's own through
+        ``get_my_key_grant``). The list is what the API serves; it is not
+        verified.
 
         Args:
             subgrove_id: Subgrove identifier.
@@ -237,28 +242,36 @@ class PrivacyOperations:
             "GET",
             f"/key-grants/{subgrove_id}",
             authenticated=True,
+            read=True,
         )
         return list(response.get("data") or [])
 
+    @require_auth
     async def get_key_grant_proof(
         self, subgrove_id: str, did: str
     ) -> Dict[str, Any]:
-        """Get a Merkle proof for a key grant.
+        """Get the API's GroveDB proof for a key grant.
 
-        Retrieves a cryptographic proof that a specific key grant exists
-        (or does not exist) in the authenticated data store, enabling
-        trustless verification of grant status.
+        ``GET /proof/key-grant/{subgrove_id}/{did}``, nonce-signed: only the
+        grantee or the subgrove's owner may read it. The SDK does not verify
+        the proof, and it binds nothing until checked against a trusted root.
 
         Args:
             subgrove_id: Subgrove identifier.
-            did: The DID to get the key grant proof for.
+            did: The grantee DID.
 
         Returns:
-            Proof data dictionary including proof hex and value.
+            ``{"proof": <hex>, "subgrove_id", "grantee_did"}`` as the API
+            serves it.
+
+        Raises:
+            NotAuthenticatedError: If the client is not authenticated.
         """
         response = await self.client._request(
             "GET",
             f"/proof/key-grant/{subgrove_id}/{did}",
+            authenticated=True,
+            read=True,
         )
         return response["data"]
 

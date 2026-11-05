@@ -151,7 +151,7 @@ client.clear_identity()
 
 ### Request signing
 
-With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, and `POST /query`, `/sql`, and `/graphql`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, or a place on a priced subgrove's free-reader list. The client signs its key-grant reads in the older form described below. Writes are transactions, signed as described under Transaction signing.
+With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, `POST /query`, `/sql`, and `/graphql`, and the key-grant reads `GET /key-grants/{subgrove}/{did}`, `GET /key-grants/{subgrove}`, and `GET /proof/key-grant/{subgrove}/{did}`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, a place on a priced subgrove's free-reader list, or, for key grants, being the grantee or the subgrove's owner. Writes are transactions, signed as described under Transaction signing.
 
 The headers are `X-DID`, `X-Public-Key-ID`, `X-Signature`, `X-Timestamp`, and `X-Nonce`. The signature is over eight lines:
 
@@ -537,11 +537,13 @@ await client.privacy.grant_subgrove_key("private-sg", grant)        # an Encrypt
 await client.privacy.rotate_subgrove_key("private-sg", 2, new_grants)
 await client.privacy.revoke_subgrove_key("private-sg", "did:willow:...")
 
-mine = await client.privacy.get_my_key_grant("private-sg")
-grantees = await client.privacy.list_key_grantees("private-sg")    # grantee DIDs
+# Nonce-signed reads: the grantee or the subgrove's owner
+mine = await client.privacy.get_my_key_grant("private-sg")          # an EncryptedKeyGrant
+grantees = await client.privacy.list_key_grantees("private-sg")    # grantee DIDs (owner only)
+proof = await client.privacy.get_key_grant_proof("private-sg", did) # {proof, subgrove_id, grantee_did}
 ```
 
-An `EncryptedKeyGrant`'s `ephemeral_public_key` and `encrypted_key` take bytes, hex, or a list of ints.
+An `EncryptedKeyGrant`'s `ephemeral_public_key` and `encrypted_key` take bytes, hex, or a list of ints. The key-grant reads return what the API serves, unverified; `get_key_grant_proof` returns the API's proof without checking it.
 
 ### Health Check
 

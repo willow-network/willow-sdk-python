@@ -13,6 +13,7 @@ from willow import (
     store_data_message,
     verify_signature,
 )
+from willow.auth import signed_request_message
 from willow.types import (
     RegisterDatasetRequest,
     SchemaDefinition,
@@ -228,10 +229,13 @@ class TestWillowClient:
 
         headers = captured["headers"]
         assert headers["X-DID"] == info["did"]
-        # A key-grant read: signed in the older form, secp256k1 sent 0x-prefixed.
-        assert "X-Nonce" not in headers
+        # A key-grant read: nonce-signed, secp256k1 sent 0x-prefixed.
+        assert "X-Nonce" in headers
         assert headers["X-Signature"].startswith("0x")
-        message = f"GET:/key-grants/my-subgrove:{headers['X-Timestamp']}"
+        message = signed_request_message(
+            headers["X-DID"], headers["X-Public-Key-ID"], "GET", "/key-grants/my-subgrove",
+            headers["X-Timestamp"], headers["X-Nonce"], None,
+        )
         # The captured signature verifies under secp256k1 (the true algorithm)...
         assert verify_signature(
             message, headers["X-Signature"], info["public_key"], "secp256k1"

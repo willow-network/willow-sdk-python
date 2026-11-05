@@ -295,7 +295,7 @@ def _client(handler, api_url="http://api.test", algorithm="Ed25519", identity=Tr
 
 
 @pytest.mark.asyncio
-async def test_client_nonce_signs_reads_and_legacy_signs_key_grant_reads():
+async def test_client_nonce_signs_reads_and_key_grant_reads():
     seen = []
 
     def handler(request):
@@ -308,6 +308,8 @@ async def test_client_nonce_signs_reads_and_legacy_signs_key_grant_reads():
     await client.proof.get("sg", "k")
     await client.indexing.sql_query("sg", "SELECT 1", source=QuerySource.VALIDATOR)
     await client.privacy.get_my_key_grant("sg")
+    await client.privacy.list_key_grantees("sg")
+    await client.privacy.get_key_grant_proof("sg", "did:willow:b")
     await client._http.aclose()
 
     forms = [(r.method, r.url.path, form) for r, form in seen]
@@ -316,7 +318,9 @@ async def test_client_nonce_signs_reads_and_legacy_signs_key_grant_reads():
         ("POST", "/query/sg", "nonce"),
         ("GET", "/proof/sg/k", "nonce"),
         ("POST", "/sql/sg", "nonce"),
-        ("GET", "/key-grants/sg/did:willow:a", "legacy"),
+        ("GET", "/key-grants/sg/did:willow:a", "nonce"),
+        ("GET", "/key-grants/sg", "nonce"),
+        ("GET", "/proof/key-grant/sg/did:willow:b", "nonce"),
     ]
     # The signed body is the body sent.
     query = seen[1][0]
@@ -327,6 +331,47 @@ async def test_client_nonce_signs_reads_and_legacy_signs_key_grant_reads():
             assert request.headers["Content-Type"] == "application/json"
     nonces = [r.headers["X-Nonce"] for r, form in seen if form == "nonce"]
     assert len(set(nonces)) == len(nonces)
+
+
+# The node's key-grant routes name a caller only for the nonce-signed form
+# (its handlers' ``proven_caller``): any other request is refused 401.
+_KEY_GRANT_AUTH_REQUIRED = "Authentication required: sign the request with a one-time nonce (X-Nonce)"
+
+
+def _key_grant_node(request):
+    if "X-Nonce" not in request.headers:
+        return httpx.Response(401, json={"success": False, "data": None, "error": _KEY_GRANT_AUTH_REQUIRED})
+    assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519") == "nonce"
+    path = request.url.path
+    if path == "/key-grants/sg/did:willow:a":
+        # EncryptedKeyGrant as serde writes it: byte vectors as arrays.
+        data = {
+            "grantee_did": "did:willow:a", "key_epoch": 2, "grantee_public_key_id": "did:willow:a#key-1",
+            "ephemeral_public_key": list(range(32)), "encrypted_key": list(range(48)),
+            "granted_by": "did:willow:owner", "granted_at": 1700000000,
+        }
+    elif path == "/key-grants/sg":
+        data = ["did:willow:a", "did:willow:b"]
+    elif path == "/proof/key-grant/sg/did:willow:a":
+        data = {"proof": "0011", "subgrove_id": "sg", "grantee_did": "did:willow:a"}
+    else:
+        return httpx.Response(404, json={"success": False, "data": None, "error": "not found"})
+    return httpx.Response(200, json={"success": True, "data": data, "error": None})
+
+
+@pytest.mark.asyncio
+async def test_key_grant_reads_are_answered_by_a_node_that_takes_only_nonce_signed_reads():
+    client = _client(_key_grant_node)
+    grant = await client.privacy.get_my_key_grant("sg")
+    assert (grant.grantee_did, grant.key_epoch, bytes(grant.ephemeral_public_key)) == (
+        "did:willow:a", 2, bytes(range(32))
+    )
+    assert bytes(grant.encrypted_key) == bytes(range(48))
+    assert await client.privacy.list_key_grantees("sg") == ["did:willow:a", "did:willow:b"]
+    assert await client.privacy.get_key_grant_proof("sg", "did:willow:a") == {
+        "proof": "0011", "subgrove_id": "sg", "grantee_did": "did:willow:a"
+    }
+    await client._http.aclose()
 
 
 @pytest.mark.asyncio
@@ -376,11 +421,11 @@ async def test_client_nonce_signs_an_unverified_query():
 
 
 @pytest.mark.asyncio
-async def test_client_legacy_signs_the_path_the_api_receives():
+async def test_client_signs_the_path_the_api_receives():
     seen = []
 
     def handler(request):
-        assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519", prefix="/willow") == "legacy"
+        assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519", prefix="/willow") == "nonce"
         seen.append(request)
         return _ok(request)
 
