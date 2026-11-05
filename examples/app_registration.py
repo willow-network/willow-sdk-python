@@ -33,7 +33,8 @@ async def main():
 
     async with WillowClient("http://localhost:3031") as client:
         # Auth: the identity signs the DID's registration (pre-fund the DID
-        # with the registration fee first) and every later transaction.
+        # first with the DID and subgrove registration fees plus the
+        # subgrove's funding) and every later transaction.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
@@ -76,9 +77,13 @@ async def main():
                 writers=[did_info["did"]],
                 readers=[],
             )
-            registration = await client.registration.register_subgrove(
-                subgrove_request.model_dump(by_alias=True)
-            )
+            # StoreData is paid from the subgrove's balance: fund it at
+            # registration (1 WILL, 10**18 base units, from the owner's
+            # balance, on top of the registration fee).
+            registration = await client.registration.register_subgrove({
+                **subgrove_request.model_dump(by_alias=True),
+                "initial_funding": 10**18,
+            })
             # Wait for it to land before reading it or storing into it.
             await client.wait_until_landed(registration)
             print("Created subgrove: products")

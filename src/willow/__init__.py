@@ -21,12 +21,15 @@ Example usage:
                 did_info["public_key_id"]
             )
 
-            # Register it (pre-fund the derived DID with the fees first), and
+            # Register it (pre-fund the derived DID first with the DID and
+            # subgrove registration fees plus the subgrove's funding), and
             # wait for it to land: the DID can sign nothing before it does
             registration = await client.register_did(did_info["did_document"])
             await client.wait_until_landed(registration)
 
-            # Register a subgrove it owns and writes to, and wait for it
+            # Register a subgrove it owns and writes to, funded with 1 WILL
+            # from its balance (StoreData is paid from the subgrove's
+            # balance), and wait for it to land
             subgrove = await client.registration.register_subgrove({
                 "dataset_id": "my-data",
                 "name": "My Data",
@@ -34,6 +37,7 @@ Example usage:
                 "owner_did": did_info["did"],
                 "writers": [did_info["did"]],
                 "readers": [],
+                "initial_funding": 10**18,
             })
             await client.wait_until_landed(subgrove)
 

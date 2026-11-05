@@ -1147,10 +1147,25 @@ class WillowClient:
                 did_info["public_key_id"]
             )
 
-            # Register it (pre-fund the derived DID with the fee first), and
+            # Register it (pre-fund the derived DID first with the DID and
+            # subgrove registration fees plus the subgrove's funding), and
             # wait for the registration to land before the DID signs anything
             await client.wait_until_landed(
                 await client.register_did(did_info["did_document"])
+            )
+
+            # Register a subgrove it writes to, funded with 1 WILL from its
+            # balance (StoreData is paid from the subgrove's balance), and
+            # wait for it to land before storing into it
+            await client.wait_until_landed(
+                await client.registration.register_subgrove({
+                    "dataset_id": "my-data",
+                    "name": "My Data",
+                    "schema": {"version": 1, "fields": {"value": {"type": "number"}}},
+                    "owner_did": did_info["did"],
+                    "writers": [did_info["did"]],
+                    "initial_funding": 10**18,
+                })
             )
 
             # Store a JSON object under a key (a StoreData transaction)

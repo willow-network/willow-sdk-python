@@ -17,7 +17,8 @@ return what the API serves, unverified.
 Prerequisites:
 - pip install willow-sdk
 - Run a local Willow node
-- Register the subgrove first (see app_registration.py)
+- Pre-fund the DID with the DID and subgrove registration fees plus the
+  subgrove's funding
 """
 
 import asyncio
@@ -29,7 +30,7 @@ from willow import (
 )
 
 
-SUBGROVE = "products"
+SUBGROVE = "data-ops-products"
 # The CometBFT RPC of a node you run or trust (not the API): data.get checks
 # proofs against its headers.
 CONSENSUS_RPC_URL = "http://localhost:26657"
@@ -43,7 +44,8 @@ async def main():
 
     async with WillowClient("http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL) as client:
         # Auth: the identity signs the DID's registration (pre-fund the DID
-        # with the registration fee first) and every later transaction.
+        # first with the DID and subgrove registration fees plus the
+        # subgrove's funding) and every later transaction.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
@@ -52,6 +54,29 @@ async def main():
         # A write returns once CheckTx accepts it: wait for the registration
         # to land before the DID signs anything else.
         await client.wait_until_landed(await client.register_did(did_info["did_document"]))
+
+        # Register the subgrove the DID writes to. StoreData is paid from the
+        # subgrove's balance, so fund it at registration (1 WILL, 10**18 base
+        # units, from the DID's balance), and wait for it to land before
+        # storing into it.
+        await client.wait_until_landed(await client.registration.register_subgrove({
+            "dataset_id": SUBGROVE,
+            "name": "Products",
+            "schema": {
+                "version": 1,
+                "fields": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "category": {"type": "string"},
+                    "price": {"type": "number"},
+                    "stock": {"type": "number"},
+                },
+            },
+            "owner_did": did_info["did"],
+            "writers": [did_info["did"]],
+            "readers": [],
+            "initial_funding": 10**18,
+        }))
 
         # 1. Store single item
         print("\n1. Store Single Item")

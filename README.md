@@ -46,13 +46,15 @@ async def main():
             did_info["public_key_id"],
         )
 
-        # 3. Register the DID (pre-fund it with the registration fees first),
-        #    and wait for it to land: the DID can sign nothing before it does
+        # 3. Register the DID (pre-fund it first with the DID and subgrove
+        #    registration fees plus the subgrove's funding: see
+        #    client.token.get_fee_schedule()), and wait for it to land: the
+        #    DID can sign nothing before it does
         registration = await client.register_did(did_info["did_document"])
         await client.wait_until_landed(registration)
 
-        # 4. Register a subgrove the DID owns and writes to, and wait for it
-        #    to land before storing into it
+        # 4. Register a subgrove the DID owns and writes to, funded from the
+        #    DID's balance, and wait for it to land before storing into it
         subgrove = await client.registration.register_subgrove({
             "dataset_id": "users",
             "name": "Users",
@@ -63,11 +65,15 @@ async def main():
             "owner_did": did_info["did"],
             "writers": [did_info["did"]],
             "readers": [],
+            # 1 WILL (10**18 base units): StoreData is paid from the
+            # subgrove's balance
+            "initial_funding": 10**18,
         })
         await client.wait_until_landed(subgrove)
 
-        # 5. Store data: one StoreData transaction per key. A write returns
-        #    once CheckTx accepts it; wait for it to land before reading it
+        # 5. Store data: one StoreData transaction per key, its fee paid from
+        #    the subgrove's balance. A write returns once CheckTx accepts it;
+        #    wait for it to land before reading it
         writes = await client.data.store("users", {
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
@@ -84,6 +90,8 @@ async def main():
 
 asyncio.run(main())
 ```
+
+StoreData is paid from the subgrove's balance, not the writer's: register a subgrove with `initial_funding`, or CheckTx refuses every write into it ("Insufficient subgrove balance").
 
 ## Features
 
