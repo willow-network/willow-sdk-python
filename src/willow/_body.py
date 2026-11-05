@@ -24,10 +24,10 @@ from .errors import ResponseTooLargeError
 #: An answer of fixed shape, or a list the node keeps short: an account's
 #: nonce, a balance, the token's info, the fee schedule, validators,
 #: indexers, the health check, a ``/tx/submit`` answer, a DID's permissions,
-#: key grants, subgrove information, state roots, a file manifest or the
-#: file list, ERC-8004 answers, and CometBFT's headers, status, and ABCI
-#: queries. These answers are a few KB; 4 MiB is the chain's
-#: ``max_tx_bytes``, the most one transaction writes. The subgrove,
+#: key grants, subgrove information, state roots, a file manifest or a page
+#: of the file list (at most 100 files), ERC-8004 answers, and CometBFT's
+#: headers, status, and ABCI queries. These answers are a few KB; 4 MiB is
+#: the chain's ``max_tx_bytes``, the most one transaction writes. The subgrove,
 #: validator, and indexer lists aren't paged, so they grow with the chain: a
 #: subgrove's entry is about 1 KB unless its schema is long, so 4 MiB holds
 #: thousands.
