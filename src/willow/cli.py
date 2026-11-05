@@ -59,7 +59,8 @@ def get_identity_or_exit() -> Tuple[str, str, str, str]:
     envvar="WILLOW_CONSENSUS_RPC_URL",
     default=None,
     help="CometBFT RPC URL of a node you trust (typically port 26657): verified reads check "
-         "their proofs against its headers. Also read from WILLOW_CONSENSUS_RPC_URL.",
+         "their proofs against its headers, and writes read from it which nonces are used. "
+         "Also read from WILLOW_CONSENSUS_RPC_URL.",
 )
 @click.pass_context
 def cli(ctx, api_url, consensus_rpc_url):
@@ -67,6 +68,12 @@ def cli(ctx, api_url, consensus_rpc_url):
     ctx.ensure_object(dict)
     ctx.obj["api_url"] = api_url
     ctx.obj["consensus_rpc_url"] = consensus_rpc_url
+
+
+def _client(ctx) -> WillowClient:
+    """A client of --api-url that trusts --consensus-rpc-url for chain state:
+    its headers for verified reads, and the nonces it reports used."""
+    return WillowClient(ctx.obj["api_url"], consensus_rpc_url=ctx.obj.get("consensus_rpc_url"))
 
 
 @cli.group()
@@ -120,7 +127,7 @@ def register(ctx, did_file):
         did_doc_data = json.load(did_file)
         did_doc = DidDocument(**did_doc_data)
 
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with _client(ctx) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             result = await client.register_did(did_doc)
             click.echo(f"DID registration submitted: {did_doc.id} (tx {result.get('tx_hash')})")
@@ -218,7 +225,7 @@ def store(ctx, subgrove_id, data_file):
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         data_dict = json.load(data_file)
 
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with _client(ctx) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             await client.data.store(subgrove_id, data_dict)
             click.echo(f"Stored {len(data_dict)} items in {subgrove_id}")
@@ -239,7 +246,7 @@ def get(ctx, subgrove_id, key, unverified):
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         rpc_url = ctx.obj.get("consensus_rpc_url")
 
-        async with WillowClient(ctx.obj["api_url"], consensus_rpc_url=rpc_url) as client:
+        async with _client(ctx) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 if unverified:
@@ -274,7 +281,7 @@ def update(ctx, subgrove_id, key, data_file):
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
         data_dict = json.load(data_file)
 
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with _client(ctx) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 await client.data.update(subgrove_id, key, data_dict)
@@ -296,7 +303,7 @@ def delete(ctx, subgrove_id, key):
     async def _delete():
         did_val, key_val, key_id_val, algorithm = get_identity_or_exit()
 
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with _client(ctx) as client:
             client.set_identity(did_val, key_val, key_id_val, algorithm)
             try:
                 await client.data.delete(subgrove_id, key)
@@ -322,7 +329,7 @@ def get(ctx, subgrove_id, key):
     """Get the Merkle proof for an item."""
 
     async def _get_proof():
-        async with WillowClient(ctx.obj["api_url"]) as client:
+        async with _client(ctx) as client:
             result = await client.proof.get(subgrove_id, key)
             click.echo(json.dumps(result, indent=2))
 

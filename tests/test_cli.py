@@ -5,7 +5,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from willow import cli
+from willow import cli, generate_did
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def test_data_commands_sign_with_the_saved_algorithm(config_file, monkeypatch):
     identities = []
 
     class Client:
-        def __init__(self, api_url):
+        def __init__(self, api_url, consensus_rpc_url=None):
             pass
 
         async def __aenter__(self):
@@ -121,3 +121,30 @@ def test_a_verified_get_reads_headers_from_the_consensus_rpc_given(config_file, 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"v": 1}
     assert made == [("http://localhost:3031", "http://rpc.test:26657")]
+
+
+@pytest.mark.parametrize("command,stdin", [
+    (["did", "register", "-"], None),
+    (["data", "store", "sg", "-"], '{"k": {}}'),
+    (["data", "get", "sg", "k"], None),
+    (["data", "update", "sg", "k", "-"], "{}"),
+    (["data", "delete", "sg", "k"], None),
+    (["proof", "get", "sg", "k"], None),
+])
+def test_every_command_builds_its_client_with_the_consensus_rpc_given(config_file, monkeypatch, command, stdin):
+    CliRunner().invoke(cli.cli, ["did", "generate", "--save"])
+    if command[:2] == ["did", "register"]:
+        stdin = json.dumps(generate_did()["did_document"].model_dump(by_alias=True))
+    made = []
+
+    class Built(Exception):
+        pass
+
+    def client(api_url, consensus_rpc_url=None, **kwargs):
+        made.append(consensus_rpc_url)
+        raise Built()
+
+    monkeypatch.setattr(cli, "WillowClient", client)
+    result = CliRunner().invoke(cli.cli, ["--consensus-rpc-url", "http://rpc.test:26657", *command], input=stdin)
+    assert isinstance(result.exception, Built), result.output
+    assert made == ["http://rpc.test:26657"]

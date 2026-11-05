@@ -670,6 +670,8 @@ isort src/willow --check
 
 ## CLI Usage
 
+Every command builds its client with `--consensus-rpc-url` (or `WILLOW_CONSENSUS_RPC_URL`) when given: `data get` verifies against its headers, and writes read from it which nonces are used.
+
 ```bash
 # Generate a new DID and save it locally, with its algorithm
 willow-cli did generate --save
