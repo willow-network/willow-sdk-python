@@ -1163,7 +1163,8 @@ class WillowClient:
                 base are used (ABCI query
                 ``/store/account_nonce_state/{did}``), so
                 ``wait_until_landed`` sees a write land even while a lower
-                nonce is unused (without it, only the base, from
+                nonce is unused, and takes only this node's word that it
+                landed (without it, only the base, from
                 ``GET /account/{did}/nonce``), and
                 ``completeness`` reads its on-chain anchors from it (and
                 raises ``CompletenessError`` without it).
@@ -1800,22 +1801,37 @@ class WillowClient:
         return nonce
 
     async def _nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
-        """``did``'s base and the nonces above it the node reports used.
+        """``did``'s base and the nonces above it the node reports used, to
+        hand out a nonce from.
 
         With ``consensus_rpc_url``, from the ABCI query
         ``/store/account_nonce_state/{did}``; without it, or when that query
         fails, the base alone from ``GET /account/{did}/nonce``. A base the
-        consensus RPC answers replaces a higher one only the API answered.
+        consensus RPC answers replaces a higher one only the API answered,
+        and while the query fails the API's base is taken only up to the
+        last one the consensus RPC answered.
         """
         if self.consensus_rpc_url:
-            try:
-                base, used = await self._query_nonce_state(did)
-                self._nonces.trust_base(did, base)
-                return base, used
-            except (WillowError, httpx.HTTPError, ValueError, RecursionError) as e:
-                # RecursionError: an answer nested too deep to read.
-                logger.warning(f"Could not read the nonce state of {did} over RPC, reading the base: {e}")
+            state = await self._rpc_nonce_state(did)
+            if state is not None:
+                return state
+            base = await self._account_nonce(did)
+            trusted = self._nonces.last_trusted_base(did)
+            return (base if trusted is None else min(base, trusted)), frozenset()
         return await self._account_nonce(did), frozenset()
+
+    async def _rpc_nonce_state(self, did: str) -> Optional[Tuple[int, FrozenSet[int]]]:
+        """``did``'s base and the nonces above it used, as the consensus RPC
+        answers them (recorded as trusted); ``None``, logged, when the query
+        fails."""
+        try:
+            base, used = await self._query_nonce_state(did)
+        except (WillowError, httpx.HTTPError, ValueError, RecursionError) as e:
+            # RecursionError: an answer nested too deep to read.
+            logger.warning(f"Could not read the nonce state of {did} over RPC: {e}")
+            return None
+        self._nonces.trust_base(did, base)
+        return base, used
 
     async def _query_nonce_state(self, did: str) -> Tuple[int, FrozenSet[int]]:
         """The ABCI query ``/store/account_nonce_state/{did}`` (see
@@ -2130,16 +2146,18 @@ class WillowClient:
         flight together may land in any order.
 
         A nonce counts as used once it is at or below the account's base, or
-        the node reports it used above the base. Only with
-        ``consensus_rpc_url`` does the client read the nonces used above the
-        base (otherwise only those CheckTx has refused as already used): the
-        base advances only over used nonces with no gap below them, so
-        without it a write counts as landed only once every lower nonce of
-        its DID is used too. A nonce no transaction uses (one given back
-        after CheckTx refused its write, or one whose write failed in transit
-        and was never resubmitted) then holds back every write above it,
-        until this client hands that nonce to a later write and that write
-        lands.
+        the node reports it used above the base. With ``consensus_rpc_url``,
+        only that node's answer counts: a nonce is used once it is at or
+        below the base it answers or it reports it used above the base, and
+        while its query fails nothing counts as landed (the API's base is
+        not read). Without it, the client reads the base from the API, and
+        the nonces above it CheckTx has refused as already used: the base
+        advances only over used nonces with no gap below them, so a write
+        counts as landed only once every lower nonce of its DID is used too.
+        A nonce no transaction uses (one given back after CheckTx refused
+        its write, or one whose write failed in transit and was never
+        resubmitted) then holds back every write above it, until this client
+        hands that nonce to a later write and that write lands.
 
         A write refused in its block uses its nonce too: read what it wrote
         to know it took effect. A RegisterDid uses its nonce only when it
@@ -2152,8 +2170,9 @@ class WillowClient:
         ``BroadcastResult``, raises ``ValueError``: it never ran, and a later
         write may take its nonce. (A refusal that the nonce is used is the
         exception: it carries ``transaction``, since this write may be the
-        one that used it, and the wait returns at once; read what it wrote
-        to learn whether it took effect.) A write that never lands keeps its nonce
+        one that used it, and the wait returns once the nonce is used, at
+        once without ``consensus_rpc_url``; read what it wrote to learn
+        whether it took effect.) A write that never lands keeps its nonce
         for 120 s; after that this client may hand the nonce to another
         write, and waiting on the first then raises (``ValueError`` before
         the wait, ``NotLandedError`` during it) instead of reporting the
@@ -2196,8 +2215,19 @@ class WillowClient:
         deadline = loop.time() + timeout
         for did, nonces in targets.items():
             while True:
-                base, used = await self._nonce_state(did)
-                base = self._nonces.observe(did, base, used)
+                if self.consensus_rpc_url:
+                    # Only the trusted node's answer says a nonce is used.
+                    state = await self._rpc_nonce_state(did)
+                    base: Optional[int] = None
+                    landed: FrozenSet[int] = frozenset()
+                    if state is not None:
+                        base, used = state
+                        self._nonces.observe(did, base, used)
+                        landed = frozenset(n for n in nonces if n <= base or n in used)
+                else:
+                    base, used = await self._nonce_state(did)
+                    base = self._nonces.observe(did, base, used)
+                    landed = frozenset(n for n in nonces if self._nonces.is_used(did, n))
                 for n, those in nonces.items():
                     if not all(self._still_its_nonce(write, did, n) for write in those):
                         raise NotLandedError(
@@ -2205,13 +2235,17 @@ class WillowClient:
                             f"lease ran out, before it landed: read what it wrote to learn whether "
                             f"it took effect"
                         )
-                waiting = sorted(n for n in nonces if not self._nonces.is_used(did, n))
+                waiting = sorted(n for n in nonces if n not in landed)
                 if not waiting:
                     break
                 if loop.time() >= deadline:
+                    where = (
+                        f"the account's base nonce is {base}" if base is not None
+                        else "the consensus RPC did not answer the account's nonce state"
+                    )
                     raise NotLandedError(
                         f"nonce {', '.join(map(str, waiting))} of {did} was not used within "
-                        f"{timeout} s: the account's base nonce is {base}"
+                        f"{timeout} s: {where}"
                     )
                 await asyncio.sleep(poll_interval)
 

@@ -208,6 +208,12 @@ class NonceTracker:
             if account.base > account.trusted_base:
                 account.base = account.trusted_base
 
+    def last_trusted_base(self, did: str) -> Optional[int]:
+        """The highest base a trusted source (the consensus RPC) answered for
+        ``did`` (see ``trust_base``); ``None`` before any did."""
+        with self._lock:
+            return self._account(did).trusted_base
+
     def is_used(self, did: str, nonce: int) -> bool:
         """Whether ``nonce`` of ``did`` is known used: at or below the highest
         base seen, or seen used above it."""

@@ -853,6 +853,56 @@ async def test_a_base_the_api_answered_too_high_gives_way_to_the_consensus_rpcs(
     await client.close()
 
 
+def _rpc_fails_after(node, answers):
+    """The ABCI nonce-state query, answered from ``node`` ``answers`` times,
+    then refused; and an API that answers the base far ahead."""
+    reads = []
+    healthy = _rpc_handler(node, reads)
+
+    def rpc(request):
+        if len(reads) < answers:
+            return healthy(request)
+        reads.append("refused")
+        return httpx.Response(503)
+
+    real = node.handler
+
+    def api(request):
+        if request.url.path.endswith("/nonce"):
+            return _ok({"did": node.did, "nonce": node.base + 1000})
+        return real(request)
+
+    return rpc, api
+
+
+@pytest.mark.asyncio
+async def test_while_the_consensus_rpc_fails_an_api_base_never_passes_the_last_one_it_gave():
+    client, node, _ = _client(base=1)
+    rpc, api = _rpc_fails_after(node, 1)
+    client.consensus_rpc_url = "http://rpc.test"
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(rpc))
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(api))
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 2  # the RPC's base, 1
+    # The RPC fails from here; the API answers a base of 1001.
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 3
+    assert node.nonces_sent() == [2, 3]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_with_the_consensus_rpc_a_write_lands_only_when_the_rpc_says_so():
+    client, node, _ = _client(base=1)
+    rpc, api = _rpc_fails_after(node, 1)
+    client.consensus_rpc_url = "http://rpc.test"
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(rpc))
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(api))
+    result = await client.data.store_item("sg", "a", {})
+    # Nothing landed. The RPC fails; the API answers a base past nonce 2.
+    with pytest.raises(NotLandedError):
+        await client.wait_until_landed(result, timeout=0)
+    await client.close()
+
+
 _TOO_DEEP = "[" * 100000 + "]" * 100000
 
 
@@ -939,9 +989,9 @@ async def test_the_api_key_goes_to_the_api_and_not_to_the_consensus_rpc(monkeypa
 
 @pytest.mark.asyncio
 async def test_without_the_nonce_state_query_the_base_is_read_from_the_api():
+    # No consensus_rpc_url: only the base, so a nonce above a gap waits.
     client, node, _ = _client(base=1)
     node.used = {3}
-    _with_rpc(client, node, fail=True)
     with pytest.raises(NotLandedError):
         await client.wait_until_landed({"did": node.did, "nonce": 3}, timeout=0)
     node.used, node.base = set(), 3
