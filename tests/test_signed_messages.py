@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 from eth_utils import keccak
+from multidict import CIMultiDict
 
 from willow import (
     delete_file_manifest_message,
@@ -266,6 +267,7 @@ class _Body:
 class _Response:
     def __init__(self, payload):
         self.status = 200
+        self.headers = CIMultiDict()
         self._payload = payload
         self.content = _Body(json.dumps(payload).encode())
 

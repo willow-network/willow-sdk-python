@@ -132,6 +132,7 @@ from .errors import (
     NonceWindowFullError,
     NotLandedError,
     ResponseTooLargeError,
+    ResponseEncodingError,
     parse_api_error,
 )
 from .nonces import InterruptedWrite
@@ -413,6 +414,7 @@ __all__ = [
     "NonceWindowFullError",
     "NotLandedError",
     "ResponseTooLargeError",
+    "ResponseEncodingError",
     "parse_api_error",
     "InterruptedWrite",
     # Enums

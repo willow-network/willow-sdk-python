@@ -1597,7 +1597,7 @@ class WillowClient:
                 params=None if height is None else {"height": str(height)},
             )
             body = response.json()
-        except (httpx.HTTPError, ResponseTooLargeError, ValueError, RecursionError) as e:
+        except (httpx.HTTPError, NetworkError, ValueError, RecursionError) as e:
             raise ProofVerificationError(f"No trusted root: reading {where} from the consensus RPC failed: {e}") from e
         if isinstance(body, dict) and body.get("error") is not None and body.get("result") is None:
             return None

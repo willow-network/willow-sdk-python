@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import httpx
+from multidict import CIMultiDict
 import pytest
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
@@ -480,6 +481,7 @@ class _Body:
 class _Response:
     def __init__(self, payload):
         self.status = 200
+        self.headers = CIMultiDict()
         self._payload = payload
         self.content = _Body(json.dumps(payload).encode())
 
@@ -614,6 +616,7 @@ async def test_consensus_submit_reports_a_plain_text_refusal():
     class PlainText(_Response):
         def __init__(self):
             self.status = 422
+            self.headers = CIMultiDict()
             self.content = _Body(b"Failed to deserialize the JSON body into the target type: missing field `name`")
 
         async def json(self, content_type="application/json"):

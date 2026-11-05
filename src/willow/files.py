@@ -14,7 +14,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 import httpx
 
 from . import _body
-from .errors import ResponseTooLargeError, TransactionError, WillowError, parse_api_error
+from .errors import (
+    ResponseEncodingError, ResponseTooLargeError, TransactionError, WillowError, parse_api_error,
+)
 from .nonces import already_in_cache
 from .signed_messages import (
     delete_file_manifest_message,
@@ -196,9 +198,9 @@ class FileOperations:
                 while True:
                     try:
                         resp = await _body.send(client, "POST", url, limit=_body.SMALL, content=chunk)
-                    except ResponseTooLargeError as e:
+                    except (ResponseEncodingError, ResponseTooLargeError) as e:
                         raise _chunk_error(
-                            f"the storage node's answer to chunk {i} of {file_key} was too long: {e}",
+                            f"the storage node's answer to chunk {i} of {file_key} was refused: {e}",
                             submission, i,
                         ) from e
                     except httpx.HTTPError as e:

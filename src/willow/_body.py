@@ -2,11 +2,15 @@
 
 The SDK streams each answer and stops reading once it passes its route's
 cap, raising ``ResponseTooLargeError``: an API, indexer, or node that
-streams an endless answer can't exhaust memory. A cap bounds the bytes read
-of one answer, after any ``Content-Encoding`` is decoded, not the memory
-decoding them takes: ``json.loads`` builds an object for each element it
-reads, so an answer at its cap can take a multiple of the cap once decoded
-(a list of empty objects, many times its length).
+streams an endless answer can't exhaust memory. Every request asks for the
+answer unencoded (``Accept-Encoding: identity``), and an answer in any other
+``Content-Encoding`` is refused before it is decoded
+(``ResponseEncodingError``): decoding takes memory the cap doesn't bound, as
+a few hundred bytes of nested gzip decode to gigabytes. So a cap bounds the
+bytes of one answer as sent. It doesn't bound the memory parsing them takes:
+``json.loads`` builds an object for each element it reads, so an answer at
+its cap can take a multiple of the cap once parsed (a list of empty
+objects, many times its length).
 
 Each cap is the smallest that holds the largest honest answer of its routes
 where the node bounds that answer; where the request sets an answer's size
@@ -15,11 +19,11 @@ is ``LARGE``, and an answer past it is refused: ask for less.
 """
 
 import json
-from typing import Any
+from typing import Any, Iterable
 
 import httpx
 
-from .errors import ResponseTooLargeError
+from .errors import ResponseEncodingError, ResponseTooLargeError
 
 #: An answer of fixed shape, or a list the node keeps short: an account's
 #: nonce, a balance, the token's info, the fee schedule, validators,
@@ -55,37 +59,53 @@ LARGE = 64 << 20
 _DROPPED_HEADERS = (b"content-encoding", b"content-length", b"transfer-encoding")
 
 
+def _refuse_encoded(values: Iterable[str]) -> None:
+    """Raise ``ResponseEncodingError`` unless the ``Content-Encoding``
+    header values given name no coding but ``identity``."""
+    codings = [c.strip() for value in values for c in value.split(",")]
+    named = [c for c in codings if c and c.lower() != "identity"]
+    if named:
+        raise ResponseEncodingError(", ".join(named))
+
+
 async def send(
     http: httpx.AsyncClient, method: str, url: str, *, limit: int, **kwargs: Any
 ) -> httpx.Response:
-    """``http.request(method, url, **kwargs)``, reading at most ``limit``
-    bytes of the answer's body.
+    """``http.request(method, url, **kwargs)``, asking for the answer
+    unencoded and reading at most ``limit`` bytes of its body.
 
-    The response returned holds the decoded body (its ``Content-Encoding``
-    header dropped), so ``json()``, ``text``, and ``raise_for_status()``
-    work as on any response.
+    The response returned holds the body as sent, so ``json()``, ``text``,
+    and ``raise_for_status()`` work as on any response.
 
     Raises:
+        ResponseEncodingError: The answer names a ``Content-Encoding`` other
+            than ``identity``. Nothing of its body is read.
         ResponseTooLargeError: The body is longer than ``limit`` bytes, as
             its ``Content-Length`` says or as read. Nothing past the cap is
             kept.
         httpx.HTTPError: As ``http.request`` raises.
     """
-    request = http.build_request(method, url, **kwargs)
+    headers = httpx.Headers(kwargs.pop("headers", None))
+    headers["Accept-Encoding"] = "identity"
+    request = http.build_request(method, url, headers=headers, **kwargs)
     response = await http.send(request, stream=True)
     try:
+        _refuse_encoded(response.headers.get_list("content-encoding"))
         declared = response.headers.get("content-length", "")
-        if (
-            "content-encoding" not in response.headers
-            and declared.isdigit()
-            and int(declared) > limit
-        ):
+        if declared.isdigit() and int(declared) > limit:
             raise ResponseTooLargeError(limit)
         body = bytearray()
-        async for chunk in response.aiter_bytes():
-            body += chunk
-            if len(body) > limit:
-                raise ResponseTooLargeError(limit)
+        if response.is_stream_consumed:
+            # A transport that hands back a response already read (httpx's
+            # MockTransport does): its body is in memory.
+            body += response.content
+        else:
+            async for chunk in response.aiter_raw():
+                body += chunk
+                if len(body) > limit:
+                    raise ResponseTooLargeError(limit)
+        if len(body) > limit:
+            raise ResponseTooLargeError(limit)
     finally:
         await response.aclose()
     headers = [(k, v) for k, v in response.headers.raw if k.lower() not in _DROPPED_HEADERS]
@@ -98,12 +118,28 @@ async def send(
     )
 
 
+def aiohttp_session(**kwargs: Any) -> Any:
+    """An ``aiohttp.ClientSession(**kwargs)`` that asks for each answer
+    unencoded (``Accept-Encoding: identity``) and decodes none
+    (``auto_decompress=False``): ``read_aiohttp`` refuses an encoded one."""
+    import aiohttp
+
+    headers = dict(kwargs.pop("headers", None) or {})
+    headers["Accept-Encoding"] = "identity"
+    return aiohttp.ClientSession(headers=headers, auto_decompress=False, **kwargs)
+
+
 async def read_aiohttp(response: Any, limit: int) -> bytes:
-    """The body of an ``aiohttp`` response, reading at most ``limit`` bytes.
+    """The body of an ``aiohttp`` response, as sent, reading at most
+    ``limit`` bytes. Open the session with ``aiohttp_session``, which
+    decodes no ``Content-Encoding``.
 
     Raises:
+        ResponseEncodingError: The answer names a ``Content-Encoding`` other
+            than ``identity``. Nothing of its body is read.
         ResponseTooLargeError: The body is longer than ``limit`` bytes.
     """
+    _refuse_encoded(response.headers.getall("Content-Encoding", ()))
     body = bytearray()
     while True:
         chunk = await response.content.read(1 << 16)
@@ -119,6 +155,7 @@ async def json_aiohttp(response: Any, limit: int) -> Any:
     bytes (see ``read_aiohttp``).
 
     Raises:
+        ResponseEncodingError: The answer is encoded (see ``read_aiohttp``).
         ResponseTooLargeError: The body is longer than ``limit`` bytes.
         ValueError: It isn't JSON.
     """

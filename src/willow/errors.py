@@ -65,16 +65,38 @@ class ResponseTooLargeError(NetworkError):
     """An answer longer than the SDK's cap for its route (``limit`` bytes):
     the SDK stopped reading it.
 
-    The cap bounds the bytes read of one answer (after any
-    ``Content-Encoding`` is decoded), not the memory decoding them takes,
-    which can be a multiple of it. Raised by a write's submission, the
-    transaction may have reached the node: like any ``NetworkError`` after
-    connecting, it carries ``transaction`` for ``resubmit``.
+    The cap bounds the bytes read of one answer, as sent (the SDK decodes no
+    ``Content-Encoding``: see ``ResponseEncodingError``), not the memory
+    parsing them takes, which can be a multiple of it. Raised by a write's
+    submission, the transaction may have reached the node: like any
+    ``NetworkError`` after connecting, it carries ``transaction`` for
+    ``resubmit``.
     """
 
     def __init__(self, limit: int):
         super().__init__(f"the answer is over the SDK's {limit >> 20} MiB limit for its route")
         self.limit = limit
+
+
+class ResponseEncodingError(NetworkError):
+    """An answer in a ``Content-Encoding`` other than ``identity``: the SDK
+    refused it without decoding it.
+
+    Every request asks for ``identity`` (``Accept-Encoding: identity``), and
+    the SDK reads each body as sent: decoding a coding takes memory the cap
+    on an answer's bytes doesn't bound (a few hundred bytes of nested gzip
+    decode to gigabytes). ``encoding`` is the coding the answer names.
+    Raised by a write's submission, the transaction may have reached the
+    node: like any ``NetworkError`` after connecting, it carries
+    ``transaction`` for ``resubmit``.
+    """
+
+    def __init__(self, encoding: str):
+        super().__init__(
+            f"the answer is in Content-Encoding {encoding!r}; the SDK asks for identity "
+            f"and decodes no other"
+        )
+        self.encoding = encoding
 
 
 class HttpError(WillowError):

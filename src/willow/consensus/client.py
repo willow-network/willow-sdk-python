@@ -13,7 +13,9 @@ import logging
 
 from .. import _body
 from ..auth import _key_algorithm, sign_message, SignatureAlgorithm
-from ..errors import NonceWindowFullError, ResponseTooLargeError, TransactionError
+from ..errors import (
+    NonceWindowFullError, ResponseEncodingError, ResponseTooLargeError, TransactionError,
+)
 from ..nonces import (
     FREE, HELD, UNKNOWN, USED, InterruptedWrite, NonceTracker, already_in_cache, refusal_outcome,
 )
@@ -68,7 +70,7 @@ class ConsensusClient:
     
     async def start(self):
         """Start the consensus client."""
-        self._session = aiohttp.ClientSession(
+        self._session = _body.aiohttp_session(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_secs)
         )
         logger.info("Consensus client started")
@@ -850,5 +852,5 @@ class ConsensusClient:
                 if isinstance(nonce, bool) or not isinstance(nonce, int):
                     raise ConsensusError(f"The API answered no nonce for {did}")
                 return nonce
-        except (aiohttp.ClientError, ResponseTooLargeError, ValueError) as e:
+        except (aiohttp.ClientError, ResponseEncodingError, ResponseTooLargeError, ValueError) as e:
             raise ConsensusError(f"Failed to fetch nonce: {e}")

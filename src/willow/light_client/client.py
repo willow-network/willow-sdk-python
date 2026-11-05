@@ -65,7 +65,7 @@ class LightClient:
     
     async def start(self):
         """Start the light client and begin synchronization."""
-        self._session = aiohttp.ClientSession(
+        self._session = _body.aiohttp_session(
             timeout=aiohttp.ClientTimeout(total=self.config.request_timeout_secs)
         )
         

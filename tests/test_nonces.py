@@ -10,6 +10,7 @@ import base64
 import json
 
 import httpx
+from multidict import CIMultiDict
 import pytest
 
 import aiohttp
@@ -1019,6 +1020,7 @@ class _Body:
 class _Response:
     def __init__(self, payload, status=200):
         self.status = status
+        self.headers = CIMultiDict()
         self._payload = payload
         self.content = _Body(json.dumps(payload).encode())
 

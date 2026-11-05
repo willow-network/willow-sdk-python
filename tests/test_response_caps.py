@@ -7,6 +7,7 @@ stops reading once it passes its route's cap and raises
 import json
 
 import httpx
+from multidict import CIMultiDict
 import pytest
 
 from willow import NetworkError, ResponseTooLargeError, WillowClient
@@ -152,6 +153,7 @@ class _Answer:
 
     def __init__(self, body, status=200):
         self.status = status
+        self.headers = CIMultiDict()
         self.content = _Body(body)
         self._whole = body
 
