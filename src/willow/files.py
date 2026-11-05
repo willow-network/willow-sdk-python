@@ -496,7 +496,7 @@ def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:
     """
     try:
         envelope = resp.json()
-    except ValueError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to read
         envelope = None
     if not isinstance(envelope, dict):
         text = resp.text.strip()

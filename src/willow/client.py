@@ -1784,7 +1784,8 @@ class WillowClient:
                 base, used = await self._query_nonce_state(did)
                 self._nonces.trust_base(did, base)
                 return base, used
-            except (WillowError, httpx.HTTPError, ValueError) as e:
+            except (WillowError, httpx.HTTPError, ValueError, RecursionError) as e:
+                # RecursionError: an answer nested too deep to read.
                 logger.warning(f"Could not read the nonce state of {did} over RPC, reading the base: {e}")
         return await self._account_nonce(did), frozenset()
 

@@ -792,6 +792,43 @@ async def test_a_base_the_api_answered_too_high_gives_way_to_the_consensus_rpcs(
     await client.close()
 
 
+_TOO_DEEP = "[" * 100000 + "]" * 100000
+
+
+@pytest.mark.asyncio
+async def test_an_answer_nested_too_deep_to_read_keeps_the_write_resubmittable():
+    # The API's answer to the submission can't be parsed: the write may have
+    # reached the node, so it keeps its nonce and carries its transaction.
+    client, node, _ = _client(base=1)
+    real = node.handler
+
+    def api(request):
+        if request.url.path == "/tx/submit":
+            real(request)
+            return httpx.Response(200, text=_TOO_DEEP)
+        return real(request)
+
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(api))
+    with pytest.raises(TransactionError) as exc_info:
+        await client.data.store_item("sg", "a", {})
+    error = exc_info.value
+    assert (error.did, error.nonce) == (node.did, 2) and error.transaction is not None
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(real))
+    assert (await client.data.store_item("sg", "b", {}))["nonce"] == 3
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_nonce_state_nested_too_deep_to_read_falls_back_to_the_base():
+    client, node, _ = _client(base=1)
+    client.consensus_rpc_url = "http://rpc.test"
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, text=_TOO_DEEP)
+    ))
+    assert (await client.data.store_item("sg", "a", {}))["nonce"] == 2
+    await client.close()
+
+
 @pytest.mark.asyncio
 async def test_wait_until_landed_sees_a_nonce_above_a_gap_with_the_rpc_url():
     # Nonce 2 was abandoned (never landed); nonce 3 landed. The base stays 1.
