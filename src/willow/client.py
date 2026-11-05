@@ -154,9 +154,9 @@ _NO_TRUSTED_HEADER_SOURCE = (
 
 def _unsupported_data_write(operation: str, route: str, kind: str) -> WillowError:
     return WillowError(
-        f"{operation} is not supported: the node API does not serve {route}. Data "
-        f"changes only through a {kind} transaction submitted to POST /tx/submit, "
-        f"which this SDK does not build."
+        f"{operation} is not supported: the node API answers {route} with 501 Not "
+        f"Implemented. Data changes only through a {kind} transaction submitted to "
+        f"POST /tx/submit, which this SDK does not build."
     )
 
 
@@ -466,9 +466,9 @@ class DataOperations:
     async def update(self, subgrove_id: str, key: str, data: Dict[str, Any]) -> None:
         """Not supported: raises ``WillowError``.
 
-        The node API does not serve ``PUT /data/{subgrove_id}/{key}``; data
-        changes only through an UpdateData transaction submitted to
-        ``POST /tx/submit``, which this SDK does not build.
+        The node API answers ``PUT /data/{subgrove_id}/{key}`` with 501 Not
+        Implemented; data changes only through an UpdateData transaction
+        submitted to ``POST /tx/submit``, which this SDK does not build.
         """
         raise _unsupported_data_write(
             "client.data.update", "PUT /data/{subgrove_id}/{key}", "UpdateData"
@@ -477,9 +477,10 @@ class DataOperations:
     async def delete(self, subgrove_id: str, key: str) -> None:
         """Not supported: raises ``WillowError``.
 
-        The node API does not serve ``DELETE /data/{subgrove_id}/{key}``; data
-        is deleted only through a DeleteData transaction submitted to
-        ``POST /tx/submit``, which this SDK does not build.
+        The node API answers ``DELETE /data/{subgrove_id}/{key}`` with 501
+        Not Implemented; data is deleted only through a DeleteData
+        transaction submitted to ``POST /tx/submit``, which this SDK does
+        not build.
         """
         raise _unsupported_data_write(
             "client.data.delete", "DELETE /data/{subgrove_id}/{key}", "DeleteData"
@@ -754,7 +755,10 @@ class ProofOperations:
             key: Item key
 
         Returns:
-            Proof data including proof hex and value, as the API serves it
+            The proof as the API serves it: ``proof`` (hex), the ``path``
+            and ``key`` it is at (hex), and the block ``height`` whose
+            resulting state it proves. ``value`` is ``None``: the node's
+            ``/proof`` carries no value (read it with ``data.get``).
         """
         # Nonce-signed when an identity is set, for the DID's read rights.
         response = await self.client._request(
@@ -1147,7 +1151,9 @@ class WillowClient:
             api_key: Managed-tier API key (``wk_...``). When set, the SDK
                 sends ``X-API-Key`` on its HTTP requests to the API (and to
                 ``indexer_url``), never to a discovered indexer or the
-                consensus RPC. Mint a key at
+                consensus RPC: an indexer found through discovery gets no
+                key, so to query an indexer that needs it, set
+                ``indexer_url``. Mint a key at
                 https://dashboard.willow.tech/account. Required for queries
                 and writes against managed ``api.willow.tech`` /
                 ``indexer.willow.tech``.

@@ -338,7 +338,7 @@ async def test_data_store_is_the_store_data_known_answer():
 async def test_health_reads_the_health_object_the_api_answers():
     # GET /health answers no envelope: an RFC 3339 timestamp and its checks.
     health = {
-        "status": "degraded", "timestamp": "2026-01-01T00:00:00+00:00", "version": "0.1.0",
+        "status": "degraded", "timestamp": "1970-01-01T00:00:01+00:00", "version": "0.1.0",
         "checks": {
             "storage": {"status": "healthy", "message": "GroveDB is accessible"},
             "consensus": {"status": "degraded", "message": "CometBFT unreachable or unhealthy"},

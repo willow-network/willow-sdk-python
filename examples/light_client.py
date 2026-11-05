@@ -88,7 +88,10 @@ async def main():
                     if not result.success and result.error:
                         print(f"Reason: {result.error}")
                 else:
-                    print("No header at height 1 yet.")
+                    # get_header_by_height returns only a header the client
+                    # holds; one it fetches is never verified, so it isn't.
+                    print("The client holds no header at height 1: it trusted only the "
+                          "latest on first use, and a fetched header is never verified.")
             except Exception as e:
                 print(f"Error: {e}")
     except Exception as e:

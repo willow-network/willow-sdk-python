@@ -45,9 +45,14 @@ async def main():
     print("Willow Proof Verification Demo")
     print("=" * 50)
 
+    did_info = generate_did()
+
     async with WillowClient("http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL) as client:
-        did_info = generate_did()
+        # Reads are signed by the identity, which must be a registered DID:
+        # register it (pre-fund the DID with the registration fee first),
+        # and wait for the registration to land before it signs anything.
         client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"])
+        await client.wait_until_landed(await client.register_did(did_info["did_document"]))
 
         # 1. A verified read: the value comes back only when its proof
         #    proves it at KEY under the subgrove's data, against the
@@ -106,7 +111,7 @@ async def main():
     print("\n5. Unverified Reads")
     print("-" * 40)
     async with WillowClient("http://localhost:3031") as client:
-        did_info = generate_did()
+        # The DID registered above.
         client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"])
         try:
             result = await client.data.query_unverified(

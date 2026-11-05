@@ -601,21 +601,16 @@ from willow import (
     WillowError,
     NetworkError,
     NotAuthenticatedError,
-    ValidationError,
-    NotFoundError,
     PermissionDeniedError,
     ProofHeightOutOfRangeError,
     ProofVerificationError,
     RateLimitError,
-    UnsupportedError,
 )
 
 try:
     data = await client.data.get("subgrove", "key")
 except NotAuthenticatedError:
     print("Call client.set_identity(...) first")
-except NotFoundError as e:
-    print(f"Data not found: {e}")
 except ProofHeightOutOfRangeError as e:
     print(f"Stale: {e}")  # the proof's state is not the chain's current one
 except ProofVerificationError as e:
@@ -627,6 +622,8 @@ except RateLimitError as e:
 except NetworkError as e:
     print(f"Network error: {e}")
 except WillowError as e:
+    # Includes a key that isn't there: the node answers "Data not found" as
+    # a refused read (HTTP 200, success false), not a 404
     print(f"Willow error: {e}")
 ```
 
