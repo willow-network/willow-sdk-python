@@ -228,6 +228,9 @@ def _verify_layer_proof(
                 "element": element if bound and deserialize_elements else None,
                 "tree": tree,
                 "node_type": proved.node_type,
+                # A KV node's bytes held back from "value" for their length
+                # alone (see AMBIGUOUS_ELEMENT_LENGTH).
+                "ambiguous_value": proved.value if _is_ambiguous_kv(proved) else None,
             })
 
     # A lower layer under a key this layer doesn't prove is bound to nothing.
@@ -259,6 +262,10 @@ _VALUE_HASH_NODES = ("KVValueHash", "KVValueHashFeatureType")
 AMBIGUOUS_ELEMENT_LENGTH = 63
 
 
+def _is_ambiguous_kv(proved: ProvedKeyValue) -> bool:
+    return proved.node_type == "KV" and len(proved.value) == AMBIGUOUS_ELEMENT_LENGTH
+
+
 def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: List[bytes]) -> bool:
     """Bind a leaf's bytes to the value hash its merk node commits to;
     whether they are bound.
@@ -283,7 +290,7 @@ def _bind_leaf_value(proved: ProvedKeyValue, element: Optional[Element], path: L
       not hash to the node's value hash are refused.
     """
     if proved.node_type == "KV":
-        return len(proved.value) != AMBIGUOUS_ELEMENT_LENGTH
+        return not _is_ambiguous_kv(proved)
     if proved.node_type not in _VALUE_HASH_NODES:
         return True
     tree = element is not None and is_tree_element(element)
@@ -387,9 +394,12 @@ def _proven_items(
     proof_bytes: bytes,
     path: List[Any],
     expected_root_hash: Optional[CryptoHash],
+    only_items_at_path: bool = False,
 ) -> "tuple[CryptoHash, List[ProvenItem], Dict[bytes, str]]":
     """The root, the Items proven at ``path``, and, for each key there whose
-    bytes the proof does not bind, why."""
+    bytes the proof does not bind, why. With ``only_items_at_path``, a
+    63-byte element in a ``KV`` node is read as the element it is (see
+    ``verify_item_at_path``)."""
     segments = _path_bytes(path)
     if not segments:
         raise GroveDBVerificationError("a path is required: a proof binds values only at a path")
@@ -404,17 +414,20 @@ def _proven_items(
     for entry in result.results:
         if entry["path"] != segments:
             continue
+        value = entry["value"]
+        if value is None and only_items_at_path:
+            value = entry.get("ambiguous_value")
         # An Item is returned only from a KV node, as grovedb proves one.
-        if entry["node_type"] != "KV" or entry["value"] is None:
+        if entry["node_type"] != "KV" or value is None:
             reason = _unbound_reason(entry)
             if reason:
                 unbound[entry["key"]] = reason
             continue
-        element = _try_deserialize(entry["value"])
+        element = _try_deserialize(value)
         if isinstance(element, ItemElement):
             items.append(ProvenItem(
                 path=segments, key=entry["key"], value=element.value,
-                element=entry["value"], flags=element.flags,
+                element=value, flags=element.flags,
             ))
     return result.root_hash, items, unbound
 
@@ -424,6 +437,8 @@ def verify_item_at_path(
     path: List[Any],
     key: Any,
     expected_root_hash: Optional[CryptoHash] = None,
+    *,
+    only_items_at_path: bool = False,
 ) -> "tuple[CryptoHash, ProvenItem]":
     """
     Verify a GroveDB proof that ``key`` holds an Item element at ``path``,
@@ -433,12 +448,20 @@ def verify_item_at_path(
     ``path`` and ``key`` (another key, another path, a subtree, a lone
     root hash) is refused.
 
+    ``only_items_at_path`` says the state holds nothing but Items directly
+    under ``path``, as in a subgrove's data tree (``subgrove_data_path``),
+    where the chain stores each key's value as an Item. A 63-byte element
+    in a ``KV`` node there is then returned: a ``KV`` node's hash binds its
+    bytes, and what a proof can't tell 63 bytes from is an element whose
+    value hash is a hash of two hashes (a subtree or a reference), which
+    such a path doesn't hold. Without it, such an element is refused.
+
     Raises:
         GroveDBVerificationError: The proof is invalid, or does not prove an
             Item at ``path`` and ``key``.
     """
     key_bytes = key.encode("utf-8") if isinstance(key, str) else bytes(key)
-    root_hash, items, unbound = _proven_items(proof_bytes, path, expected_root_hash)
+    root_hash, items, unbound = _proven_items(proof_bytes, path, expected_root_hash, only_items_at_path)
     for item in items:
         if item.key == key_bytes:
             return root_hash, item

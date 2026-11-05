@@ -280,9 +280,7 @@ class DataOperations:
         header at the proof's ``height + 1`` (the state after block
         ``height``), as the light client gives it (see ``get_root_hash``).
         It returns the value the proof proves. Anything missing or
-        different raises; nothing is returned unverified. A value whose
-        Item is 63 bytes (a 60-byte JSON text) raises: a proof can't tell
-        an element of that length from a subtree.
+        different raises; nothing is returned unverified.
 
         Args:
 
@@ -339,8 +337,11 @@ class DataOperations:
             )
 
         try:
+            # The chain stores only Items in a subgrove's data tree, so a
+            # 63-byte element there is an Item (see verify_item_at_path).
             root_hash, item = verify_item_at_path(
-                bytes.fromhex(proof_hex), subgrove_data_path(subgrove_id), key
+                bytes.fromhex(proof_hex), subgrove_data_path(subgrove_id), key,
+                only_items_at_path=True,
             )
         except (ValueError, GroveDBVerificationError) as e:
             raise ProofVerificationError(f"Proof verification failed for key {key!r}: {e}") from e

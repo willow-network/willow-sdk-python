@@ -11,6 +11,7 @@ import pytest
 
 from willow import ProofVerificationError, UnsupportedError, WillowClient
 from willow.auth import generate_did
+from willow.grovedb import GroveDBVerificationError, verify_item_at_path
 from willow.grovedb.hash import combine_hash, kv_digest_to_kv_hash, kv_hash, node_hash, value_hash
 from willow.grovedb.types import NULL_HASH
 from willow.types import HistoricalQueryResponse, QueryResponse
@@ -135,6 +136,25 @@ async def test_get_fails_closed_on_a_malformed_proof():
         with pytest.raises(ProofVerificationError, match=match):
             await client.data.get("my-sub", "user:bob")
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_returns_a_value_whose_item_is_63_bytes():
+    # A 60-byte JSON text is a 63-byte Item. A proof can't tell 63 bytes
+    # from a subtree's or a reference's value hash, but a subgrove's data
+    # tree holds only Items, so data.get returns it; the generic verifier
+    # still refuses it.
+    payload = b'{"note":"' + b"x" * 49 + b'"}'
+    element = b"\x00" + bytes([len(payload)]) + payload + b"\x00"
+    assert len(payload) == 60 and len(element) == 63
+    proof, root = _bobs_proof(element)
+    client, _ = _get_client(proof={"proof": proof.hex(), "height": 1}, root=root, served={"note": "x" * 49})
+    assert await client.data.get("my-sub", "user:bob") == {"note": "x" * 49}
+    await client.close()
+    with pytest.raises(GroveDBVerificationError, match="63 bytes long"):
+        verify_item_at_path(proof, ["subgroves", "my-sub", "data"], "user:bob", root)
+    _, item = verify_item_at_path(proof, ["subgroves", "my-sub", "data"], "user:bob", root, only_items_at_path=True)
+    assert item.value == payload
 
 
 @pytest.mark.asyncio
