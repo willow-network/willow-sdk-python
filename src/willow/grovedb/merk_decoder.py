@@ -53,6 +53,25 @@ OP_CHILD = 0x11
 OP_PARENT_INVERTED = 0x12
 OP_CHILD_INVERTED = 0x13
 
+# Large-value op codes: the same layout as the op they mirror, but the value
+# length is a big-endian u32. The Willow GroveDB fork (willow-network/grovedb,
+# branch willow/v3.1.0-proof-fixes; upstream dashpay/grovedb 86562f65) writes
+# them for any value of 64 KiB or more, which grovedb 3.1.0's u16 length
+# cannot express.
+OP_PUSH_KV_LARGE = 0x20
+OP_PUSH_KVVALUEHASH_LARGE = 0x21
+OP_PUSH_KVREFVALUEHASH_LARGE = 0x22
+OP_PUSH_KVVALUEHASH_FEATURE_TYPE_LARGE = 0x23
+OP_PUSH_INVERTED_KV_LARGE = 0x28
+OP_PUSH_INVERTED_KVVALUEHASH_LARGE = 0x29
+OP_PUSH_INVERTED_KVREFVALUEHASH_LARGE = 0x2a
+OP_PUSH_INVERTED_KVVALUEHASH_FEATURE_TYPE_LARGE = 0x2b
+
+# A value this long or longer must use a large-value op (and only those may).
+LARGE_VALUE_THRESHOLD = 65536
+# Longest value a large-value op may declare (64 MiB, as the prover's decoder).
+MAX_VALUE_LEN = 64 * 1024 * 1024
+
 # Feature type encoding
 FEATURE_BASIC = 0x00
 FEATURE_SUMMED = 0x01
@@ -106,6 +125,14 @@ class MerkDecoder:
             return PushOp(node=self._decode_kv_ref_value_hash())
         elif op_code == OP_PUSH_KVVALUEHASH_FEATURE_TYPE:
             return PushOp(node=self._decode_kv_value_hash_feature_type())
+        elif op_code == OP_PUSH_KV_LARGE:
+            return PushOp(node=self._decode_kv(large=True))
+        elif op_code == OP_PUSH_KVVALUEHASH_LARGE:
+            return PushOp(node=self._decode_kv_value_hash(large=True))
+        elif op_code == OP_PUSH_KVREFVALUEHASH_LARGE:
+            return PushOp(node=self._decode_kv_ref_value_hash(large=True))
+        elif op_code == OP_PUSH_KVVALUEHASH_FEATURE_TYPE_LARGE:
+            return PushOp(node=self._decode_kv_value_hash_feature_type(large=True))
 
         # PushInverted variants
         elif op_code == OP_PUSH_INVERTED_HASH:
@@ -122,6 +149,16 @@ class MerkDecoder:
             return PushInvertedOp(node=self._decode_kv_ref_value_hash())
         elif op_code == OP_PUSH_INVERTED_KVVALUEHASH_FEATURE_TYPE:
             return PushInvertedOp(node=self._decode_kv_value_hash_feature_type())
+        elif op_code == OP_PUSH_INVERTED_KV_LARGE:
+            return PushInvertedOp(node=self._decode_kv(large=True))
+        elif op_code == OP_PUSH_INVERTED_KVVALUEHASH_LARGE:
+            return PushInvertedOp(node=self._decode_kv_value_hash(large=True))
+        elif op_code == OP_PUSH_INVERTED_KVREFVALUEHASH_LARGE:
+            return PushInvertedOp(node=self._decode_kv_ref_value_hash(large=True))
+        elif op_code == OP_PUSH_INVERTED_KVVALUEHASH_FEATURE_TYPE_LARGE:
+            return PushInvertedOp(
+                node=self._decode_kv_value_hash_feature_type(large=True)
+            )
 
         # Tree operations
         elif op_code == OP_PARENT:
@@ -146,19 +183,19 @@ class MerkDecoder:
         kv_hash = self._read_bytes(HASH_LENGTH)
         return KVHashNode(kv_hash=kv_hash)
 
-    def _decode_kv(self) -> MerkNode:
+    def _decode_kv(self, large: bool = False) -> MerkNode:
         """Decode a KV node."""
         key_len = self._read_u8()
         key = self._read_bytes(key_len)
-        value_len = self._read_u16()
+        value_len = self._read_value_length(large)
         value = self._read_bytes(value_len)
         return KVNode(key=key, value=value)
 
-    def _decode_kv_value_hash(self) -> MerkNode:
+    def _decode_kv_value_hash(self, large: bool = False) -> MerkNode:
         """Decode a KVValueHash node."""
         key_len = self._read_u8()
         key = self._read_bytes(key_len)
-        value_len = self._read_u16()
+        value_len = self._read_value_length(large)
         value = self._read_bytes(value_len)
         value_hash = self._read_bytes(HASH_LENGTH)
         return KVValueHashNode(key=key, value=value, value_hash=value_hash)
@@ -170,20 +207,20 @@ class MerkDecoder:
         value_hash = self._read_bytes(HASH_LENGTH)
         return KVDigestNode(key=key, value_hash=value_hash)
 
-    def _decode_kv_ref_value_hash(self) -> MerkNode:
+    def _decode_kv_ref_value_hash(self, large: bool = False) -> MerkNode:
         """Decode a KVRefValueHash node."""
         key_len = self._read_u8()
         key = self._read_bytes(key_len)
-        value_len = self._read_u16()
+        value_len = self._read_value_length(large)
         value = self._read_bytes(value_len)
         value_hash = self._read_bytes(HASH_LENGTH)
         return KVRefValueHashNode(key=key, value=value, value_hash=value_hash)
 
-    def _decode_kv_value_hash_feature_type(self) -> MerkNode:
+    def _decode_kv_value_hash_feature_type(self, large: bool = False) -> MerkNode:
         """Decode a KVValueHashFeatureType node."""
         key_len = self._read_u8()
         key = self._read_bytes(key_len)
-        value_len = self._read_u16()
+        value_len = self._read_value_length(large)
         value = self._read_bytes(value_len)
         value_hash = self._read_bytes(HASH_LENGTH)
         feature_type = self._decode_feature_type()
@@ -243,6 +280,30 @@ class MerkDecoder:
         value = (self.data[self.offset] << 8) | self.data[self.offset + 1]
         self.offset += 2
         return value
+
+    def _read_value_length(self, large: bool) -> int:
+        """
+        Read a value length: a big-endian u16 for the 3.1.0 ops, a big-endian
+        u32 for the large-value ops. A large-value op must carry a value of at
+        least 64 KiB (a shorter one has exactly one encoding, the u16 op) and
+        at most MAX_VALUE_LEN.
+        """
+        if not large:
+            return self._read_u16()
+        if self.offset + 4 > len(self.data):
+            raise GroveDBVerificationError("Unexpected end of data reading u32")
+        value_len = int.from_bytes(self.data[self.offset:self.offset + 4], "big")
+        self.offset += 4
+        if value_len < LARGE_VALUE_THRESHOLD:
+            raise GroveDBVerificationError(
+                f"Large-value op with a {value_len}-byte value "
+                f"(must be at least {LARGE_VALUE_THRESHOLD})"
+            )
+        if value_len > MAX_VALUE_LEN:
+            raise GroveDBVerificationError(
+                f"Large-value op with a {value_len}-byte value (limit {MAX_VALUE_LEN})"
+            )
+        return value_len
 
     def _read_bytes(self, length: int) -> bytes:
         """Read a fixed number of bytes."""
