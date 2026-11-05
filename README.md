@@ -427,7 +427,7 @@ print(f"Total: {result.total}")
 
 ### Registration Operations
 
-`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. `dataset_path` has no on-chain counterpart and is not sent. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
+`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. `dataset_path` has no on-chain counterpart and is not sent. `initial_funding`, in base units (10\*\*18 per WILL), moves from the owner's balance to the subgrove's when the registration lands, on top of the registration fee. StoreData is paid from the subgrove's balance, not the writer's: a subgrove registered without funding takes no write until it is funded. A key the request doesn't send, or a `signature`, `public_key_id`, or `nonce` (the client sets them), raises `ValueError`. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
 
 The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). Both raise `ValueError` before anything is signed, as does a field flagged `indexed` or a schema `version` outside u32. `ConsensusClient.register_subgrove` takes the schema as JSON text, which for a data or file subgrove must parse as the node's `SchemaDefinition`: `{"version": 1, "fields": {"name": "string"}, "indexes": [], "required_fields": ["name"]}`, each field's type one of `string`, `number`, `boolean`, `array`, `object`, or `bytes`.
 
@@ -446,6 +446,7 @@ registration = await client.registration.register_subgrove({
     "owner_did": did,
     "writers": [did],
     "readers": [],
+    "initial_funding": 10**18,  # 1 WILL, from the owner's balance: pays for its writes
 })
 await client.wait_until_landed(registration)  # before storing into it
 

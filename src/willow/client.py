@@ -617,6 +617,16 @@ class DataOperations:
         raise UnsupportedError(_HISTORICAL_UNSUPPORTED)
 
 
+#: The keys ``RegistrationOperations.register_subgrove`` takes: the
+#: ``RegisterDatasetRequest`` fields, by name or alias.
+_REGISTER_REQUEST_KEYS = frozenset(
+    key
+    for name, info in RegisterDatasetRequest.model_fields.items()
+    for key in (name, info.alias)
+    if key
+)
+
+
 class RegistrationOperations:
     """Registration operations for Willow client.
 
@@ -631,14 +641,19 @@ class RegistrationOperations:
     async def register_subgrove(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Register a new DataStorage subgrove with a RegisterSubgrove transaction.
 
-        The request (``RegisterDatasetRequest`` fields) becomes a
-        RegisterSubgrove transaction with every field explicit, signed by the
-        identity set on the client over ``register_subgrove_message`` and
-        submitted to ``POST /tx/submit``. ``owner_did`` must be that identity.
-        ``readers`` become the mode's free readers. The schema is sent as the
-        node's schema JSON: each field's type, with required fields listed in
-        ``required_fields``; ``dataset_path`` has no on-chain counterpart and
-        is not sent. The subgrove ID must be 1 to 64 ASCII letters, digits,
+        The request (``RegisterDatasetRequest`` fields, and
+        ``initial_funding``) becomes a RegisterSubgrove transaction with every
+        field explicit, signed by the identity set on the client over
+        ``register_subgrove_message`` and submitted to ``POST /tx/submit``.
+        ``owner_did`` must be that identity. ``readers`` become the mode's
+        free readers. ``initial_funding``, in base units (10**18 per WILL),
+        moves from the owner's balance to the subgrove's when the
+        registration lands, on top of the registration fee: StoreData's fees
+        are paid from the subgrove's balance, so a subgrove registered
+        without funding takes no write until it is funded. The schema is
+        sent as the node's schema JSON: each field's type, with required
+        fields listed in ``required_fields``; ``dataset_path`` has no
+        on-chain counterpart and is not sent. The subgrove ID must be 1 to 64 ASCII letters, digits,
         ``-``, or ``_``, starting with a letter or digit, and the schema can
         declare no indexes (no ``indexes``, no field flagged ``indexed``):
         the node refuses either. For other modes and fields, use
@@ -652,9 +667,12 @@ class RegistrationOperations:
             transaction
 
         Raises:
-            ValueError: ``owner_did`` is not the client's identity, the
+            ValueError: The request has a key this method doesn't send, or
+                sets ``signature``, ``public_key_id``, or ``nonce`` (the
+                client does); ``owner_did`` is not the client's identity, the
                 subgrove ID is not one the node takes, a writer or reader
-                isn't a DID, or the schema is missing, declares indexes, has
+                isn't a DID, ``initial_funding`` is not an integer from 0 to
+                2**128 - 1, or the schema is missing, declares indexes, has
                 a type the node does not take, or has a version outside u32.
                 Nothing is sent.
             TransactionError: CheckTx refused the transaction.
@@ -663,6 +681,20 @@ class RegistrationOperations:
         # Handle subgrove_id -> dataset_id alias for compatibility
         if "subgrove_id" in request:
             request["dataset_id"] = request.pop("subgrove_id")
+        initial_funding = request.pop("initial_funding", None)
+        unknown = sorted(set(request) - _REGISTER_REQUEST_KEYS)
+        if unknown:
+            raise ValueError(
+                f"register_subgrove takes no {', '.join(map(repr, unknown))}: it sends only the "
+                f"RegisterDatasetRequest fields and initial_funding (ConsensusClient.register_subgrove "
+                f"takes every field of the transaction)"
+            )
+        set_by_client = sorted(k for k in ("signature", "public_key_id", "nonce") if request.get(k) is not None)
+        if set_by_client:
+            raise ValueError(
+                f"register_subgrove sets {', '.join(set_by_client)} itself: the identity set on the "
+                f"client signs the registration under a nonce the client hands out"
+            )
 
         dataset_request = RegisterDatasetRequest(**request)
         if dataset_request.owner_did != self.client._did:
@@ -683,6 +715,7 @@ class RegistrationOperations:
             }},
             public_key_id=self.client._public_key_id or "",
             name=dataset_request.name,
+            initial_funding=initial_funding,
         )
         return await self.client._sign_and_submit("RegisterSubgrove", tx)
 

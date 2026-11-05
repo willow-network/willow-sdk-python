@@ -509,6 +509,44 @@ class TestRegistrationOperations:
         assert seen == []
         await client.close()
 
+    @pytest.mark.asyncio
+    async def test_register_subgrove_funds_the_subgrove(self):
+        # StoreData is paid from the subgrove's balance: a subgrove
+        # registered without funding takes no write.
+        info = generate_did()
+        client, seen = _tx_client(did_info=info)
+        await client.registration.register_subgrove({
+            "dataset_id": "users", "name": "Users", "owner_did": info["did"],
+            "schema": {"version": 1, "fields": {"name": {"type": "string"}}},
+            "writers": [info["did"]], "initial_funding": 10**18,
+        })
+        body = _submitted(seen)[0]["RegisterSubgrove"]
+        assert int(body["initial_funding"]) == 10**18
+        assert verify_signature(
+            register_subgrove_message(body), bytes(body["signature"]).hex(), info["public_key"], "Ed25519"
+        )
+        await client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [
+        {"initial_funds": 10**18},
+        {"nonce": 5},
+        {"signature": b"\0" * 64},
+        {"public_key_id": "did:willow:a#key-9"},
+        {"initial_funding": True},
+        {"initial_funding": -1},
+    ])
+    async def test_register_subgrove_refuses_what_it_would_not_send(self, extra):
+        info = generate_did()
+        client, seen = _tx_client(did_info=info)
+        with pytest.raises((ValueError, TypeError)):
+            await client.registration.register_subgrove({
+                "dataset_id": "users", "name": "Users", "owner_did": info["did"],
+                "schema": {"version": 1, "fields": {}}, **extra,
+            })
+        assert seen == []
+        await client.close()
+
 
 class TestProofOperations:
     """Test proof operations."""
