@@ -236,9 +236,15 @@ class ApiResponse(BaseModel):
 
 
 class ProofData(BaseModel):
-    """Proof response data."""
+    """Proof response data: the GroveDB proof of a key (hex), the path and
+    key it is at (hex segments), and the block ``height`` whose resulting
+    state it proves (that state's root is the ``app_hash`` of the header at
+    ``height + 1``)."""
     proof: str
     value: Optional[Dict[str, Any]] = None
+    path: Optional[List[str]] = None
+    key: Optional[str] = None
+    height: Optional[int] = None
 
 
 # ============================================================================
@@ -295,20 +301,26 @@ class QueryResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
     def verify_proof(self) -> str:
-        """
-        Verify the proof and return computed root hash.
+        """Not supported: raises ``UnsupportedError``.
 
-        Returns:
-            Computed root hash
-
-        Raises:
-            WillowError: If proof is missing or verification fails
+        A query's documents come without their keys, and its proof covers
+        the subgrove's whole data tree, so nothing binds the documents to the
+        proof and the query's filter, order, offset, and limit. To check that
+        each document is a value proven under a subgrove's data, call
+        ``willow.proof.ProofVerifier.verify_query_proof(proof, documents,
+        subgrove_data_path(id))`` (synchronous; it returns a
+        ``ProofVerificationResult``); it proves nothing about the query.
         """
-        from .proof import verify_query_proof
-        if not self.proof:
-            from .errors import WillowError
-            raise WillowError("Query response does not contain proof data")
-        return verify_query_proof(self.proof, self.documents)
+        from .errors import UnsupportedError
+        raise UnsupportedError(_QUERY_UNSUPPORTED)
+
+
+_QUERY_UNSUPPORTED = (
+    "Verifying a query is not supported: its documents come without their keys and "
+    "nothing binds them to the proof, the query's filter, order, offset, or limit. "
+    "Use client.data.query_unverified for unverified documents, or client.data.get for "
+    "a verified key."
+)
 
 
 # ============================================================================
@@ -336,36 +348,20 @@ class HistoricalQueryResponse(BaseModel):
     error: Optional[str] = None
 
     def verify_proof(self) -> str:
+        """Deprecated and not supported: raises ``UnsupportedError``.
+
+        The node serves no historical proof, and a checkpoint's state root
+        in the same response is not a root to trust.
         """
-        Verify the proof against the checkpoint state root.
+        from .errors import UnsupportedError
+        raise UnsupportedError(_HISTORICAL_UNSUPPORTED)
 
-        Returns:
-            Computed root hash
 
-        Raises:
-            WillowError: If proof verification fails
-        """
-        from .proof import verify_query_proof
-        from .errors import WillowError, ProofVerificationError
-
-        if not self.proof:
-            raise WillowError("Historical query response does not contain proof data")
-
-        # Verify proof and get computed root hash
-        documents = self.data if isinstance(self.data, list) else [self.data]
-        computed_root = verify_query_proof(self.proof, documents)
-
-        # Compare with checkpoint state root
-        normalized_computed = computed_root.lower().lstrip("0x")
-        normalized_expected = self.state_root.lower().lstrip("0x")
-
-        if normalized_computed != normalized_expected:
-            raise ProofVerificationError(
-                f"Historical proof verification failed: computed root {computed_root} "
-                f"does not match checkpoint state root {self.state_root}"
-            )
-
-        return computed_root
+_HISTORICAL_UNSUPPORTED = (
+    "Verifying a historical query is deprecated and not supported: the node serves no "
+    "historical proof, and the checkpoint state root the same response carries is not "
+    "a trusted root. Use query_historical for the unverified answer."
+)
 
 
 class CheckpointInfo(BaseModel):
@@ -742,17 +738,25 @@ class DidPermissions(BaseModel):
 # ============================================================================
 
 class ComponentHealth(BaseModel):
-    """Individual component health."""
-    status: str
+    """Individual component health (``system`` reports figures, no status)."""
+    status: Optional[str] = None
     message: Optional[str] = None
+
+    model_config = {"extra": "allow"}
 
 
 class HealthStatus(BaseModel):
-    """Health check response."""
+    """Health check response.
+
+    ``GET /health`` answers ``timestamp`` as RFC 3339 text and its components
+    under ``checks``.
+    """
     status: str
-    timestamp: int
+    timestamp: Union[int, str]
     version: Optional[str] = None
-    components: Dict[str, ComponentHealth] = Field(default_factory=dict)
+    components: Dict[str, ComponentHealth] = Field(
+        default_factory=dict, validation_alias=AliasChoices("components", "checks")
+    )
 
 
 # ============================================================================

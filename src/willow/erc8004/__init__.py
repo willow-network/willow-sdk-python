@@ -8,7 +8,7 @@ with on-chain ERC-8004 agent registrations.
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-import aiohttp
+from .. import _body
 
 
 @dataclass
@@ -183,11 +183,11 @@ class Erc8004Client:
             params["limit"] = str(limit)
         if offset is not None:
             params["offset"] = str(offset)
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agents", params=params
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -211,11 +211,11 @@ class Erc8004Client:
 
     async def get_agent_registration(self, did: str) -> AgentRegistrationJson:
         """Fetch the ERC-8004 registration JSON for an agent DID."""
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agent/{did}/registration.json"
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -234,39 +234,39 @@ class Erc8004Client:
 
     async def get_eth_address(self, did: str) -> Optional[str]:
         """Get the ETH address linked to a DID."""
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/did/{did}/eth-address"
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 return body.get("data", {}).get("eth_address")
 
     async def get_did_for_eth(self, eth_address: str) -> Optional[str]:
         """Get the DID linked to an ETH address."""
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/eth-address/{eth_address}/did"
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 return body.get("data", {}).get("did")
 
     async def get_erc8004_details(self, did: str) -> Optional[Erc8004Registration]:
         """Get stored ERC-8004 registration details for a DID."""
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/did/{did}/erc8004"
             ) as resp:
                 if resp.status == 404:
                     return None
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body.get("data")
@@ -282,11 +282,11 @@ class Erc8004Client:
 
     async def get_reputation_attestation(self, did: str) -> ReputationAttestation:
         """Fetch reputation attestation with GroveDB Merkle proof for a DID."""
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agent/{did}/reputation-attestation"
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -305,12 +305,12 @@ class Erc8004Client:
         params = {}
         if limit is not None:
             params["limit"] = str(limit)
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agent/{did}/reputation-history",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -337,12 +337,12 @@ class Erc8004Client:
             params["limit"] = str(limit)
         if subgrove_id is not None:
             params["subgrove_id"] = subgrove_id
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agent/{did}/validation-status",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]
@@ -374,12 +374,12 @@ class Erc8004Client:
         params = {}
         if subgrove_id is not None:
             params["subgrove_id"] = subgrove_id
-        async with aiohttp.ClientSession() as session:
+        async with _body.aiohttp_session() as session:
             async with session.get(
                 f"{self._api_url}/agent/{did}/validation-summary",
                 params=params,
             ) as resp:
-                body = await resp.json()
+                body = await _body.json_aiohttp(resp, _body.SMALL)
                 if body.get("success") is False:
                     raise Exception(body.get("error", "Unknown error"))
                 data = body["data"]

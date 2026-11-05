@@ -1,8 +1,10 @@
 """
 Willow Light Client for Python
 
-Provides cryptographically secure data verification through CometBFT light client protocol
-and GroveDB proof verification, enabling trustless operation without running a full node.
+Holds CometBFT headers and checks GroveDB proofs against their app hashes. It
+does not verify CometBFT commit signatures, so it verifies no header it
+fetches: a proof checked against a header it holds is only as trustworthy as
+that header's source (see ``LightClient``).
 """
 
 from .client import LightClient

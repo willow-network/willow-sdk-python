@@ -5,15 +5,27 @@ Files are chunked locally, manifests go through consensus,
 and chunks are uploaded to storage nodes.
 """
 
+import asyncio
 import hashlib
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import httpx
 
-from .errors import TransactionError
-from .signed_messages import delete_file_manifest_message, store_file_manifest_message
+from . import _body
+from .errors import (
+    ResponseEncodingError, ResponseTooLargeError, TransactionError, WillowError, parse_api_error,
+)
+from .nonces import already_in_cache
+from .signed_messages import (
+    delete_file_manifest_message,
+    store_file_manifest_message,
+    unregister_storage_node_message,
+)
+
+if TYPE_CHECKING:
+    from .client import WillowClient
 
 DEFAULT_CHUNK_SIZE = 262_144  # 256 KB
 
@@ -35,14 +47,31 @@ class FileManifest:
     updated_at: int = 0
     encrypted: bool = False
     storage_nodes: List[str] = field(default_factory=list)
+    #: The ``{tx_hash, code, log, did, nonce}`` of the StoreFileManifest
+    #: transaction ``upload`` submitted (for ``client.wait_until_landed``);
+    #: ``None`` on a manifest read from the API.
+    submission: Optional[Dict[str, Any]] = None
 
 
 class FileOperations:
-    """File storage operations."""
+    """File storage operations.
 
-    def __init__(self, api_url: str, get_headers=None, api_key: Optional[str] = None):
+    ``client.files`` belongs to a ``WillowClient``: a write signed by the
+    client's identity takes its nonce from the client, as every other write
+    does, so writes in flight together get their own. Any other signer
+    passes its nonce in ``signing``.
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        get_headers=None,
+        api_key: Optional[str] = None,
+        client: Optional["WillowClient"] = None,
+    ):
         self._api_url = api_url
         self._api_key = api_key
+        self._client = client
         base_headers = get_headers or (lambda: {})
         if api_key:
             self._get_headers = lambda: {**base_headers(), "X-API-Key": api_key}
@@ -57,8 +86,19 @@ class FileOperations:
         data: bytes,
         storage_node_endpoint: str,
         signing: Optional[Dict[str, Any]] = None,
+        *,
+        landing_timeout: float = 60.0,
+        poll_interval: float = 1.0,
     ) -> FileManifest:
         """Upload a file to a FileStorage subgrove.
+
+        Submits the file's manifest as a StoreFileManifest transaction, then
+        posts its chunks to the storage node. The storage node takes a chunk
+        only once the manifest is on chain, so a chunk it refuses for want of
+        the manifest (HTTP 403, or 503 while it can't reach consensus) is
+        posted again every ``poll_interval`` seconds until the manifest lands
+        or ``landing_timeout`` seconds pass. A manifest refused in its block
+        never lands, and its chunks are never taken.
 
         Args:
             subgrove_id: Subgrove ID.
@@ -66,17 +106,36 @@ class FileOperations:
             filename: Original filename.
             data: Raw file bytes.
             storage_node_endpoint: URL of the storage node for chunk uploads.
-            signing: Optional signing parameters dict with keys:
-                owner_did, private_key, public_key_id, sign_function, nonce.
+            signing: Signing parameters dict with keys: owner_did,
+                private_key, public_key_id, sign_function, and nonce.
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``store_file_manifest_message`` over the manifest sent,
-                including ``nonce``. A write refused in its block after its
+                including ``nonce``. When ``owner_did`` is the client's
+                identity, the client hands out the nonce as for its other
+                writes (leave ``nonce`` out; one given must be free), and a
+                write that fails carries its ``did``, ``nonce``, and, when it
+                may have reached the node, ``transaction`` for
+                ``client.resubmit``. Otherwise the nonce is required: one of
+                the 24 above the signer's account nonce
+                (``GET /account/{did}/nonce``) not used yet, distinct for
+                each write in flight. A write refused in its block after its
                 signature verifies spends its nonce: retry under the next
                 free nonce, which signs anew.
 
+        Returns:
+            The file's manifest, with ``submission`` the
+            ``{tx_hash, code, log, did, nonce}`` of its transaction.
+
         Raises:
-            ValueError: If a signed text field holds a line break.
+            ValueError: ``signing`` is missing (the node takes no unsigned
+                write), a signed text field holds a line break, or the nonce
+                is missing or below 1 for a signer that isn't the client's
+                identity, or not free for one that is. Nothing is sent.
+            TransactionError: CheckTx refused the manifest. No chunk is sent.
+            WillowError: The storage node refused a chunk, or didn't take it
+                before ``landing_timeout``; ``error.submission`` is the
+                manifest's submission and ``error.chunk_index`` the chunk.
         """
         chunk_size = DEFAULT_CHUNK_SIZE
         chunks = _chunk_data(data, chunk_size)
@@ -87,16 +146,11 @@ class FileOperations:
         chunk_hashes = [hashlib.sha256(c).digest() for c in chunks]
         chunk_merkle_root = _compute_merkle_root(chunk_hashes).hex()
 
-        # Build signing fields
-        owner_did = ""
-        signature: Any = []
-        public_key_id = ""
-        nonce = 0
-        if signing:
-            owner_did = signing["owner_did"]
-            public_key_id = signing["public_key_id"]
-            nonce = signing.get("nonce", 0)
-            message = store_file_manifest_message(
+        signing = _required_signing(signing)
+        owner_did = signing["owner_did"]
+
+        def message(nonce: int) -> str:
+            return store_file_manifest_message(
                 subgrove_id,
                 file_key,
                 owner_did,
@@ -109,37 +163,61 @@ class FileOperations:
                 chunk_merkle_root,
                 nonce,
             )
-            signature = signing["sign_function"](message, signing["private_key"])
 
-        # Submit StoreFileManifestTx to consensus. /tx/submit reads byte
-        # fields ([u8; 32], Vec<u8>) as JSON arrays of numbers.
-        manifest_tx = {
-            "StoreFileManifest": {
-                "subgrove_id": subgrove_id,
-                "file_key": file_key,
-                "filename": filename,
-                "content_type": content_type,
-                "total_size": len(data),
-                "content_hash": _byte_array(content_hash),
-                "chunk_count": chunk_count,
-                "chunk_size": chunk_size,
-                "chunk_merkle_root": _byte_array(chunk_merkle_root),
-                "owner_did": owner_did,
-                "signature": _byte_array(signature),
-                "public_key_id": public_key_id,
-                "nonce": nonce,
+        def transaction(nonce: int, signature: Any) -> Dict[str, Any]:
+            # A StoreFileManifestTx. /tx/submit reads byte fields
+            # ([u8; 32], Vec<u8>) as JSON arrays of numbers.
+            return {
+                "StoreFileManifest": {
+                    "subgrove_id": subgrove_id,
+                    "file_key": file_key,
+                    "filename": filename,
+                    "content_type": content_type,
+                    "total_size": len(data),
+                    "content_hash": _byte_array(content_hash),
+                    "chunk_count": chunk_count,
+                    "chunk_size": chunk_size,
+                    "chunk_merkle_root": _byte_array(chunk_merkle_root),
+                    "owner_did": owner_did,
+                    "signature": _byte_array(signature),
+                    "public_key_id": signing["public_key_id"],
+                    "nonce": nonce,
+                }
             }
-        }
-        await self._submit_tx(manifest_tx)
 
-        # Upload chunks to storage node
+        submission = await self._sign_and_submit(owner_did, signing, message, transaction)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + landing_timeout
         async with httpx.AsyncClient() as client:
             for i, chunk in enumerate(chunks):
                 url = (
                     f"{storage_node_endpoint}/upload/{subgrove_id}/{file_key}"
                     f"?chunk_index={i}&chunk_count={chunk_count}&content_hash={content_hash}"
                 )
-                await client.post(url, content=chunk)
+                while True:
+                    try:
+                        resp = await _body.send(client, "POST", url, limit=_body.SMALL, content=chunk)
+                    except (ResponseEncodingError, ResponseTooLargeError) as e:
+                        raise _chunk_error(
+                            f"the storage node's answer to chunk {i} of {file_key} was refused: {e}",
+                            submission, i,
+                        ) from e
+                    except httpx.HTTPError as e:
+                        raise _chunk_error(
+                            f"chunk {i} of {file_key} did not reach the storage node: {e}",
+                            submission, i,
+                        ) from e
+                    if resp.status_code < 300:
+                        break
+                    if resp.status_code in (403, 503) and loop.time() < deadline:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    raise _chunk_error(
+                        f"the storage node refused chunk {i} of {file_key}: "
+                        f"{resp.text.strip() or 'HTTP ' + str(resp.status_code)}",
+                        submission, i, resp.status_code,
+                    )
 
         return FileManifest(
             file_key=file_key,
@@ -152,6 +230,7 @@ class FileOperations:
             chunk_merkle_root=chunk_merkle_root,
             owner_did=owner_did,
             storage_nodes=[storage_node_endpoint],
+            submission=submission,
         )
 
     async def download(
@@ -170,7 +249,8 @@ class FileOperations:
                     f"{storage_node_endpoint}/chunk/{subgrove_id}/{file_key}/{i}"
                     f"?content_hash={manifest.content_hash}"
                 )
-                resp = await client.get(url)
+                # A chunk is at most the storage node's 2 MiB body limit.
+                resp = await _body.send(client, "GET", url, limit=_body.CHUNK)
                 resp.raise_for_status()
                 chunks.append(resp.content)
 
@@ -192,79 +272,100 @@ class FileOperations:
     async def metadata(
         self, subgrove_id: str, file_key: str
     ) -> FileManifest:
-        """Get file manifest metadata."""
+        """Get file manifest metadata.
+
+        Raises:
+            WillowError: The API refused the read; its ``error`` is the message.
+        """
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _body.send(
+                client,
+                "GET",
                 f"{self._api_url}/files/{subgrove_id}/{file_key}",
+                limit=_body.SMALL,
                 headers=self._get_headers(),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return FileManifest(**data)
+        return FileManifest(**_file_route_body(resp))
 
     async def list(self, subgrove_id: str) -> List[FileManifest]:
-        """List all files in a subgrove."""
+        """List all files in a subgrove.
+
+        Raises:
+            WillowError: The API refused the read; its ``error`` is the message.
+        """
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            resp = await _body.send(
+                client,
+                "GET",
                 f"{self._api_url}/files/{subgrove_id}",
+                limit=_body.SMALL,
                 headers=self._get_headers(),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return [FileManifest(**f) for f in data.get("files", [])]
+        return [FileManifest(**f) for f in _file_route_body(resp).get("files", [])]
 
     async def delete(
         self,
         subgrove_id: str,
         file_key: str,
         signing: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Delete a file (submits DeleteFileManifestTx to consensus).
 
         Args:
             subgrove_id: Subgrove ID.
             file_key: Key of the file to delete.
-            signing: Optional signing parameters dict with keys:
-                owner_did, private_key, public_key_id, sign_function, nonce.
+            signing: Signing parameters dict with keys: owner_did,
+                private_key, public_key_id, sign_function, and nonce.
                 sign_function should accept (message: str, private_key: str)
                 and return a hex-encoded signature string. The message is
                 ``delete_file_manifest_message`` over the transaction sent,
-                including ``nonce``. A write refused in its block after its
+                including ``nonce``. When ``owner_did`` is the client's
+                identity, the client hands out the nonce as for its other
+                writes (leave ``nonce`` out; one given must be free), and a
+                write that fails carries its ``did``, ``nonce``, and, when it
+                may have reached the node, ``transaction`` for
+                ``client.resubmit``. Otherwise the nonce is required: one of
+                the 24 above the signer's account nonce
+                (``GET /account/{did}/nonce``) not used yet, distinct for
+                each write in flight. A write refused in its block after its
                 signature verifies spends its nonce: retry under the next
                 free nonce, which signs anew.
 
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction (for ``client.wait_until_landed``).
+
         Raises:
-            ValueError: If a signed text field holds a line break.
+            ValueError: ``signing`` is missing (the node takes no unsigned
+                write), a signed text field holds a line break, or the nonce
+                is missing or below 1 for a signer that isn't the client's
+                identity, or not free for one that is. Nothing is sent.
         """
-        owner_did = ""
-        signature: Any = []
-        public_key_id = ""
-        nonce = 0
-        if signing:
-            owner_did = signing["owner_did"]
-            public_key_id = signing["public_key_id"]
-            nonce = signing.get("nonce", 0)
-            message = delete_file_manifest_message(subgrove_id, file_key, owner_did, nonce)
-            signature = signing["sign_function"](message, signing["private_key"])
+        signing = _required_signing(signing)
+        owner_did = signing["owner_did"]
 
-        delete_tx = {
-            "DeleteFileManifest": {
-                "subgrove_id": subgrove_id,
-                "file_key": file_key,
-                "owner_did": owner_did,
-                "signature": _byte_array(signature),
-                "public_key_id": public_key_id,
-                "nonce": nonce,
+        def message(nonce: int) -> str:
+            return delete_file_manifest_message(subgrove_id, file_key, owner_did, nonce)
+
+        def transaction(nonce: int, signature: Any) -> Dict[str, Any]:
+            return {
+                "DeleteFileManifest": {
+                    "subgrove_id": subgrove_id,
+                    "file_key": file_key,
+                    "owner_did": owner_did,
+                    "signature": _byte_array(signature),
+                    "public_key_id": signing["public_key_id"],
+                    "nonce": nonce,
+                }
             }
-        }
-        await self._submit_tx(delete_tx)
 
+        return await self._sign_and_submit(owner_did, signing, message, transaction)
 
     async def unregister_storage_node(
         self,
         node_did: str,
         signing: Dict[str, Any],
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Unregister a storage node (submits UnregisterStorageNode to consensus).
 
         Args:
@@ -272,20 +373,71 @@ class FileOperations:
             signing: Signing parameters dict with keys:
                 private_key, public_key_id, sign_function, nonce.
                 sign_function should accept (message: str, private_key: str)
-                and return a hex-encoded signature string.
-        """
-        message = f"unregister_storage_node:{node_did}"
-        signature = signing["sign_function"](message, signing["private_key"])
+                and return a hex-encoded signature string. The message is
+                ``unregister_storage_node_message`` over the node DID and
+                ``nonce`` sent. When the node DID is the client's identity,
+                the client hands out the nonce as for its other writes (leave
+                ``nonce`` out; one given must be free). Otherwise the nonce
+                is required: one of the 24 above the node DID's account
+                nonce (``GET /account/{did}/nonce``) not used yet.
 
-        tx = {
-            "UnregisterStorageNode": {
-                "node_did": node_did,
-                "signature": _byte_array(signature),
-                "public_key_id": signing["public_key_id"],
-                "nonce": signing.get("nonce", 0),
+        Returns:
+            The ``{tx_hash, code, log, did, nonce}`` of the accepted
+            transaction (for ``client.wait_until_landed``).
+
+        Raises:
+            ValueError: ``signing`` is missing, the node DID holds a line
+                break, or the nonce is missing or below 1 for a node DID that
+                isn't the client's identity, or not free for one that is.
+                Nothing is sent.
+        """
+        signing = _required_signing(signing)
+
+        def message(nonce: int) -> str:
+            return unregister_storage_node_message(node_did, nonce)
+
+        def transaction(nonce: int, signature: Any) -> Dict[str, Any]:
+            return {
+                "UnregisterStorageNode": {
+                    "node_did": node_did,
+                    "signature": _byte_array(signature),
+                    "public_key_id": signing["public_key_id"],
+                    "nonce": nonce,
+                }
             }
-        }
-        await self._submit_tx(tx)
+
+        return await self._sign_and_submit(node_did, signing, message, transaction)
+
+    async def _sign_and_submit(
+        self,
+        signer: str,
+        signing: Dict[str, Any],
+        message: Callable[[int], str],
+        transaction: Callable[[int, Any], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Sign ``transaction(nonce, signature)`` over ``message(nonce)`` with
+        ``signing``'s ``sign_function``, and submit it. Returns the
+        ``{tx_hash, code, log, did, nonce}`` of the accepted transaction.
+
+        When ``signer`` is the client's identity, the client hands out the
+        nonce (or claims the one ``signing`` gives) and records what the
+        answer leaves it as, as for every other write. Otherwise the nonce is
+        ``signing``'s, required.
+        """
+        client = self._client
+        if client is not None and client._did is not None and signer == client._did:
+            message(1)  # refuse a line break before taking a nonce
+            given = _signing_nonce(signing) if "nonce" in signing else None
+
+            def sign(nonce: int) -> Dict[str, Any]:
+                return transaction(nonce, signing["sign_function"](message(nonce), signing["private_key"]))
+
+            return await client._submit_under_nonce(signer, sign, nonce=given)
+        nonce = _signing_nonce(signing)
+        result = await self._submit_tx(
+            transaction(nonce, signing["sign_function"](message(nonce), signing["private_key"]))
+        )
+        return dict(result, did=signer, nonce=nonce)
 
     async def _submit_tx(self, tx: Dict[str, Any]) -> Dict[str, Any]:
         """Submit a JSON transaction to the API's ``POST /tx/submit``.
@@ -300,31 +452,104 @@ class FileOperations:
             TransactionError: Unless CheckTx accepted the transaction.
         """
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            resp = await _body.send(
+                client,
+                "POST",
                 f"{self._api_url}/tx/submit",
+                limit=_body.SMALL,
                 json=tx,
                 headers=self._get_headers(),
             )
-        try:
-            envelope = resp.json()
-        except ValueError:
-            envelope = None
-        if not isinstance(envelope, dict):
-            envelope = {}
-        data = envelope.get("data")
-        if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
-            raise TransactionError(
-                envelope.get("error") or f"transaction submission failed: HTTP {resp.status_code}"
-            )
-        code = data.get("code", 0)
-        if code != 0:
-            raise TransactionError(
-                data.get("log") or f"transaction refused with code {code}",
-                tx_hash=data.get("tx_hash"),
-                error_code=code,
-                raw_log=data.get("log"),
-            )
-        return data
+        return _tx_submit_result(resp)
+
+
+_NONCE_HELP = (
+    "the node accepts a nonce in the 24 above the signer's account nonce "
+    "(GET /account/{did}/nonce) that is not used yet, never 0; writes in "
+    "flight from one signer each need their own"
+)
+
+
+def _chunk_error(
+    message: str, submission: Dict[str, Any], chunk_index: int, status: Optional[int] = None
+) -> WillowError:
+    error = WillowError(message, status_code=status)
+    error.submission = submission  # type: ignore[attr-defined]
+    error.chunk_index = chunk_index  # type: ignore[attr-defined]
+    return error
+
+
+def _required_signing(signing: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``signing``, which a write needs: the node takes no unsigned one."""
+    if signing is None:
+        raise ValueError(
+            "signing is required: the node refuses an unsigned transaction "
+            "(pass owner_did, private_key, public_key_id, and sign_function)"
+        )
+    return signing
+
+
+def _signing_nonce(signing: Dict[str, Any]) -> int:
+    """The ``nonce`` of a ``signing`` dict: required, an integer of at least 1."""
+    if "nonce" not in signing:
+        raise ValueError(f"signing needs a nonce: {_NONCE_HELP}")
+    nonce = signing["nonce"]
+    if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 1:
+        raise ValueError(f"signing nonce must be an integer of at least 1: {_NONCE_HELP}")
+    return nonce
+
+
+def _tx_submit_result(resp: httpx.Response) -> Dict[str, Any]:
+    """The ``{tx_hash, code, log}`` of ``POST /tx/submit``'s answer.
+
+    The API answers ``{success, data: {tx_hash, code, log}, error}``; a CheckTx
+    refusal is HTTP 200 with a nonzero ``code``. A body it can't decode is
+    refused in plain text. CometBFT answers a transaction whose exact bytes
+    it already holds (an identical copy CheckTx admitted) with "tx already
+    exists in cache": that counts as accepted, with code 0, no ``tx_hash``,
+    and that answer as the ``log``.
+
+    Raises:
+        TransactionError: Unless CheckTx accepted the transaction.
+    """
+    try:
+        envelope = resp.json()
+    except (ValueError, RecursionError):  # not JSON, or nested too deep to read
+        envelope = None
+    if not isinstance(envelope, dict):
+        text = resp.text.strip()
+        raise TransactionError(text or f"transaction submission failed: HTTP {resp.status_code}")
+    data = envelope.get("data")
+    if resp.status_code >= 400 or not envelope.get("success") or not isinstance(data, dict):
+        error = envelope.get("error")
+        if already_in_cache(error):
+            return {"tx_hash": None, "code": 0, "log": error}
+        raise TransactionError(error or f"transaction submission failed: HTTP {resp.status_code}")
+    code = data.get("code", 0)
+    if code != 0:
+        raise TransactionError(
+            data.get("log") or f"transaction refused with code {code}",
+            tx_hash=data.get("tx_hash"),
+            error_code=code,
+            raw_log=data.get("log"),
+        )
+    return data
+
+
+def _file_route_body(resp: httpx.Response) -> Dict[str, Any]:
+    """The JSON a ``/files`` route answers, which is not an envelope.
+
+    A refusal carries its reason in ``error`` (in an envelope for a private
+    subgrove)."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if resp.status_code >= 400 or not isinstance(body, dict) or body.get("success") is False:
+        if not isinstance(body, dict) or not body.get("error"):
+            body = {"error": resp.text.strip() or f"HTTP {resp.status_code}"}
+        raise parse_api_error(body, resp.status_code)
+    return body
 
 
 def _byte_array(value: Any) -> List[int]:

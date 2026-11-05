@@ -14,11 +14,13 @@ preimage binds only ``(address, topics, data)`` — the consensus-derivable,
 root-bound fields — length-prefixed so no boundary is ambiguous.
 
 The end-to-end :meth:`CompletenessOperations.verify_block_completeness` helper
-fetches the anchor from the validator's CometBFT ABCI store
-(``/store/events_commitment/{subgrove}/{block}``) and the matched-log preimage
-from the indexer (``/completeness/{subgrove}/{block}/matched-logs``), then calls
+fetches the anchor from the ABCI store of the consensus node at the client's
+``consensus_rpc_url`` (``/store/events_commitment/{subgrove}/{block}``) and the
+matched-log preimage from the indexer
+(``/completeness/{subgrove}/{block}/matched-logs``), then calls
 :func:`verify_served_events`. Reachable as ``client.completeness`` on
-:class:`~willow.client.WillowClient`.
+:class:`~willow.client.WillowClient`; without ``consensus_rpc_url`` it raises
+before any request.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, Union
 
 from eth_hash.auto import keccak
+
+from . import _body
 
 if TYPE_CHECKING:  # pragma: no cover
     import httpx
@@ -192,36 +196,56 @@ def commitment_from_anchor_value(value: bytes) -> bytes:
 class CompletenessOperations:
     """End-to-end client-side completeness checks for a ``(subgrove, block)``.
 
-    Fetches the on-chain anchor from the validator's CometBFT ABCI store and the
-    matched-log preimage from the indexer, then re-hashes and compares via
-    :func:`verify_served_events`. The indexer it queries is configured by
-    ``indexer_url`` on the client (or :class:`~willow.client.WillowClientBuilder`).
+    Fetches the on-chain anchor from the ABCI store of the consensus node at
+    ``consensus_rpc_url`` and the matched-log preimage from the indexer, then
+    re-hashes and compares via :func:`verify_served_events`. The indexer it
+    queries is configured by ``indexer_url`` on the client (or
+    :class:`~willow.client.WillowClientBuilder`).
+
+    Trust: the anchor is read without a proof, so the check trusts that
+    consensus node, as a client trusts its own node, and nothing the API or
+    the indexer serves. Point ``consensus_rpc_url`` at a node you run or
+    trust; without it the anchor reads raise.
     """
 
     def __init__(
         self,
         http: "httpx.AsyncClient",
-        cometbft_rpc_url: str,
+        cometbft_rpc_url: Optional[str],
         indexer_url: Optional[str],
+        rpc_http: Optional["httpx.AsyncClient"] = None,
     ):
         """
         Args:
-            http: shared httpx client (carries any ``X-API-Key`` default header).
-            cometbft_rpc_url: validator CometBFT RPC base (e.g. ``:26657``), used
-                for the ``abci_query`` that reads the on-chain anchor.
+            http: shared httpx client (carries any ``X-API-Key`` default
+                header), for the configured indexer.
+            cometbft_rpc_url: CometBFT RPC base (typically port 26657) of a
+                consensus node you trust, used for the ``abci_query`` that
+                reads the on-chain anchor. ``None`` (no trusted node
+                configured): the anchor reads raise ``CompletenessError``
+                before any request.
             indexer_url: indexer base URL serving ``/completeness/...``. ``None``
                 until configured; the wrapper raises if it's needed unset.
+            rpc_http: httpx client for the CometBFT RPC (``WillowClient``
+                passes one without the API key); ``http`` when not given.
         """
         self._http = http
-        self._rpc_url = cometbft_rpc_url.rstrip("/")
+        self._rpc_http = rpc_http if rpc_http is not None else http
+        self._rpc_url = cometbft_rpc_url.rstrip("/") if cometbft_rpc_url else None
         self._indexer_url = indexer_url.rstrip("/") if indexer_url else None
 
     async def fetch_anchor(self, subgrove_id: str, block_number: int) -> bytes:
         """Read the on-chain ``events_commitment`` (32 bytes) via ABCI store query.
 
         Raises :class:`CompletenessError` if the chain has no commitment for the
-        block (ABCI ``code != 0``).
+        block (ABCI ``code != 0``), or, before any request, when no
+        ``consensus_rpc_url`` is configured.
         """
+        if not self._rpc_url:
+            raise CompletenessError(
+                "no trusted source for the on-chain anchor: set consensus_rpc_url to the "
+                "CometBFT RPC of a node you trust (the API's host can't vouch for what it serves)"
+            )
         path = f"/store/events_commitment/{subgrove_id}/{block_number}"
         rpc_request = {
             "jsonrpc": "2.0",
@@ -229,7 +253,7 @@ class CompletenessOperations:
             "method": "abci_query",
             "params": {"path": path, "data": "", "height": "0", "prove": False},
         }
-        resp = await self._http.post(self._rpc_url, json=rpc_request)
+        resp = await _body.send(self._rpc_http, "POST", self._rpc_url, limit=_body.SMALL, json=rpc_request)
         resp.raise_for_status()
         envelope = resp.json()
         if "error" in envelope and envelope["error"]:
@@ -265,7 +289,7 @@ class CompletenessOperations:
             f"{self._indexer_url}/completeness/{subgrove_id}/{block_number}/"
             "matched-logs"
         )
-        resp = await self._http.get(url)
+        resp = await _body.send(self._http, "GET", url, limit=_body.LARGE)
         if resp.status_code != 200:
             detail = ""
             try:
@@ -295,9 +319,11 @@ class CompletenessOperations:
             untampered set the chain commits to.
 
         Raises:
-            CompletenessError: if the anchor or the preimage cannot be fetched
-                (the check is not verifiable, distinct from a ``False`` result
-                which means the served set was tampered with).
+            CompletenessError: if no ``consensus_rpc_url`` is configured
+                (raised before any request), or the anchor or the preimage
+                cannot be fetched (the check is not verifiable, distinct
+                from a ``False`` result which means the served set was
+                tampered with).
         """
         commitment = await self.fetch_anchor(subgrove_id, block_number)
         logs = await self.fetch_matched_logs(subgrove_id, block_number)

@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.utils import Prehashed, encode_ds
 from eth_utils import keccak
 
 from willow import QuerySource, WillowClient, WillowError
-from willow.errors import AuthenticationError
+from willow.errors import AuthenticationError, ProofVerificationError, UnsupportedError
 from willow.auth import (
     _SECP256K1_N,
     _sign_request_with_nonce_at,
@@ -261,6 +261,8 @@ def _server_verifies(request: httpx.Request, public_key_hex: str, algorithm: str
 
 def _ok(request: httpx.Request) -> httpx.Response:
     path = request.url.path
+    if path.startswith("/willow/"):  # behind a proxy mounted under /willow
+        path = path[len("/willow"):]
     if path.startswith("/data/"):
         data = {"value": 1}
     elif path.startswith("/proof/"):
@@ -293,7 +295,7 @@ def _client(handler, api_url="http://api.test", algorithm="Ed25519", identity=Tr
 
 
 @pytest.mark.asyncio
-async def test_client_nonce_signs_reads_and_legacy_signs_writes():
+async def test_client_nonce_signs_reads_and_key_grant_reads():
     seen = []
 
     def handler(request):
@@ -305,8 +307,9 @@ async def test_client_nonce_signs_reads_and_legacy_signs_writes():
     await client.data.query_unverified("sg", {"limit": 5})
     await client.proof.get("sg", "k")
     await client.indexing.sql_query("sg", "SELECT 1", source=QuerySource.VALIDATOR)
-    await client.data.store("sg", {"k": {"v": 1}})
     await client.privacy.get_my_key_grant("sg")
+    await client.privacy.list_key_grantees("sg")
+    await client.privacy.get_key_grant_proof("sg", "did:willow:b")
     await client._http.aclose()
 
     forms = [(r.method, r.url.path, form) for r, form in seen]
@@ -315,8 +318,9 @@ async def test_client_nonce_signs_reads_and_legacy_signs_writes():
         ("POST", "/query/sg", "nonce"),
         ("GET", "/proof/sg/k", "nonce"),
         ("POST", "/sql/sg", "nonce"),
-        ("POST", "/data/sg", "legacy"),
-        ("GET", "/key-grants/sg/did:willow:a", "legacy"),
+        ("GET", "/key-grants/sg/did:willow:a", "nonce"),
+        ("GET", "/key-grants/sg", "nonce"),
+        ("GET", "/proof/key-grant/sg/did:willow:b", "nonce"),
     ]
     # The signed body is the body sent.
     query = seen[1][0]
@@ -329,6 +333,47 @@ async def test_client_nonce_signs_reads_and_legacy_signs_writes():
     assert len(set(nonces)) == len(nonces)
 
 
+# The node's key-grant routes name a caller only for the nonce-signed form
+# (its handlers' ``proven_caller``): any other request is refused 401.
+_KEY_GRANT_AUTH_REQUIRED = "Authentication required: sign the request with a one-time nonce (X-Nonce)"
+
+
+def _key_grant_node(request):
+    if "X-Nonce" not in request.headers:
+        return httpx.Response(401, json={"success": False, "data": None, "error": _KEY_GRANT_AUTH_REQUIRED})
+    assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519") == "nonce"
+    path = request.url.path
+    if path == "/key-grants/sg/did:willow:a":
+        # EncryptedKeyGrant as serde writes it: byte vectors as arrays.
+        data = {
+            "grantee_did": "did:willow:a", "key_epoch": 2, "grantee_public_key_id": "did:willow:a#key-1",
+            "ephemeral_public_key": list(range(32)), "encrypted_key": list(range(48)),
+            "granted_by": "did:willow:owner", "granted_at": 1,
+        }
+    elif path == "/key-grants/sg":
+        data = ["did:willow:a", "did:willow:b"]
+    elif path == "/proof/key-grant/sg/did:willow:a":
+        data = {"proof": "0011", "subgrove_id": "sg", "grantee_did": "did:willow:a"}
+    else:
+        return httpx.Response(404, json={"success": False, "data": None, "error": "not found"})
+    return httpx.Response(200, json={"success": True, "data": data, "error": None})
+
+
+@pytest.mark.asyncio
+async def test_key_grant_reads_are_answered_by_a_node_that_takes_only_nonce_signed_reads():
+    client = _client(_key_grant_node)
+    grant = await client.privacy.get_my_key_grant("sg")
+    assert (grant.grantee_did, grant.key_epoch, bytes(grant.ephemeral_public_key)) == (
+        "did:willow:a", 2, bytes(range(32))
+    )
+    assert bytes(grant.encrypted_key) == bytes(range(48))
+    assert await client.privacy.list_key_grantees("sg") == ["did:willow:a", "did:willow:b"]
+    assert await client.privacy.get_key_grant_proof("sg", "did:willow:a") == {
+        "proof": "0011", "subgrove_id": "sg", "grantee_did": "did:willow:a"
+    }
+    await client._http.aclose()
+
+
 @pytest.mark.asyncio
 async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
     seen = []
@@ -337,14 +382,16 @@ async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
         assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519") == "nonce"
         seen.append(request)
         if request.url.path.startswith("/proof/"):
-            # No proof: data.get logs a warning and returns the value.
+            # No proof: data.get raises rather than return the value unverified.
             return httpx.Response(200, json={"success": True, "data": {"proof": None}, "error": None})
         if request.url.path.startswith("/graphql/"):
             return httpx.Response(200, json={"success": True, "data": {"data": {"items": []}}, "error": None})
         return _ok(request)
 
     client = _client(handler)
-    await client.data.get("sg", "k")
+    client.consensus_rpc_url = "http://rpc.test:26657"
+    with pytest.raises(ProofVerificationError, match="no proof"):
+        await client.data.get("sg", "k")
     await client.indexing.graphql_query("sg", "{ items { id } }", source=QuerySource.VALIDATOR)
     await client._http.aclose()
     assert [(r.method, r.url.path) for r in seen] == [
@@ -356,7 +403,7 @@ async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
 
 
 @pytest.mark.asyncio
-async def test_client_nonce_signs_a_verified_query():
+async def test_client_nonce_signs_an_unverified_query():
     seen = []
 
     def handler(request):
@@ -365,27 +412,28 @@ async def test_client_nonce_signs_a_verified_query():
         return _ok(request)
 
     client = _client(handler)
-    # No proof in the answer, so nothing further is fetched.
-    await client.data.query("sg", {})
+    with pytest.raises(UnsupportedError):
+        await client.data.query("sg", {})  # nothing is sent
+    await client.data.query_unverified("sg", {})
     await client._http.aclose()
     assert [(r.method, r.url.path) for r in seen] == [("POST", "/query/sg")]
-    assert json.loads(seen[0].content) == {"include_proof": True}
+    assert json.loads(seen[0].content) == {"include_proof": False}
 
 
 @pytest.mark.asyncio
-async def test_client_legacy_signs_the_path_the_api_receives():
+async def test_client_signs_the_path_the_api_receives():
     seen = []
 
     def handler(request):
-        assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519", prefix="/willow") == "legacy"
+        assert _server_verifies(request, ED25519_PUBLIC_KEY, "Ed25519", prefix="/willow") == "nonce"
         seen.append(request)
         return _ok(request)
 
     # URL-encoded, and less the base URL's path, as the API receives it.
     client = _client(handler, api_url="https://proxy.test/willow")
-    await client.data.update("sg", "a key", {"v": 1})
+    await client.privacy.get_my_key_grant("a sg")
     await client._http.aclose()
-    assert seen[0].url.raw_path == b"/willow/data/sg/a%20key"
+    assert seen[0].url.raw_path == b"/willow/key-grants/a%20sg/did:willow:a"
 
 
 @pytest.mark.asyncio
@@ -459,7 +507,7 @@ async def test_client_secp256k1_requests_verify():
 
     client = _client(handler, algorithm="secp256k1")
     await client.data.query_unverified("sg", {})
-    await client.data.store("sg", {"k": 1})
+    await client.privacy.get_my_key_grant("sg")
     await client._http.aclose()
 
 

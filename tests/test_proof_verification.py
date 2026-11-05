@@ -45,7 +45,7 @@ class TestGroveDBProofVerifier:
     async def test_reject_empty_proof(self):
         """Test that empty proofs are rejected."""
         verifier = GroveDBProofVerifier()
-        result = await verifier.verify_query_proof("", [])
+        result = await verifier.verify_query_proof("", [], ["subgroves", "sg", "data"])
 
         assert result.valid is False
         assert "Empty proof" in result.error
@@ -54,10 +54,19 @@ class TestGroveDBProofVerifier:
     async def test_reject_invalid_hex(self):
         """Test that invalid hex strings are rejected."""
         verifier = GroveDBProofVerifier()
-        result = await verifier.verify_query_proof("invalid-hex", [])
+        result = await verifier.verify_query_proof("invalid-hex", [], ["subgroves", "sg", "data"])
 
         assert result.valid is False
         assert "Failed to decode hex" in result.error
+
+    @pytest.mark.asyncio
+    async def test_reject_a_proof_checked_at_no_path(self):
+        """A proof binds values only at a path: without one nothing is valid."""
+        verifier = GroveDBProofVerifier()
+        result = await verifier.verify_query_proof("deadbeef", [])
+
+        assert result.valid is False
+        assert "path is required" in result.error
 
     @pytest.mark.asyncio
     async def test_reject_malformed_proof(self):
@@ -100,8 +109,8 @@ class TestConfiguration:
         )
 
         configure_proof_verification(options)
-        # Configuration should not raise errors
-        assert True
+        # Configuration should not raise errors; restore the default after
+        configure_proof_verification(ProofVerificationOptions())
 
 
 class TestProofVerificationResult:

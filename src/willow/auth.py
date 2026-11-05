@@ -4,7 +4,7 @@ import os
 import time
 import hashlib
 import secrets
-from typing import Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
@@ -162,6 +162,19 @@ _KEY_TYPES: Dict[SignatureAlgorithm, str] = {
     "Ed25519": "Ed25519VerificationKey2018",
     "secp256k1": "EcdsaSecp256k1VerificationKey2019",
 }
+
+
+def _key_algorithm(body: Dict[str, Any], public_key_id: str) -> Optional[SignatureAlgorithm]:
+    """The algorithm of the key ``public_key_id`` in a DID document body
+    (``did_document_body``), from its key type; ``None`` if the document has
+    no such key or names another type."""
+    for key in body["public_keys"]:
+        if key["id"] == public_key_id:
+            for algorithm, key_type in _KEY_TYPES.items():
+                if key["type"] == key_type:
+                    return algorithm
+            return None
+    return None
 
 
 def _secp256k1_public_key_bytes_from_private(private_key_bytes: bytes) -> bytes:

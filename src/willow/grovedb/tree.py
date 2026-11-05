@@ -54,6 +54,8 @@ class Tree:
         """
         # For Hash nodes, the stored hash IS the complete node hash
         if isinstance(self.node, HashNode):
+            if self.left is not None or self.right is not None:
+                raise GroveDBVerificationError("A Hash node can't have children")
             return self.node.hash
 
         kvh = self._compute_kv_hash()
@@ -122,7 +124,14 @@ class Tree:
             left: True to attach as left child, False for right
             child: Tree to attach
             original_height: Original height before potential collapse
+
+        Raises:
+            GroveDBVerificationError: This is a Hash node. Its hash is the
+                whole subtree's and ignores children, so a node attached
+                under it would be proven while the root doesn't commit to it.
         """
+        if isinstance(self.node, HashNode):
+            raise GroveDBVerificationError("A Hash node can't have children")
         if left and self.left is not None:
             raise GroveDBVerificationError("Left child already attached")
         if not left and self.right is not None:

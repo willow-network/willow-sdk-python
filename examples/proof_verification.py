@@ -1,15 +1,19 @@
 """
 Willow Python SDK - Proof Verification Example
 
-Demonstrates trustless proof verification:
-1. Automatic verification (default behaviour)
-2. Manual verification with a GroveDBProofVerifier instance
-3. Verify against a pinned expected root hash
-4. Quick root-hash extraction
-5. Unverified operations (performance mode)
+Demonstrates what the SDK verifies, and how:
+1. A verified read (client.data.get_verified), which raises when it can't verify
+2. Checking a key's proof yourself, bound to its subgrove, key, and value
+3. Pinning a verifier to a root you trust
+4. Root-hash extraction (binds no key or value)
+5. Unverified reads
 6. Low-level grovedb module access
 
-All verification is done locally - no server trust required.
+A proof shows a value is stored under a root hash. It proves the value
+only once that root is one you trust: the app_hash of the CometBFT header
+at the proof's height + 1. client.data.get reads that header from the
+consensus node at consensus_rpc_url, and trusts that node (the SDK does not
+verify commit signatures).
 
 Prerequisites:
 - pip install willow-sdk
@@ -21,113 +25,111 @@ from willow import (
     WillowClient,
     GroveDBProofVerifier,
     ProofVerificationOptions,
-    verify_proof_quick,
-    verify_proof_with_expected_root,
+    ProofVerifier,
     ProofVerificationError,
+    WillowError,
+    generate_did,
     grovedb,
+    subgrove_data_path,
+    verify_proof_quick,
 )
 
 
 SUBGROVE = "items"
+KEY = "item-1"
+# The CometBFT RPC of a node you run or trust (not the API).
+CONSENSUS_RPC_URL = "http://localhost:26657"
 
 
 async def main():
     print("Willow Proof Verification Demo")
     print("=" * 50)
 
-    # 1. Automatic verification (default on query/get)
-    print("\n1. Automatic Proof Verification")
-    print("-" * 40)
-    async with WillowClient("http://localhost:3031") as client:
-        try:
-            result = await client.data.query(
-                SUBGROVE,
-                {"filters": {"status": "active"}},
-            )
-            print(f"Query returned {len(result.documents)} results")
-            print("All results are cryptographically verified.")
-        except ProofVerificationError as e:
-            print(f"Verification failed: {e}")
-        except Exception as e:
-            print(f"Query error: {e}")
+    did_info = generate_did()
 
-    # 2. Manual verification
-    print("\n2. Manual Proof Verification")
+    async with WillowClient("http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL) as client:
+        # Reads are signed by the identity, which must be a registered DID:
+        # register it (pre-fund the DID with the registration fee first),
+        # and wait for the registration to land before it signs anything.
+        client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"])
+        await client.wait_until_landed(await client.register_did(did_info["did_document"]))
+
+        # 1. A verified read: the value comes back only when its proof
+        #    proves it at KEY under the subgrove's data, against the
+        #    consensus RPC's header for the proof's state, and that state is
+        #    current (ProofHeightOutOfRangeError when it isn't).
+        print("\n1. Verified Read")
+        print("-" * 40)
+        try:
+            verified = await client.data.get_verified(SUBGROVE, KEY)
+            print(f"Verified value: {verified.value}")
+            print(f"Proven at header {verified.height}, root {verified.root_hash}")
+        except ProofVerificationError as e:
+            print(f"Not verified: {e}")
+        except WillowError as e:
+            print(f"Read error: {e}")
+
+        # 2. Check a key's proof yourself
+        print("\n2. Check a Proof")
+        print("-" * 40)
+        try:
+            value = await client.data.get_unverified(SUBGROVE, KEY)
+            proof = await client.proof.get(SUBGROVE, KEY)  # {proof, path, key, height, ...}
+            result = ProofVerifier.verify_item_proof(
+                proof["proof"], KEY, value, subgrove_data_path(SUBGROVE)
+            )
+            print(f"Proof binds the value to {SUBGROVE}/{KEY}: {result.valid}")
+            if result.valid:
+                print(f"Root it computes: {result.root_hash}")
+                print(f"Compare it with the app_hash of the header at height {proof['height'] + 1}")
+            else:
+                print(f"Reason: {result.error}")
+        except WillowError as e:
+            print(f"Read error: {e}")
+
+    # 3. Pin a verifier to a root you trust: a proof with another root is
+    #    invalid
+    print("\n3. Verify Against a Trusted Root")
     print("-" * 40)
-    verifier = GroveDBProofVerifier(
-        ProofVerificationOptions(
-            deserialize_elements=True,
-            limit=100,
-        )
-    )
+    trusted_root = "a" * 64  # the app_hash of a header you trust
+    pinned = GroveDBProofVerifier(ProofVerificationOptions(expected_root_hash=trusted_root))
     sample_proof = "00" + "ff" * 32  # Intentionally invalid for demo.
-    result = await verifier.verify_query_proof(
-        proof_hex=sample_proof,
-        documents=[{"key": "test", "value": {"data": "example"}}],
-    )
+    result = pinned.verify_item(sample_proof, KEY, {"field": "value"}, subgrove_data_path(SUBGROVE))
     print(f"Valid: {result.valid}")
     print(f"Error: {result.error}")
 
-    # 3. Pin a verifier to an expected root hash
-    print("\n3. Verify Against Expected Root Hash")
-    print("-" * 40)
-    expected_root = "a" * 64
-    pinned_verifier = GroveDBProofVerifier(
-        ProofVerificationOptions(expected_root_hash=expected_root)
-    )
-    result = await pinned_verifier.verify_query_proof(
-        proof_hex=sample_proof,
-        documents=[],
-    )
-    print(f"Matches expected root: {result.valid}")
-
-    # 4. Quick root-hash extraction
-    print("\n4. Quick Root Hash Extraction")
+    # 4. Root-hash extraction: the root a proof computes, binding nothing
+    print("\n4. Root Hash Extraction")
     print("-" * 40)
     try:
         root_hash = verify_proof_quick(sample_proof)
-        print(f"Extracted root hash: {root_hash[:16]}...")
+        print(f"Root hash: {root_hash[:16]}...")
     except ProofVerificationError as e:
-        print(f"Could not extract root hash: {e}")
+        print(f"Could not compute a root hash: {e}")
 
-    # 5. Proof-vs-expected-root one-shot
-    print("\n5. Verify Proof Matches Expected Root")
-    print("-" * 40)
-    try:
-        matches = verify_proof_with_expected_root(sample_proof, expected_root)
-        print(f"Proof matches expected root: {matches}")
-    except ProofVerificationError as e:
-        print(f"Verification failed: {e}")
-
-    # 6. Unverified operations (performance mode)
-    print("\n6. Unverified Operations (Performance Mode)")
+    # 5. Unverified reads: what the API serves
+    print("\n5. Unverified Reads")
     print("-" * 40)
     async with WillowClient("http://localhost:3031") as client:
+        # The DID registered above.
+        client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"])
         try:
             result = await client.data.query_unverified(
                 SUBGROVE,
                 {"filters": {"status": "active"}},
             )
-            print(f"Unverified query returned {len(result.documents)} results")
-            print("WARNING: results not cryptographically verified.")
+            print(f"Query returned {len(result.documents)} documents (not verified)")
         except Exception as e:
             print(f"Query error: {e}")
 
-    # 7. Low-level grovedb module access
-    print("\n7. Low-Level GroveDB Access")
+    # 6. Low-level grovedb module access
+    print("\n6. Low-Level GroveDB Access")
     print("-" * 40)
     print(f"Hash length: {grovedb.HASH_LENGTH} bytes")
     print(f"Null hash: {grovedb.hash_to_hex(grovedb.NULL_HASH)[:16]}...")
     test_data = b"Hello, Willow!"
     hash_result = grovedb.blake3_hash(test_data)
     print(f"BLAKE3 hash: {grovedb.hash_to_hex(hash_result)[:16]}...")
-
-    print("\n" + "=" * 50)
-    print("Key Takeaways:")
-    print("- All verification is done locally (trustless)")
-    print("- Proofs use the GroveDB Merkle tree structure")
-    print("- Root hash can be compared against consensus")
-    print("- Use unverified operations only when trust is acceptable")
 
 
 if __name__ == "__main__":

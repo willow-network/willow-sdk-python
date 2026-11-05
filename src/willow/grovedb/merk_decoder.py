@@ -148,8 +148,7 @@ class MerkDecoder:
 
     def _decode_kv(self) -> MerkNode:
         """Decode a KV node."""
-        key_len = self.data[self.offset]
-        self.offset += 1
+        key_len = self._read_u8()
         key = self._read_bytes(key_len)
         value_len = self._read_u16()
         value = self._read_bytes(value_len)
@@ -157,8 +156,7 @@ class MerkDecoder:
 
     def _decode_kv_value_hash(self) -> MerkNode:
         """Decode a KVValueHash node."""
-        key_len = self.data[self.offset]
-        self.offset += 1
+        key_len = self._read_u8()
         key = self._read_bytes(key_len)
         value_len = self._read_u16()
         value = self._read_bytes(value_len)
@@ -167,16 +165,14 @@ class MerkDecoder:
 
     def _decode_kv_digest(self) -> MerkNode:
         """Decode a KVDigest node."""
-        key_len = self.data[self.offset]
-        self.offset += 1
+        key_len = self._read_u8()
         key = self._read_bytes(key_len)
         value_hash = self._read_bytes(HASH_LENGTH)
         return KVDigestNode(key=key, value_hash=value_hash)
 
     def _decode_kv_ref_value_hash(self) -> MerkNode:
         """Decode a KVRefValueHash node."""
-        key_len = self.data[self.offset]
-        self.offset += 1
+        key_len = self._read_u8()
         key = self._read_bytes(key_len)
         value_len = self._read_u16()
         value = self._read_bytes(value_len)
@@ -185,8 +181,7 @@ class MerkDecoder:
 
     def _decode_kv_value_hash_feature_type(self) -> MerkNode:
         """Decode a KVValueHashFeatureType node."""
-        key_len = self.data[self.offset]
-        self.offset += 1
+        key_len = self._read_u8()
         key = self._read_bytes(key_len)
         value_len = self._read_u16()
         value = self._read_bytes(value_len)
@@ -201,8 +196,7 @@ class MerkDecoder:
 
     def _decode_feature_type(self) -> TreeFeatureType:
         """Decode TreeFeatureType."""
-        feature_code = self.data[self.offset]
-        self.offset += 1
+        feature_code = self._read_u8()
 
         if feature_code == FEATURE_BASIC:
             return BasicMerkNode()
@@ -213,9 +207,10 @@ class MerkDecoder:
             return SummedMerkNode(sum=value)
 
         elif feature_code == FEATURE_BIG_SUMMED:
-            # Big sum is encoded as 16 bytes (i128) in little-endian
+            # Big sum is encoded as 16 bytes (i128), big-endian, as merk
+            # writes it (write_i128::<BigEndian>)
             sum_bytes = self._read_bytes(16)
-            sum_value = int.from_bytes(sum_bytes, byteorder='little', signed=True)
+            sum_value = int.from_bytes(sum_bytes, byteorder='big', signed=True)
             return BigSummedMerkNode(sum=sum_value)
 
         elif feature_code == FEATURE_COUNTED:
@@ -232,6 +227,14 @@ class MerkDecoder:
 
         else:
             raise GroveDBVerificationError(f"Unknown feature type: 0x{feature_code:02x}")
+
+    def _read_u8(self) -> int:
+        """Read one byte."""
+        if self.offset >= len(self.data):
+            raise GroveDBVerificationError("Unexpected end of data reading u8")
+        value = self.data[self.offset]
+        self.offset += 1
+        return value
 
     def _read_u16(self) -> int:
         """Read a big-endian u16."""

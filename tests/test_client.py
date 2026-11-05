@@ -1,17 +1,57 @@
 """Tests for Willow client."""
 
+import json
+
 import pytest
 import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
-from willow import WillowClient, generate_did
-from willow.types import (
-    DidDocument,
 
+from _mock_http import MockHttp
+from willow import (
+    WillowClient,
+    generate_did,
+    register_did_message,
+    register_subgrove_message,
+    store_data_message,
+    verify_signature,
+)
+from willow.auth import signed_request_message
+from willow.types import (
     RegisterDatasetRequest,
     SchemaDefinition,
     FieldType
 )
-from willow.errors import WillowError, AuthenticationError, NetworkError
+from willow.errors import (
+    WillowError, AuthenticationError, NetworkError, NotAuthenticatedError, ProofVerificationError,
+)
+
+
+def _tx_client(account_nonce=0, did_info=None):
+    """A client on a mocked API that answers the account nonce and accepts
+    every transaction, recording each request."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if request.url.path.endswith("/nonce"):
+            data = {"did": "x", "nonce": account_nonce}
+        elif request.url.path == "/tx/submit":
+            data = {"tx_hash": "AB", "code": 0, "log": ""}
+        else:
+            return httpx.Response(404, json={"success": False, "data": None, "error": "no route"})
+        return httpx.Response(200, json={"success": True, "data": data, "error": None})
+
+    client = WillowClient("http://api.test")
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    if did_info is not None:
+        client.set_identity(
+            did_info["did"], did_info["private_key"], did_info["public_key_id"], did_info["algorithm"]
+        )
+    return client, seen
+
+
+def _submitted(seen):
+    return [json.loads(r.content) for r in seen if r.url.path == "/tx/submit"]
 
 
 @pytest.fixture
@@ -22,9 +62,8 @@ def client():
 
 @pytest.fixture
 def mock_http_client():
-    """Create mock HTTP client."""
-    mock = AsyncMock()
-    return mock
+    """An httpx client whose answers come from its ``request`` mock."""
+    return MockHttp()
 
 
 @pytest.fixture
@@ -57,25 +96,76 @@ class TestWillowClient:
             assert isinstance(client, WillowClient)
 
     @pytest.mark.asyncio
-    async def test_register_did(self, client, mock_http_client, did_info):
-        """Test DID registration."""
-        # Mock response
-        mock_response = MagicMock()
-        mock_response.status_code = 201
-        mock_response.json.return_value = {
-            "success": True,
-            "data": did_info["did_document"].model_dump(by_alias=True)
-        }
+    @pytest.mark.parametrize("algorithm", ["Ed25519", "secp256k1"])
+    async def test_register_did(self, algorithm):
+        """register_did sends a RegisterDid transaction to /tx/submit, signed
+        with the document's key over the node's JSON of the document, nonce 1."""
+        info = generate_did(algorithm)
+        client, seen = _tx_client(did_info=info)
 
-        mock_http_client.request = AsyncMock(return_value=mock_response)
-        client._http = mock_http_client
+        result = await client.register_did(info["did_document"])
 
-        # Register DID
-        result = await client.register_did(did_info["did_document"])
+        assert result == {"tx_hash": "AB", "code": 0, "log": "", "did": info["did"], "nonce": 1}
+        assert [(r.method, r.url.path) for r in seen] == [("POST", "/tx/submit")]
+        ((kind, body),) = _submitted(seen)[0].items()
+        assert kind == "RegisterDid"
+        assert (body["nonce"], body["public_key_id"]) == (1, info["public_key_id"])
+        document = body["did_document"]
+        assert list(document) == [
+            "id", "public_keys", "authentication", "service", "created", "updated", "proof",
+        ]
+        assert list(document["public_keys"][0]) == [
+            "id", "type", "controller", "public_key_base58", "public_key_hex",
+        ]
+        # Signed over the node's serialization of the document it decodes.
+        message = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+        assert message == register_did_message(info["did_document"])
+        assert verify_signature(
+            message, bytes(body["signature"]).hex(), info["public_key"], algorithm
+        )
+        await client.close()
 
-        assert isinstance(result, DidDocument)
-        assert result.id == did_info["did"]
-        mock_http_client.request.assert_called_once()
+    @pytest.mark.asyncio
+    async def test_register_did_takes_an_explicit_key(self):
+        info = generate_did()
+        client, seen = _tx_client()
+        await client.register_did(info["did_document"], private_key_hex=info["private_key"])
+        body = _submitted(seen)[0]["RegisterDid"]
+        assert body["public_key_id"] == info["public_key_id"]
+        assert verify_signature(
+            register_did_message(info["did_document"]),
+            bytes(body["signature"]).hex(),
+            info["public_key"],
+            "Ed25519",
+        )
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_register_did_signs_in_the_algorithm_the_documents_key_names(self):
+        # No algorithm passed: a secp256k1 key signs secp256k1, both with an
+        # explicit key and with an identity set without its algorithm.
+        info = generate_did("secp256k1")
+        client, seen = _tx_client()
+        await client.register_did(info["did_document"], private_key_hex=info["private_key"])
+        client.set_identity(info["did"], info["private_key"], info["public_key_id"])  # Ed25519 default
+        await client.register_did(info["did_document"])
+        for body in (tx["RegisterDid"] for tx in _submitted(seen)):
+            assert verify_signature(
+                register_did_message(info["did_document"]),
+                bytes(body["signature"]).hex(),
+                info["public_key"],
+                "secp256k1",
+            )
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_register_did_needs_the_documents_key(self):
+        info, other = generate_did(), generate_did()
+        client, seen = _tx_client(did_info=other)
+        with pytest.raises(NotAuthenticatedError):
+            await client.register_did(info["did_document"])
+        assert seen == []
+        await client.close()
 
     @pytest.mark.asyncio
     async def test_set_identity(self, client, did_info):
@@ -128,22 +218,26 @@ class TestWillowClient:
         captured = {}
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
+        mock_response.json.return_value = {"success": True, "data": []}
 
         async def fake_request(method, url, content=None, headers=None):
             captured["headers"] = headers
             return mock_response
 
+        client._http = MockHttp()
         client._http.request = AsyncMock(side_effect=fake_request)
 
-        await client.data.store("my-subgrove", {"k": "v"})
+        await client.privacy.list_key_grantees("my-subgrove")
 
         headers = captured["headers"]
         assert headers["X-DID"] == info["did"]
-        # A write: signed in the older form, secp256k1 sent 0x-prefixed.
-        assert "X-Nonce" not in headers
+        # A key-grant read: nonce-signed, secp256k1 sent 0x-prefixed.
+        assert "X-Nonce" in headers
         assert headers["X-Signature"].startswith("0x")
-        message = f"POST:/data/my-subgrove:{headers['X-Timestamp']}"
+        message = signed_request_message(
+            headers["X-DID"], headers["X-Public-Key-ID"], "GET", "/key-grants/my-subgrove",
+            headers["X-Timestamp"], headers["X-Nonce"], None,
+        )
         # The captured signature verifies under secp256k1 (the true algorithm)...
         assert verify_signature(
             message, headers["X-Signature"], info["public_key"], "secp256k1"
@@ -257,33 +351,53 @@ class TestDataOperations:
     """Test data operations."""
 
     @pytest.mark.asyncio
-    async def test_store_data(self, client, mock_http_client):
-        """Test data storage."""
-        # Set up identity for per-request auth
-        _set_test_identity(client)
+    async def test_store_data(self):
+        """Each key is a StoreData transaction sent to /tx/submit, under
+        consecutive nonces, signed over the message built from its own fields."""
+        info = generate_did()
+        client, seen = _tx_client(account_nonce=6, did_info=info)
 
-        # Mock response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
+        results = await client.data.store(
+            "dataset1", {"key1": {"value": "test"}, "key2": {"b": 2, "a": 1}}
+        )
 
-        mock_http_client.request = AsyncMock(return_value=mock_response)
-        client._http = mock_http_client
-
-        # Store data
-        await client.data.store("dataset1", {"key1": {"value": "test"}})
-
-        mock_http_client.request.assert_called_once()
-        call_args = mock_http_client.request.call_args
-        assert call_args[0][0] == "POST"
-        assert "data/dataset1" in call_args[0][1]
+        assert len(results) == 2
+        assert [(r.method, r.url.path) for r in seen] == [
+            ("GET", f"/account/{info['did']}/nonce"),
+            ("POST", "/tx/submit"),
+            ("POST", "/tx/submit"),
+        ]
+        bodies = [tx["StoreData"] for tx in _submitted(seen)]
+        assert [(b["key"], b["nonce"]) for b in bodies] == [("key1", 7), ("key2", 8)]
+        assert bytes(bodies[1]["data"]) == b'{"a":1,"b":2}'
+        for body in bodies:
+            assert body["owner_did"] == info["did"]
+            message = store_data_message(
+                body["subgrove_id"], body["key"], body["owner_did"], bytes(body["data"]), body["nonce"]
+            )
+            assert verify_signature(message, bytes(body["signature"]).hex(), info["public_key"], "Ed25519")
+        await client.close()
 
     @pytest.mark.asyncio
-    async def test_get_data(self, client, mock_http_client):
-        """Test data retrieval."""
+    async def test_store_data_refuses_a_value_that_is_not_an_object(self):
+        client, seen = _tx_client(did_info=generate_did())
+        with pytest.raises(TypeError, match="JSON object"):
+            await client.data.store_item("dataset1", "key1", "not an object")
+        with pytest.raises(ValueError, match="line break"):
+            await client.data.store("dataset1", {"ok": {}, "bad\nkey": {}})
+        # NaN and the infinities are not JSON: the node would refuse the data.
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(ValueError):
+                await client.data.store("dataset1", {"ok": {}, "bad": {"x": value}})
+        assert seen == []
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_get_data_without_a_proof_raises(self, client, mock_http_client):
+        """``get`` reads the value and its proof; a value with no proof is not
+        returned (``get_unverified`` reads it without one)."""
         _set_test_identity(client)
 
-        # Mock response
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -293,52 +407,36 @@ class TestDataOperations:
 
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
+        client.consensus_rpc_url = "http://localhost:26657"
 
-        # Get data
-        result = await client.data.get("dataset1", "key1")
-
-        assert result == {"value": "test"}
-        # `get` makes two calls: GET /data/... then GET /proof/...
+        with pytest.raises(ProofVerificationError, match="no proof"):
+            await client.data.get("dataset1", "key1")
         called_urls = [c.args[1] for c in mock_http_client.request.call_args_list]
         assert any("data/dataset1/key1" in url for url in called_urls), called_urls
+        assert any("proof/dataset1/key1" in url for url in called_urls), called_urls
+
+        assert await client.data.get_unverified("dataset1", "key1") == {"value": "test"}
 
     @pytest.mark.asyncio
-    async def test_update_data(self, client, mock_http_client):
-        """Test data update."""
+    @pytest.mark.parametrize("operation,args,kind", [
+        ("update", ("dataset1", "key1", {"value": "updated"}), "UpdateData"),
+        ("delete", ("dataset1", "key1"), "DeleteData"),
+    ])
+    async def test_unsupported_data_writes_name_the_supported_path(
+        self, client, mock_http_client, operation, args, kind
+    ):
+        """The API serves no REST data writes; the SDK builds no UpdateData or
+        DeleteData, so these raise without a request."""
         _set_test_identity(client)
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
-
-        mock_http_client.request = AsyncMock(return_value=mock_response)
+        mock_http_client.request = AsyncMock()
         client._http = mock_http_client
 
-        # Update data
-        await client.data.update("dataset1", "key1", {"value": "updated"})
+        with pytest.raises(WillowError) as exc_info:
+            await getattr(client.data, operation)(*args)
 
-        call_args = mock_http_client.request.call_args
-        assert call_args[0][0] == "PUT"
-        assert "data/dataset1/key1" in call_args[0][1]
-
-    @pytest.mark.asyncio
-    async def test_delete_data(self, client, mock_http_client):
-        """Test data deletion."""
-        _set_test_identity(client)
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"success": True}
-
-        mock_http_client.request = AsyncMock(return_value=mock_response)
-        client._http = mock_http_client
-
-        # Delete data
-        await client.data.delete("dataset1", "key1")
-
-        call_args = mock_http_client.request.call_args
-        assert call_args[0][0] == "DELETE"
-        assert "data/dataset1/key1" in call_args[0][1]
+        assert kind in str(exc_info.value)
+        assert "POST /tx/submit" in str(exc_info.value)
+        mock_http_client.request.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_require_auth_decorator(self, client):
@@ -352,46 +450,102 @@ class TestRegistrationOperations:
     """Test registration operations."""
 
     @pytest.mark.asyncio
-    async def test_register_subgrove(self, client, mock_http_client):
-        """Test subgrove registration."""
-        _set_test_identity(client)
-
-
-    @pytest.mark.asyncio
-    async def test_register_dataset(self, client, mock_http_client):
-        """Test dataset registration."""
-        _set_test_identity(client)
+    async def test_register_dataset(self):
+        """A registration request is a RegisterSubgrove transaction with every
+        field explicit, signed over its Config, sent to /tx/submit."""
+        info = generate_did()
+        client, seen = _tx_client(account_nonce=2, did_info=info)
 
         dataset_request = {
             "dataset_id": "test-dataset",
-            
             "name": "Test Dataset",
             "dataset_path": ["collections"],
             "schema": {
                 "version": 1,
-                "fields": {"name": {"type": "string"}},
-                "indexes": [],
-                "required_fields": ["name"]
+                "fields": {"name": {"type": "string", "required": True}},
+                "required_fields": [],
             },
-            "owner_did": "did:test",
-            "writers": ["did:test"],
-            "readers": ["did:test"]
+            "owner_did": info["did"],
+            "writers": [info["did"]],
+            "readers": ["did:willow:reader"],
         }
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "success": True,
-            "data": dataset_request
-        }
-
-        mock_http_client.request = AsyncMock(return_value=mock_response)
-        client._http = mock_http_client
 
         result = await client.registration.register_dataset(dataset_request)
 
-        assert result == dataset_request
-        assert "register/subgrove" in mock_http_client.request.call_args[0][1]
+        assert result == {"tx_hash": "AB", "code": 0, "log": "", "did": info["did"], "nonce": 3}
+        assert [(r.method, r.url.path) for r in seen] == [
+            ("GET", f"/account/{info['did']}/nonce"),
+            ("POST", "/tx/submit"),
+        ]
+        body = _submitted(seen)[0]["RegisterSubgrove"]
+        assert (body["subgrove_id"], body["name"], body["nonce"]) == ("test-dataset", "Test Dataset", 3)
+        assert body["mode"] == {"DataStorage": {
+            "name": "Test Dataset",
+            "writers": [info["did"]],
+            "free_readers": ["did:willow:reader"],
+            "read_pricing": None,
+        }}
+        # The node's schema form: field -> type, required fields listed.
+        assert json.loads(body["schema"]) == {
+            "version": 1,
+            "fields": {"name": "string"},
+            "indexes": [],
+            "required_fields": ["name"],
+        }
+        assert verify_signature(
+            register_subgrove_message(body), bytes(body["signature"]).hex(), info["public_key"], "Ed25519"
+        )
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_register_subgrove_is_signed_by_its_owner(self):
+        info = generate_did()
+        client, seen = _tx_client(did_info=info)
+        with pytest.raises(ValueError, match="owner_did"):
+            await client.registration.register_subgrove({
+                "subgrove_id": "sg", "name": "n", "owner_did": "did:willow:someone-else",
+                "schema": {"version": 1, "fields": {}},
+            })
+        assert seen == []
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_register_subgrove_funds_the_subgrove(self):
+        # StoreData is paid from the subgrove's balance: a subgrove
+        # registered without funding takes no write.
+        info = generate_did()
+        client, seen = _tx_client(did_info=info)
+        await client.registration.register_subgrove({
+            "dataset_id": "users", "name": "Users", "owner_did": info["did"],
+            "schema": {"version": 1, "fields": {"name": {"type": "string"}}},
+            "writers": [info["did"]], "initial_funding": 10**18,
+        })
+        body = _submitted(seen)[0]["RegisterSubgrove"]
+        assert int(body["initial_funding"]) == 10**18
+        assert verify_signature(
+            register_subgrove_message(body), bytes(body["signature"]).hex(), info["public_key"], "Ed25519"
+        )
+        await client.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [
+        {"initial_funds": 10**18},
+        {"nonce": 5},
+        {"signature": b"\0" * 64},
+        {"public_key_id": "did:willow:a#key-9"},
+        {"initial_funding": True},
+        {"initial_funding": -1},
+    ])
+    async def test_register_subgrove_refuses_what_it_would_not_send(self, extra):
+        info = generate_did()
+        client, seen = _tx_client(did_info=info)
+        with pytest.raises((ValueError, TypeError)):
+            await client.registration.register_subgrove({
+                "dataset_id": "users", "name": "Users", "owner_did": info["did"],
+                "schema": {"version": 1, "fields": {}}, **extra,
+            })
+        assert seen == []
+        await client.close()
 
 
 class TestProofOperations:

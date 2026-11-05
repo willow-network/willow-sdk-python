@@ -1,13 +1,15 @@
 """Computed Fields Module.
 
-This module provides SDK-layer computation of derived fields from proven data.
+This module provides SDK-layer computation of derived fields from base data.
 It enables drop-in compatibility with The Graph's query interfaces by computing
-derived values (like price ratios) from cryptographically proven base data.
+derived values (like price ratios) client-side. The SDK applies them to
+``query_unverified`` results, which it does not verify: a derived value is
+only as trustworthy as the data it is computed from.
 
 Design Philosophy:
 - GKR circuits prove the underlying data (reserves, volumes, balances)
 - Division and other derived calculations are done client-side
-- Same trust model: proven inputs + deterministic computation = trustworthy outputs
+- Deterministic computation: a derived value is as trustworthy as its inputs
 - Same API: queries return the same fields The Graph would return
 
 Example:
@@ -18,11 +20,11 @@ Example:
     ...     # Register Uniswap V2 computed fields
     ...     client.register_computed_fields('pairs', UNISWAP_V2_PAIR_FIELDS)
     ...
-    ...     # Query returns computed prices alongside proven reserves
-    ...     result = await client.data.query('pairs', {'filters': {'id': '0x...'}})
+    ...     # Query returns computed prices alongside the reserves
+    ...     result = await client.data.query_unverified('pairs', {'filters': {'id': '0x...'}})
     ...     # result.documents[0] contains:
-    ...     # - reserve0, reserve1 (proven by GKR circuit)
-    ...     # - token0Price, token1Price (computed from proven reserves)
+    ...     # - reserve0, reserve1 (as the API serves them, unverified)
+    ...     # - token0Price, token1Price (computed from those reserves)
 """
 
 from typing import Any, Callable, Dict, List, Optional, Union

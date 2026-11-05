@@ -34,13 +34,16 @@ async def main():
     did_info = generate_did()
 
     async with WillowClient("http://localhost:3031") as client:
-        # Auth
-        await client.register_did(did_info["did_document"])
+        # Auth: the identity signs the DID's registration (pre-fund the DID
+        # with the registration fee first) and every later transaction.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
             did_info["public_key_id"],
         )
+        # A write returns once CheckTx accepts it: wait for the registration
+        # to land before the DID signs anything else.
+        await client.wait_until_landed(await client.register_did(did_info["did_document"]))
 
         # 1. Token info
         print("\n1. Token Information")

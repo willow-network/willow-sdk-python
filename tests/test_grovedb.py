@@ -430,11 +430,14 @@ class TestBincode:
 
     def test_bincode_reader_read_bytes(self):
         """Test reading length-prefixed bytes."""
-        # u64 length (3) + 3 bytes
-        data = b"\x00\x00\x00\x00\x00\x00\x00\x03abc"
+        # varint length (3) + 3 bytes, as bincode's standard config writes it
+        data = b"\x03abc"
         reader = BincodeReader(data)
         result = reader.read_bytes()
         assert result == b"abc"
+        # a length of 251 or more takes the u16 form
+        reader = BincodeReader(b"\xfb\x01\x00" + b"x" * 256)
+        assert reader.read_bytes() == b"x" * 256
 
     def test_bincode_reader_position(self):
         """Test position tracking."""
@@ -555,6 +558,18 @@ class TestMerkDecoder:
         ops = decode_merk_ops(data)
 
         assert len(ops) == 2
+
+    @pytest.mark.parametrize("big_sum", [1, -2, 2**100 + 7])
+    def test_a_big_sum_feature_type_is_a_big_endian_i128(self, big_sum):
+        # merk writes BigSummedMerkNode's sum with write_i128::<BigEndian>.
+        key, value, value_hash = b"k", b"\x00", bytes(32)
+        data = (
+            bytes([0x07, len(key)]) + key + len(value).to_bytes(2, "big") + value + value_hash
+            + b"\x02" + big_sum.to_bytes(16, "big", signed=True)
+        )
+        (op,) = decode_merk_ops(data)
+        assert isinstance(op, PushOp)
+        assert op.node.feature_type == BigSummedMerkNode(sum=big_sum)
 
     def test_unknown_op_code(self):
         """Test unknown op code raises error."""
@@ -736,6 +751,21 @@ class TestExecutor:
         tree = execute_ops(ops, collapse=False)
         assert tree.left is not None
         assert tree.right is None
+
+    @pytest.mark.parametrize("ops,match", [
+        # A Push after a PushInverted, and the other way round: merk compares
+        # each key with the last one pushed, whichever way it was pushed.
+        ([PushInvertedOp(node=KVNode(key=b"b", value=b"v")), PushOp(node=KVNode(key=b"a", value=b"v")), ChildOp()],
+         "Incorrect key ordering"),
+        ([PushOp(node=KVNode(key=b"a", value=b"v")), PushInvertedOp(node=KVNode(key=b"b", value=b"v")), ChildOp()],
+         "Incorrect key ordering inverted"),
+    ])
+    def test_key_order_is_checked_against_the_last_key_either_way(self, ops, match):
+        with pytest.raises(GroveDBVerificationError, match=match):
+            execute_ops(ops, collapse=False)
+        # In order, the same ops run.
+        ops[0].node.key, ops[1].node.key = ops[1].node.key, ops[0].node.key
+        execute_ops(ops, collapse=False)
 
     def test_execute_empty_stack_error(self):
         """Test error on empty stack operations."""

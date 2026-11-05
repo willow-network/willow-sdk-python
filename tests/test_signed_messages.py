@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 from eth_utils import keccak
+from multidict import CIMultiDict
 
 from willow import (
     delete_file_manifest_message,
@@ -251,13 +252,30 @@ def test_create_sign_message_refuses_a_line_break():
 # ---------------------------------------------------------------------------
 
 
+class _Body:
+    """aiohttp's ``StreamReader`` over ``data``."""
+
+    def __init__(self, data):
+        self._data = data
+
+    async def read(self, n=-1):
+        n = len(self._data) if n < 0 else n
+        chunk, self._data = self._data[:n], self._data[n:]
+        return chunk
+
+
 class _Response:
     def __init__(self, payload):
         self.status = 200
+        self.headers = CIMultiDict()
         self._payload = payload
+        self.content = _Body(json.dumps(payload).encode())
 
-    async def json(self):
+    async def json(self, content_type="application/json"):
         return self._payload
+
+    async def text(self):
+        return json.dumps(self._payload)
 
     async def __aenter__(self):
         return self

@@ -5,25 +5,19 @@ These tests require a running three-node Willow network with a funded DID
 written to the file pointed at by the ``WILLOW_TEST_DID_FILE`` env var (one
 line, the DID string). When the env var is unset or the file is missing,
 the whole module is skipped — there's nothing meaningful to assert without
-live nodes.
+live nodes. Verified reads check proofs against the headers of
+``WILLOW_TEST_CONSENSUS_RPC_URL`` (``http://localhost:26657`` by default).
+
+The node supports no schema indexes (it refuses a schema that declares
+them), so these register plain schemas and query unverified.
 """
 
 import pytest
 import asyncio
 import os
 from pathlib import Path
-from typing import Dict, List, Any
 
-from willow import (
-    WillowClient,
-    FieldType,
-    IndexDefinition,
-    SchemaDefinition,
-    RegisterDatasetRequest,
-    QueryRequest,
-    QuerySearch,
-    QuerySort,
-)
+from willow import WillowClient
 
 
 # RFC 8032 §7.1 Test 2 Ed25519 vector.
@@ -38,6 +32,7 @@ _funded_did = (
     if _did_file and Path(_did_file).is_file()
     else None
 )
+CONSENSUS_RPC_URL = os.environ.get("WILLOW_TEST_CONSENSUS_RPC_URL", "http://localhost:26657")
 pytestmark = pytest.mark.skipif(
     _funded_did is None,
     reason="WILLOW_TEST_DID_FILE unset or missing — set to a path containing a funded DID to run",
@@ -52,7 +47,7 @@ def get_funded_did() -> str:
 @pytest.fixture
 async def client1():
     """Client for node 1."""
-    client = WillowClient(api_url="http://localhost:3031")
+    client = WillowClient(api_url="http://localhost:3031", consensus_rpc_url=CONSENSUS_RPC_URL)
     yield client
     await client.close()
 
@@ -60,7 +55,7 @@ async def client1():
 @pytest.fixture
 async def client2():
     """Client for node 2."""
-    client = WillowClient(api_url="http://localhost:3032")
+    client = WillowClient(api_url="http://localhost:3032", consensus_rpc_url=CONSENSUS_RPC_URL)
     yield client
     await client.close()
 
@@ -68,7 +63,7 @@ async def client2():
 @pytest.fixture
 async def client3():
     """Client for node 3."""
-    client = WillowClient(api_url="http://localhost:3033")
+    client = WillowClient(api_url="http://localhost:3033", consensus_rpc_url=CONSENSUS_RPC_URL)
     yield client
     await client.close()
 
@@ -85,73 +80,41 @@ def dataset_prefix():
     return "blog_posts"
 
 
-class TestSchemaAndIndexRegistration:
-    """Test schema and index registration."""
-    
-    @pytest.mark.asyncio
-    async def test_register_dataset_with_indexes(self, client1, funded_did, dataset_prefix):
-        """Test registering a dataset with multiple index types."""
-        # Authenticate
-        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
-        
-        # Define schema with various field types
-        schema = SchemaDefinition(
-            version=1,
-            fields={
-                "title": FieldType(type="string", indexed=True, required=True),
-                "content": FieldType(type="string", indexed=True, required=True),
-                "author": FieldType(type="string", indexed=True, required=True),
-                "tags": FieldType(type="array", indexed=True),
-                "timestamp": FieldType(type="number", indexed=True, required=True),
-                "views": FieldType(type="number", indexed=True),
-                "metadata": FieldType(type="object"),
+def _subgrove(dataset_id, name, owner, fields, required):
+    """A RegisterSubgrove request for a plain schema (no indexes)."""
+    return {
+        "dataset_id": dataset_id,
+        "name": name,
+        "schema": {
+            "version": 1,
+            "fields": {
+                field: {"type": kind, "required": field in required} for field, kind in fields.items()
             },
-            indexes=[
-                IndexDefinition(
-                    name="by_author",
-                    fields=["author"],
-                    unique=False,
-                    type="hash"
-                ),
-                IndexDefinition(
-                    name="by_timestamp",
-                    fields=["timestamp"],
-                    unique=False,
-                    type="range"
-                ),
-                IndexDefinition(
-                    name="unique_title",
-                    fields=["title"],
-                    unique=True,
-                    type="unique"
-                ),
-                IndexDefinition(
-                    name="content_search",
-                    fields=["content"],
-                    unique=False,
-                    type="fulltext"
-                ),
-            ]
-        )
-        
-        # Register dataset
-        dataset_request = {
-            "dataset_id": "blog_posts",
+        },
+        "owner_did": owner,
+        "writers": [owner],
+        "readers": [],
+    }
 
-            "name": "Blog Posts with Indexes",
-            "dataset_path": [],
-            "schema": schema.model_dump(),
-            "owner_did": funded_did,
-            "writers": [],
-            "readers": [],
-        }
-        
-        registration = await client1.registration.register_dataset(dataset_request)
-        assert registration["dataset_id"] == "blog_posts"
-        assert len(registration["schema"]["indexes"]) == 4
-        
-        # Wait for propagation
-        await asyncio.sleep(3)
+
+class TestSubgroveRegistration:
+    """Test subgrove registration."""
+
+    @pytest.mark.asyncio
+    async def test_register_subgrove(self, client1, funded_did, dataset_prefix):
+        """Register the blog-post subgrove and wait for it to land."""
+        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
+        request = _subgrove(
+            "blog_posts", "Blog Posts", funded_did,
+            {
+                "title": "string", "content": "string", "author": "string", "tags": "array",
+                "timestamp": "number", "views": "number", "metadata": "object",
+            },
+            {"title", "content", "author", "timestamp"},
+        )
+        registration = await client1.registration.register_subgrove(request)
+        assert registration["code"] == 0
+        await client1.wait_until_landed(registration)
 
 
 class TestIndexedDataStorage:
@@ -204,16 +167,15 @@ class TestIndexedDataStorage:
             },
         ]
         
-        # Store documents
-        await client1.data.batch_store( "blog_posts", test_posts)
-        
-        # Wait for indexing
-        await asyncio.sleep(5)
-        
-        # Verify data was stored
-        retrieved = await client2.data.get( "blog_posts", "post_1")
-        assert retrieved["title"] == "Introduction to Python SDK"
-        assert retrieved["author"] == "alice"
+        # Store documents, and wait for them to land
+        await client1.wait_until_landed(await client1.data.batch_store("blog_posts", test_posts))
+
+        # Read one back from another node, verified against its proof and
+        # the consensus node's header
+        verified = await client2.data.get_verified("blog_posts", "post_1")
+        assert verified.value["title"] == "Introduction to Python SDK"
+        assert verified.value["author"] == "alice"
+        assert verified.height > 0
 
 
 class TestQueryOperations:
@@ -230,7 +192,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 2
         assert all(doc["author"] == "alice" for doc in results.documents)
     
@@ -248,7 +210,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 2
         assert all(1000 <= doc["timestamp"] <= 1500 for doc in results.documents)
     
@@ -264,7 +226,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) >= 2
         assert any("indexing" in doc["content"].lower() for doc in results.documents)
     
@@ -280,7 +242,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 3
         
         # Verify descending order
@@ -299,7 +261,7 @@ class TestQueryOperations:
             "offset": 0
         }
         
-        page1 = await client2.data.query( "blog_posts", page1_query)
+        page1 = await client2.data.query_unverified("blog_posts", page1_query)
         assert len(page1.documents) == 2
         assert page1.limit == 2
         assert page1.offset == 0
@@ -311,7 +273,7 @@ class TestQueryOperations:
             "offset": 2
         }
         
-        page2 = await client2.data.query( "blog_posts", page2_query)
+        page2 = await client2.data.query_unverified("blog_posts", page2_query)
         assert len(page2.documents) <= 2
         assert page2.offset == 2
     
@@ -331,7 +293,7 @@ class TestQueryOperations:
             }
         }
         
-        results = await client2.data.query( "blog_posts", query)
+        results = await client2.data.query_unverified("blog_posts", query)
         assert len(results.documents) == 1
         assert results.documents[0]["author"] == "alice"
         assert results.documents[0]["views"] >= 200
@@ -354,9 +316,9 @@ class TestCrossNodeConsistency:
         
         # Query from all nodes
         results = await asyncio.gather(
-            client1.data.query( "blog_posts", query),
-            client2.data.query( "blog_posts", query),
-            client3.data.query( "blog_posts", query)
+            client1.data.query_unverified("blog_posts", query),
+            client2.data.query_unverified("blog_posts", query),
+            client3.data.query_unverified("blog_posts", query)
         )
         
         results1, results2, results3 = results
@@ -370,27 +332,6 @@ class TestCrossNodeConsistency:
             assert results2.documents[i]["title"] == results3.documents[i]["title"]
 
 
-class TestUniqueConstraints:
-    """Test unique constraint enforcement."""
-    
-    @pytest.mark.asyncio
-    async def test_unique_constraint_enforcement(self, client1, funded_did, dataset_prefix):
-        """Test that unique constraints are enforced."""
-        client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
-        
-        duplicate_post = {
-            "title": "Introduction to Python SDK",  # Duplicate title
-            "content": "This should fail due to unique constraint",
-            "author": "charlie",
-            "timestamp": 3000,
-            "views": 50,
-        }
-        
-        # This should raise an exception
-        with pytest.raises(Exception):
-            await client1.data.store( "blog_posts", {"post_duplicate": duplicate_post})
-
-
 class TestPerformance:
     """Performance tests for indexing operations."""
     
@@ -399,35 +340,14 @@ class TestPerformance:
         """Test bulk indexing performance."""
         client1.set_identity(funded_did, PRIVATE_KEY_HEX, PUBLIC_KEY_ID)
         
-        # Create performance test dataset
-        perf_schema = SchemaDefinition(
-            version=1,
-            fields={
-                "id": FieldType(type="string", indexed=True, required=True),
-                "category": FieldType(type="string", indexed=True, required=True),
-                "value": FieldType(type="number", indexed=True, required=True),
-                "description": FieldType(type="string"),
-            },
-            indexes=[
-                IndexDefinition(name="by_category", fields=["category"], unique=False, type="hash"),
-                IndexDefinition(name="by_value", fields=["value"], unique=False, type="range"),
-            ]
-        )
-        
-        perf_dataset = {
-            "dataset_id": "perf_test",
+        # Register the performance test subgrove
+        registration = await client1.registration.register_subgrove(_subgrove(
+            "perf_test", "Performance Test", funded_did,
+            {"id": "string", "category": "string", "value": "number", "description": "string"},
+            {"id", "category", "value"},
+        ))
+        await client1.wait_until_landed(registration)
 
-            "name": "Performance Test Dataset",
-            "dataset_path": [],
-            "schema": perf_schema.model_dump(),
-            "owner_did": funded_did,
-            "writers": [],
-            "readers": [],
-        }
-        
-        await client1.registration.register_dataset(perf_dataset)
-        await asyncio.sleep(3)
-        
         # Generate test data
         categories = ["electronics", "books", "clothing", "food", "toys"]
         test_data = [
@@ -446,8 +366,7 @@ class TestPerformance:
         # Measure bulk insert time
         import time
         start_time = time.time()
-        await client1.data.batch_store( "perf_test", test_data)
-        await asyncio.sleep(5)  # Wait for indexing
+        await client1.wait_until_landed(await client1.data.batch_store("perf_test", test_data))
         insert_time = (time.time() - start_time) * 1000  # Convert to ms
         
         print(f"Inserted 50 documents in {insert_time:.0f}ms")
@@ -455,7 +374,7 @@ class TestPerformance:
         
         # Test query performance
         query_start = time.time()
-        category_results = await client1.data.query( "perf_test", {
+        category_results = await client1.data.query_unverified("perf_test", {
             "filters": {"category": "electronics"}
         })
         category_query_time = (time.time() - query_start) * 1000
@@ -465,7 +384,7 @@ class TestPerformance:
         
         # Range query performance
         range_start = time.time()
-        range_results = await client1.data.query( "perf_test", {
+        range_results = await client1.data.query_unverified("perf_test", {
             "filters": {
                 "value": {"$gte": 200, "$lte": 500}
             }

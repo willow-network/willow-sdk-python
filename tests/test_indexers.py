@@ -7,7 +7,6 @@ the full client / auth / consensus stack.
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -82,12 +81,9 @@ async def test_list_fetches_and_caches(monkeypatch):
     """Within the cache TTL, subsequent `list()` calls must not hit the network."""
     calls = []
 
-    async def fake_get(self, url, *args, **kwargs):
-        calls.append(url)
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.raise_for_status = lambda: None
-        resp.json = lambda: {
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={
             "success": True,
             "data": [
                 {
@@ -101,12 +97,9 @@ async def test_list_fetches_and_caches(monkeypatch):
                     "last_update": 0,
                 }
             ],
-        }
-        return resp
+        })
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
-
-    http = httpx.AsyncClient()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         disc = WillowIndexers(http, "http://validator:3031", cache_ttl_seconds=10)
         first = await disc.list()
@@ -120,11 +113,8 @@ async def test_list_fetches_and_caches(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_for_subgrove_filters_and_sorts(monkeypatch):
-    async def fake_get(self, url, *args, **kwargs):
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.raise_for_status = lambda: None
-        resp.json = lambda: {
+    def handler(request):
+        return httpx.Response(200, json={
             "success": True,
             "data": [
                 {
@@ -168,12 +158,9 @@ async def test_for_subgrove_filters_and_sorts(monkeypatch):
                     "last_update": 0,
                 },
             ],
-        }
-        return resp
+        })
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
-
-    http = httpx.AsyncClient()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     try:
         disc = WillowIndexers(http, "http://validator:3031")
         picks = await disc.for_subgrove("sg-shared")

@@ -47,8 +47,56 @@ class NetworkError(WillowError):
 
     Raised when network-level issues occur, such as connection failures,
     timeouts, or DNS resolution errors.
+
+    Raised by a write, it carries the ``did`` and ``nonce`` the transaction
+    was signed under. ``transaction`` is the signed transaction as sent when
+    the request may have reached the node (it failed after the connection
+    was made): its nonce stays taken, and ``WillowClient.resubmit`` sends it
+    again. It is ``None`` when the request never left (the connection was
+    refused or timed out): its nonce is free again.
     """
-    pass
+
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Any] = None
+
+
+class ResponseTooLargeError(NetworkError):
+    """An answer longer than the SDK's cap for its route (``limit`` bytes):
+    the SDK stopped reading it.
+
+    The cap bounds the bytes read of one answer, as sent (the SDK decodes no
+    ``Content-Encoding``: see ``ResponseEncodingError``), not the memory
+    parsing them takes, which can be a multiple of it. Raised by a write's
+    submission, the transaction may have reached the node: like any
+    ``NetworkError`` after connecting, it carries ``transaction`` for
+    ``resubmit``.
+    """
+
+    def __init__(self, limit: int):
+        super().__init__(f"the answer is over the SDK's {limit >> 20} MiB limit for its route")
+        self.limit = limit
+
+
+class ResponseEncodingError(NetworkError):
+    """An answer in a ``Content-Encoding`` other than ``identity``: the SDK
+    refused it without decoding it.
+
+    Every request asks for ``identity`` (``Accept-Encoding: identity``), and
+    the SDK reads each body as sent: decoding a coding takes memory the cap
+    on an answer's bytes doesn't bound (a few hundred bytes of nested gzip
+    decode to gigabytes). ``encoding`` is the coding the answer names.
+    Raised by a write's submission, the transaction may have reached the
+    node: like any ``NetworkError`` after connecting, it carries
+    ``transaction`` for ``resubmit``.
+    """
+
+    def __init__(self, encoding: str):
+        super().__init__(
+            f"the answer is in Content-Encoding {encoding!r}; the SDK asks for identity "
+            f"and decodes no other"
+        )
+        self.encoding = encoding
 
 
 class HttpError(WillowError):
@@ -124,6 +172,27 @@ class ProofVerificationError(WillowError):
 
     Raised when cryptographic proof verification fails. This could
     indicate data tampering or an invalid proof.
+    """
+    pass
+
+
+class ProofHeightOutOfRangeError(ProofVerificationError):
+    """A proof of a state that is not current: no header within
+    ``max_proof_lag_blocks`` of the chain's latest carries its root (a stale
+    or replayed answer), or it names a height that far ahead of the latest.
+
+    The proof itself may be genuine; catch this before
+    ``ProofVerificationError`` to tell a stale answer from a forged one.
+    """
+    pass
+
+
+class UnsupportedError(WillowError):
+    """The SDK does not support this operation.
+
+    Raised, without a request, by operations the SDK can't perform
+    correctly, such as verifying data no proof binds, instead of returning
+    a result that would look verified.
     """
     pass
 
@@ -210,8 +279,20 @@ class ConsensusError(WillowError):
 class TransactionError(ConsensusError):
     """Transaction-related errors.
 
-    Raised when transaction operations fail.
+    Raised when transaction operations fail. Raised by a write, it carries
+    the ``did`` and ``nonce`` the transaction was signed under, and, when
+    the answer leaves open whether it reached the node (a gateway error
+    with no CheckTx answer, or a resubmission refused for anything but its
+    nonce being used), the signed ``transaction`` to resubmit. A refusal
+    that the nonce is already used, at or below the base, or spent carries
+    the ``transaction`` too: some transaction used the nonce, which may be
+    this one, so the write is not signed again under another nonce; read
+    what it wrote before sending it again.
     """
+
+    did: Optional[str] = None
+    nonce: Optional[int] = None
+    transaction: Optional[Any] = None
 
     def __init__(
         self,
@@ -241,6 +322,26 @@ class InsufficientFundsError(TransactionError):
         super().__init__(message)
         self.required = required
         self.available = available
+
+
+class NonceWindowFullError(ConsensusError):
+    """Every nonce the node accepts for a DID is taken.
+
+    Raised when each of the 24 nonces above the account's base is handed out
+    to a transaction that hasn't landed, and the base didn't advance while
+    the client waited for it.
+    """
+
+
+class NotLandedError(ConsensusError):
+    """A write's nonce wasn't used in a block within the time waited.
+
+    Raised by ``WillowClient.wait_until_landed``. Without a consensus RPC
+    URL the client sees only the account's base, which advances only over
+    used nonces with no gap below them, so this can also mean a lower nonce
+    of the identity is unused: an earlier write that hasn't landed, or a
+    nonce no transaction has used yet.
+    """
 
 
 def parse_api_error(response_data: dict, status_code: int) -> WillowError:

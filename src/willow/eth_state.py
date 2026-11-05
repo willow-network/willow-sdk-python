@@ -22,6 +22,8 @@ import httpx
 import rlp
 from eth_hash.auto import keccak
 
+from . import _body
+
 
 class StateVerifyMode(str, Enum):
     STRICT = "strict"
@@ -242,10 +244,10 @@ class EthOperations:
     async def _post(self, path: str, body: dict) -> dict:
         url = f"{self.indexer_base_url}/{path.lstrip('/')}"
         if self._http is not None:
-            r = await self._http.post(url, json=body)
+            r = await _body.send(self._http, "POST", url, limit=_body.LARGE, json=body)
         else:
             async with httpx.AsyncClient() as c:
-                r = await c.post(url, json=body)
+                r = await _body.send(c, "POST", url, limit=_body.LARGE, json=body)
         r.raise_for_status()
         return r.json()
 

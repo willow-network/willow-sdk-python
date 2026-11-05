@@ -8,24 +8,52 @@ Example usage:
     from willow import WillowClient, generate_did
 
     async def main():
-        async with WillowClient("http://localhost:3031") as client:
-            # Generate and register DID
+        # consensus_rpc_url: the CometBFT RPC of a node you trust, whose
+        # headers verified reads are checked against
+        async with WillowClient(
+            "http://localhost:3031", consensus_rpc_url="http://localhost:26657"
+        ) as client:
+            # Generate a DID and set it as the client's identity
             did_info = generate_did()
-            await client.register_did(did_info["did_document"])
-
-            # Set identity for per-request signing
             client.set_identity(
                 did_info["did"],
                 did_info["private_key"],
                 did_info["public_key_id"]
             )
 
-            # Store data with automatic proof verification
-            await client.data.store("my-data", {"key": "value"})
+            # Register it (pre-fund the derived DID first with the DID and
+            # subgrove registration fees plus the subgrove's funding), and
+            # wait for it to land: the DID can sign nothing before it does
+            registration = await client.register_did(did_info["did_document"])
+            await client.wait_until_landed(registration)
 
-            # Query with automatic proof verification
-            result = await client.data.query("my-data", {
-                "filters": {"key": {"$eq": "value"}}
+            # Register a subgrove it owns and writes to, funded with 1 WILL
+            # from its balance (StoreData is paid from the subgrove's
+            # balance), and wait for it to land
+            subgrove = await client.registration.register_subgrove({
+                "dataset_id": "my-data",
+                "name": "My Data",
+                "schema": {"version": 1, "fields": {"value": {"type": "number"}}},
+                "owner_did": did_info["did"],
+                "writers": [did_info["did"]],
+                "readers": [],
+                "initial_funding": 10**18,
+            })
+            await client.wait_until_landed(subgrove)
+
+            # Store a JSON object under a key (a StoreData transaction), and
+            # wait for it to land: a write returns once CheckTx accepts it
+            writes = await client.data.store("my-data", {"key": {"value": 1}})
+            await client.wait_until_landed(writes)
+
+            # Read it back, verified against its proof and the consensus
+            # node's header (raises ProofVerificationError when it can't be
+            # verified; data.get_unverified reads it without verification)
+            value = await client.data.get("my-data", "key")
+
+            # Query (the documents are not verified)
+            result = await client.data.query_unverified("my-data", {
+                "filters": {"value": {"$eq": 1}}
             })
     ```
 """
@@ -33,6 +61,8 @@ Example usage:
 from .client import (
     WillowClient,
     WillowClientBuilder,
+    VerifiedValue,
+    DEFAULT_MAX_PROOF_LAG_BLOCKS,
     DataOperations,
     RegistrationOperations,
     ProofOperations,
@@ -71,6 +101,15 @@ from .signed_messages import (
     store_data_message,
     store_file_manifest_message,
     delete_file_manifest_message,
+    register_subgrove_message,
+    register_subgrove_unsigned_bincode,
+    normalize_register_subgrove,
+    grant_subgrove_key_message,
+    rotate_subgrove_key_message,
+    revoke_subgrove_key_message,
+    unregister_storage_node_message,
+    register_did_message,
+    did_document_body,
 )
 from .errors import (
     WillowError,
@@ -82,6 +121,8 @@ from .errors import (
     NotFoundError,
     PermissionDeniedError,
     ProofVerificationError,
+    ProofHeightOutOfRangeError,
+    UnsupportedError,
     LightClientError,
     CryptoError,
     InvalidSignatureError,
@@ -92,8 +133,13 @@ from .errors import (
     ConsensusError,
     TransactionError,
     InsufficientFundsError,
+    NonceWindowFullError,
+    NotLandedError,
+    ResponseTooLargeError,
+    ResponseEncodingError,
     parse_api_error,
 )
+from .nonces import InterruptedWrite
 from .types import (
     # Enums
     SignatureAlgorithm,
@@ -192,6 +238,7 @@ from .proof import (
     extract_root_hash_from_proof,
     verify_proof_quick,
     verify_proof_with_expected_root,
+    subgrove_data_path,
 )
 # GroveDB module for low-level proof verification
 from . import grovedb
@@ -314,6 +361,8 @@ __all__ = [
     # Client
     "WillowClient",
     "WillowClientBuilder",
+    "VerifiedValue",
+    "DEFAULT_MAX_PROOF_LAG_BLOCKS",
     "DataOperations",
     "RegistrationOperations",
     "ProofOperations",
@@ -335,6 +384,15 @@ __all__ = [
     "store_data_message",
     "store_file_manifest_message",
     "delete_file_manifest_message",
+    "register_subgrove_message",
+    "register_subgrove_unsigned_bincode",
+    "normalize_register_subgrove",
+    "grant_subgrove_key_message",
+    "rotate_subgrove_key_message",
+    "revoke_subgrove_key_message",
+    "unregister_storage_node_message",
+    "register_did_message",
+    "did_document_body",
     # Errors
     "WillowError",
     "NetworkError",
@@ -345,6 +403,8 @@ __all__ = [
     "NotFoundError",
     "PermissionDeniedError",
     "ProofVerificationError",
+    "ProofHeightOutOfRangeError",
+    "UnsupportedError",
     "LightClientError",
     "CryptoError",
     "InvalidSignatureError",
@@ -355,7 +415,12 @@ __all__ = [
     "ConsensusError",
     "TransactionError",
     "InsufficientFundsError",
+    "NonceWindowFullError",
+    "NotLandedError",
+    "ResponseTooLargeError",
+    "ResponseEncodingError",
     "parse_api_error",
+    "InterruptedWrite",
     # Enums
     "SignatureAlgorithm",
     "ValidatorStatus",
@@ -447,6 +512,7 @@ __all__ = [
     "extract_root_hash_from_proof",
     "verify_proof_quick",
     "verify_proof_with_expected_root",
+    "subgrove_data_path",
     # Completeness Verification
     "Log",
     "CompletenessError",

@@ -1,16 +1,18 @@
 """
 Willow Python SDK - Light Client Example
 
-Demonstrates the CometBFT light client for trustless verification:
+Demonstrates the CometBFT light client's interface:
 1. Configure the light client with the fluent builder
-2. Initialize with trust-on-first-use (or a hardcoded trusted header)
-3. Fetch and verify the current verified root hash (app_hash)
-4. Verify subsequent headers against the trusted set
+2. Initialize with trust-on-first-use (or a header you pass it)
+3. Read the root hash (app_hash) of the latest header it holds
+4. Check a later header (which never verifies)
 
-Security model:
-- Verifies 2/3+ validator signatures
-- Validates header chain (heights, times)
-- Extracts app_hash for GroveDB proof verification
+What it checks: trust-on-first-use holds the first header its endpoints
+serve, as served. The SDK does not verify CometBFT commit signatures, so
+`verify_header` never reports a header verified, and a proof checked against
+a header it holds is only as trustworthy as that header's source.
+`WillowClient.data.get` doesn't use it: it reads headers from the
+`consensus_rpc_url` you configure, and trusts that node.
 
 Prerequisites:
 - pip install willow-sdk
@@ -66,18 +68,17 @@ async def main():
             await light_client.initialize_with_trust_on_first_use()
             print("Light client initialized")
 
-            # 3. Get the verified root hash (app_hash)
-            print("\n3. Verified Root Hash")
+            # 3. The root hash (app_hash) of the latest header it holds
+            print("\n3. Root Hash (trusted on first use, not verified)")
             print("-" * 40)
             try:
                 root_hash = await light_client.get_verified_root_hash()
-                print(f"Verified app_hash: {root_hash[:32]}...")
-                print("Use this to verify GroveDB proofs.")
+                print(f"Latest held app_hash: {root_hash[:32]}...")
             except WillowError as e:
                 print(f"Error: {e}")
 
-            # 4. Fetch a header by height and verify it
-            print("\n4. Fetch and Verify a Header")
+            # 4. Fetch a header by height and check it: it never verifies
+            print("\n4. Fetch and Check a Header")
             print("-" * 40)
             try:
                 header = await light_client.get_header_by_height(1)
@@ -87,7 +88,10 @@ async def main():
                     if not result.success and result.error:
                         print(f"Reason: {result.error}")
                 else:
-                    print("No header at height 1 yet.")
+                    # get_header_by_height returns only a header the client
+                    # holds; one it fetches is never verified, so it isn't.
+                    print("The client holds no header at height 1: it trusted only the "
+                          "latest on first use, and a fetched header is never verified.")
             except Exception as e:
                 print(f"Error: {e}")
     except Exception as e:
@@ -104,12 +108,8 @@ async def main():
     print(f"Created config with {len(direct_config.validator_endpoints)} endpoint(s)")
 
     print("\n" + "=" * 50)
-    print("Light Client Security Model:")
-    print("1. Fetch block headers from validator RPC endpoints")
-    print("2. Verify 2/3+ validator signatures")
-    print("3. Validate header chain (heights, times)")
-    print("4. Extract app_hash (GroveDB root)")
-    print("5. Verify proofs against trusted app_hash")
+    print("A trusted header's app_hash is the root of the state after the block")
+    print("before it: a proof of the state after block H checks against header H+1.")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,9 @@ pip install -e .
 
 ## Transaction submission
 
-Transactions submitted through this SDK go to the API server's `POST /tx/submit`. `api_url` is therefore **required** whenever you submit a tx; `consensus_rpc_url` is only used for read-only RPC queries (status, block, validators) and may be omitted or pointed at the same endpoint.
+Every write is a signed transaction submitted to the API server's `POST /tx/submit`: DID registration, subgrove registration, data and file writes, and key grants. The API accepts no writes over its REST routes. `api_url` is therefore **required** whenever you submit a tx.
+
+`consensus_rpc_url` is the CometBFT RPC (typically port 26657) of a node you run or trust: the client's trusted source of chain state. `data.get` checks proofs against the headers it serves and raises without it; the client reads from it which nonces are used (see Nonces), and the completeness checks read their on-chain anchors from it and raise `CompletenessError` without it. Point it at a consensus node, not at the API: a header the API serves can't verify what the API serves.
 
 ## Quick Start
 
@@ -28,42 +30,79 @@ import asyncio
 from willow import WillowClient, generate_did
 
 async def main():
-    async with WillowClient("http://localhost:3031") as client:
+    # consensus_rpc_url: the CometBFT RPC of a node you run or trust (not the
+    # API). Verified reads check their proofs against its headers.
+    async with WillowClient(
+        "http://localhost:3031", consensus_rpc_url="http://localhost:26657"
+    ) as client:
         # 1. Generate a DID
         did_info = generate_did()
 
-        # 2. Register the DID
-        await client.register_did(did_info["did_document"])
-
-        # 3. Set identity for per-request signing (synchronous, no server session).
+        # 2. Set it as the client's identity (synchronous, no server session).
+        #    It signs every transaction and authenticated request.
         client.set_identity(
             did_info["did"],
             did_info["private_key"],
             did_info["public_key_id"],
         )
 
-        # 4. Store data
-        await client.data.store("users", {
+        # 3. Register the DID (pre-fund it first with the DID and subgrove
+        #    registration fees plus the subgrove's funding: see
+        #    client.token.get_fee_schedule()), and wait for it to land: the
+        #    DID can sign nothing before it does
+        registration = await client.register_did(did_info["did_document"])
+        await client.wait_until_landed(registration)
+
+        # 4. Register a subgrove the DID owns and writes to, funded from the
+        #    DID's balance, and wait for it to land before storing into it
+        subgrove = await client.registration.register_subgrove({
+            "dataset_id": "users",
+            "name": "Users",
+            "schema": {
+                "version": 1,
+                "fields": {"name": {"type": "string"}, "email": {"type": "string"}},
+            },
+            "owner_did": did_info["did"],
+            "writers": [did_info["did"]],
+            "readers": [],
+            # 1 WILL (10**18 base units): StoreData is paid from the
+            # subgrove's balance
+            "initial_funding": 10**18,
+        })
+        await client.wait_until_landed(subgrove)
+
+        # 5. Store data: one StoreData transaction per key, its fee paid from
+        #    the subgrove's balance. A write returns once CheckTx accepts it;
+        #    wait for it to land before reading it
+        writes = await client.data.store("users", {
             "user_1": {"name": "Alice", "email": "alice@example.com"},
         })
+        await client.wait_until_landed(writes)
 
-        # 5. Retrieve with automatic proof verification
+        # 6. Read it back, verified against its proof and the consensus
+        #    node's header (see What the SDK verifies);
+        #    ProofVerificationError when it can't be verified
         user = await client.data.get("users", "user_1")
         print(f"User: {user}")
+
+        # Or read the value the API serves, without verification
+        user = await client.data.get_unverified("users", "user_1")
 
 asyncio.run(main())
 ```
 
+StoreData is paid from the subgrove's balance, not the writer's: register a subgrove with `initial_funding`, or CheckTx refuses every write into it ("Insufficient subgrove balance").
+
 ## Features
 
 - **DID Management** — generate and register DIDs (Ed25519 and secp256k1)
-- **Secure by default** — automatic cryptographic proof verification on data reads
-- **Full CRUD** — store, get, update, delete with per-request signing
+- **Verified reads** — `data.get` returns a value only when its proof binds it to its key under the root of a header from the consensus node you configure, and raises otherwise (see What the SDK verifies)
+- **Signed transactions** — DID and subgrove registration, data and file writes, and key grants, each signed over every field and its nonce
 - **Rich query support** — filters, search, sort, pagination
 - **Token operations** — balances, fees, token info
 - **Validator operations** — list validators, staking info
-- **GraphQL indexing** — query blockchain data with proofs
-- **File storage** — upload, download, list, delete with chunk-level Merkle verification
+- **GraphQL indexing** — query indexed blockchain data (answers are returned unverified)
+- **File storage** — upload, download, list, delete; downloads are checked against the manifest's chunk Merkle root and content hash
 - **File encryption** — XChaCha20-Poly1305 (`pynacl`) for private files
 - **Type safety** — Pydantic models throughout
 - **Async/await** — modern async Python over `httpx`
@@ -78,8 +117,14 @@ from willow import WillowClient, RetryConfig
 # Simple
 client = WillowClient("http://localhost:3031")
 
-# With custom timeout
+# With custom timeout: the seconds each step of a request (connecting,
+# sending, each read of the answer) may take; a request as a whole ends
+# within three times that, however slowly the server answers
 client = WillowClient(api_url="http://localhost:3031", timeout=60.0)
+
+# With the CometBFT RPC of a node you trust: data.get verifies against its
+# headers, and the client reads which nonces are used from it (see Nonces)
+client = WillowClient("http://localhost:3031", consensus_rpc_url="http://localhost:26657")
 
 # Builder pattern
 client = (
@@ -94,6 +139,8 @@ async with WillowClient("http://localhost:3031") as client:
     ...
 ```
 
+With `api_key`, the client sends `X-API-Key` on its HTTP requests to the API and to an `indexer_url` you configure. Requests to indexers found through discovery (`GET /indexers`, whose operators choose their hosts) and to the consensus RPC carry no key.
+
 ### DID Operations
 
 ```python
@@ -105,10 +152,18 @@ did_info = generate_did()
 # secp256k1 (Ethereum-compatible)
 did_info = generate_did(algorithm="secp256k1")
 
-await client.register_did(did_info["did_document"])
-
 # did_info keys: did, private_key, public_key, public_key_id, did_document, algorithm
 ```
+
+A DID's id is derived from its key, so it can be funded before it exists: transfer the registration fee to `did_info["did"]` from a funded account, then register it. `register_did` submits a RegisterDid transaction signed with the document's own key, the identity set on the client (or pass `private_key_hex`):
+
+```python
+client.set_identity(did_info["did"], did_info["private_key"], did_info["public_key_id"], did_info["algorithm"])
+result = await client.register_did(did_info["did_document"])  # {"tx_hash", "code", "log", "did", "nonce"}
+await client.wait_until_landed(result)
+```
+
+It signs in the algorithm the document's key type names (`Ed25519VerificationKey2018` or `EcdsaSecp256k1VerificationKey2019`) unless you pass `algorithm`. It returns once CheckTx accepts the transaction; the DID can sign other transactions and requests only after it lands.
 
 ### Authentication (per-request signing)
 
@@ -131,7 +186,7 @@ client.clear_identity()
 
 ### Request signing
 
-With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, and `POST /query`, `/sql`, and `/graphql`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, or a place on a priced subgrove's free-reader list. The client signs its other authenticated requests (writes, key-grant reads) in the older form described below.
+With an identity set, the client signs these reads it sends to the API with a one-time nonce over the whole request: `GET /data/{subgrove}/{key}`, `GET /proof/{subgrove}/{key}`, `POST /query`, `/sql`, and `/graphql`, and the key-grant reads `GET /key-grants/{subgrove}/{did}`, `GET /key-grants/{subgrove}`, and `GET /proof/key-grant/{subgrove}/{did}`. Only this form carries the DID's read rights, on the routes that check them: a Reader permission on a subgrove, a place on a priced subgrove's free-reader list, or, for key grants, being the grantee or the subgrove's owner. Writes are transactions, signed as described under Transaction signing.
 
 The headers are `X-DID`, `X-Public-Key-ID`, `X-Signature`, `X-Timestamp`, and `X-Nonce`. The signature is over eight lines:
 
@@ -160,9 +215,11 @@ headers = sign_request_with_nonce(did, private_key_hex, public_key_id, "POST", "
 
 `sign_request(did, private_key_hex, public_key_id, method, path, algorithm)` makes the older `{METHOD}:{PATH}:{TIMESTAMP}` form, over the path without its query string. It proves the DID but carries none of its read rights, and it can be replayed with any body until the timestamp expires.
 
-### Transaction signing (data and file writes)
+### Transaction signing
 
-StoreData, StoreFileManifest, and DeleteFileManifest transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` (the byte 0x0A) with no trailing newline, and the message is UTF-8. Text fields go in verbatim, with no escaping or normalization:
+StoreData, StoreFileManifest, DeleteFileManifest, RegisterSubgrove, GrantSubgroveKey, RotateSubgroveKey, and UnregisterStorageNode transactions are signed over a message that binds the transaction's nonce and every field it writes. The kind is the first line; each other line is `Label: value`; lines are joined by `\n` (the byte 0x0A) with no trailing newline, and the message is UTF-8. Text fields go in verbatim, with no escaping or normalization; numbers are unsigned decimal; hex is lowercase.
+
+Data and file writes:
 
 ```
 StoreData
@@ -204,12 +261,122 @@ Nonce: <nonce>
 - A subgrove ID, key, owner DID, filename, or content type holding a line break (the byte 0x0A) is refused with `ValueError` before anything is signed.
 - Ed25519 signs the message's UTF-8 bytes; secp256k1 signs their Keccak-256.
 
-`ConsensusClient` and `client.files` build these messages; `store_data_message`, `store_file_manifest_message`, and `delete_file_manifest_message` return the exact text for a transaction you sign yourself.
+Registrations, key grants, and storage-node removals:
 
-### Data Operations (Secure by Default)
+```
+RegisterSubgrove
+Subgrove: <subgrove_id>
+Owner: <owner_did>
+Config: <hex SHA-256 of the transaction's bincode with an empty signature>
+Nonce: <nonce>
+```
+
+```
+GrantSubgroveKey
+Subgrove: <subgrove_id>
+Sender: <sender_did>
+Grantee: <grantee_did>
+GranteeKey: <grantee_public_key_id>
+KeyEpoch: <key_epoch>
+EphemeralKey: <hex ephemeral_public_key>
+EncryptedKey: <hex encrypted_key>
+GrantedBy: <granted_by>
+GrantedAt: <granted_at>
+Nonce: <nonce>
+```
+
+```
+RotateSubgroveKey
+Subgrove: <subgrove_id>
+Sender: <sender_did>
+NewEpoch: <new_epoch>
+Grants: <number of new_grants>
+<each grant's seven lines, Grantee to GrantedAt, in order>
+Nonce: <nonce>
+```
+
+```
+UnregisterStorageNode
+Node: <node_did>
+Nonce: <nonce>
+```
+
+- RegisterSubgrove's `Config` binds every field of the transaction. It is the SHA-256 of `bincode::serialize` (bincode 1.x default: fixed-width little-endian integers, u64 lengths, u32 enum variant indexes, a one-byte `Option` tag) of the `RegisterSubgroveTx` struct with `signature` empty and every other field as the node decodes the JSON sent. The SDK sends every field explicitly (`normalize_register_subgrove`) and hashes exactly that (`register_subgrove_unsigned_bincode`), for every mode: DataStorage, FileStorage, and BlockchainIndexing.
+- RevokeSubgroveKey signs `RevokeSubgroveKey:<subgrove_id>:<revokee_did>:<sender_did>:<nonce>`, which binds every field it carries.
+- RegisterDid signs the node's compact JSON of the DID document, its fields in the node's order (`id`, `public_keys`, `authentication`, `service`, `created`, `updated`, `proof`; each key `id`, `type`, `controller`, `public_key_base58`, `public_key_hex`), always under nonce 1. The SDK sends that same document (`did_document_body`).
+- A subgrove ID, owner, sender, grantee, grantee key ID, granter, or node DID holding a line break is refused with `ValueError` before anything is signed.
+- The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, whose admins, writers, or free readers aren't DIDs, or whose schema declares indexes ("Schema indexes are not supported"), and refuses one in its block whose schema doesn't parse as its `SchemaDefinition` (`version` a u32, `fields` mapping each name to `"string"`, `"number"`, `"boolean"`, `"array"`, `"object"`, or `"bytes"`, `required_fields` a list of names). It refuses a private DataStorage registration whose `initial_owner_key_grant` isn't key epoch 0 to the owner. `register_subgrove_message`, and every flow that signs a registration, refuses all of these with `ValueError` before anything is signed.
+- A DID, where the node checks one, is `did:willow:` then 1 or more ASCII letters, digits, `-`, or `_`, at most 128 bytes.
+- The node refuses a key grant or rotation whose subgrove ID is empty or holds `:`, whose grantee isn't a DID, whose ephemeral public key isn't 32 bytes, or whose encrypted key isn't 1 to 128 bytes, a rotation without 1 to 1000 grants, and a revoke whose subgrove ID is empty or holds `:` or whose revokee or sender isn't a DID. `grant_subgrove_key_message`, `rotate_subgrove_key_message`, `revoke_subgrove_key_message`, and `client.privacy` refuse these with `ValueError` before anything is signed.
+
+`ConsensusClient`, `client.files`, `client.data`, `client.registration`, `client.privacy`, and `client.register_did` build these messages. `store_data_message`, `store_file_manifest_message`, `delete_file_manifest_message`, `register_subgrove_message`, `grant_subgrove_key_message`, `rotate_subgrove_key_message`, `revoke_subgrove_key_message`, `unregister_storage_node_message`, and `register_did_message` return the exact text for a transaction you sign yourself.
+
+### Nonces
+
+The node accepts a transaction under a nonce among the 24 above the account's nonce (its base, `GET /account/{did}/nonce`) that is not used yet. The base advances only over used nonces with no gap below them, so a nonce taken and never used blocks the window until something uses it. `WillowClient` and `ConsensusClient` hand out nonces per signing DID:
+
+- Each write takes the lowest nonce in the window the client hasn't handed out, so writes sent before earlier ones land, or concurrently, each get their own.
+- A write CheckTx refuses gives its nonce back, leaving no gap, unless the refusal is the node's own refusal of that nonce: held by a pending transaction, already used, at or below the base, or spent. A write is never signed again under another nonce on its own: the API could have passed it on and then answered that its nonce is used, and a second copy under another nonce would run it twice (see "When a write fails").
+- A nonce handed out more than 120 s ago whose write hasn't landed is free again.
+- While all 24 are taken, the next write waits for earlier ones to land, and raises `NonceWindowFullError` if none does within 60 s. `client.data.store` with more than 24 keys sends the rest as earlier ones land.
+- RegisterDid always signs nonce 1.
+
+Nonces are tracked per client object, so send one identity's writes through one client. `client.files` takes nonces from the client for a write signed by the client's identity: leave `signing["nonce"]` out, or give one that is free. For any other signer, `signing["nonce"]` is required. Every file write needs `signing`: the node refuses an unsigned transaction.
+
+#### When a write fails
+
+An error a write raises after choosing its nonce carries the `did` and `nonce` it was signed under. What to do depends on whether the transaction may have reached the node:
+
+- It never left: a `NetworkError` whose `transaction` is `None` (the connection was refused, or timed out before connecting). Its nonce is free again. Call the write again.
+- It may have reached the node: a `NetworkError` after connecting (a read timeout, a dropped connection), or a `TransactionError` for a gateway error with no CheckTx answer. Its `transaction` holds the signed transaction as sent, and its nonce stays taken. Send the same transaction again under the same nonce with `await client.resubmit(error)`: whichever copy lands first spends the nonce and the other is refused, so the write runs at most once. Don't call the write again: under another nonce, both copies could run.
+- `resubmit` returns `{tx_hash, code, log, did, nonce}` once CheckTx accepts the copy. If the node already holds an identical copy ("tx already exists in cache"), that counts as accepted, with `code` 0 and no `tx_hash`. A `TransactionError` saying the nonce is already used, or at or below the base, means some transaction used that nonce: the earlier copy, or another write signed by the same DID elsewhere. Read what the write wrote to learn whether it took effect. Any other refusal of a copy carries `transaction` again and keeps the nonce taken: CheckTx checks some rules (a subgrove that exists, a funded balance) before the nonce, so it can follow from the earlier copy having landed, or the earlier copy may still be pending.
+- If `resubmit` comes after the 120 s lease and this client has handed the nonce to another write since, whether or not that write has landed, it raises `WillowError` and sends nothing. Read what the write wrote to learn whether it took effect.
+- A write cancelled (`asyncio.CancelledError`) after it was signed, while its submission was in flight, may have reached the node too. Its nonce stays taken, and the client keeps it in `client.interrupted_writes`, keyed by `(did, nonce)`, as an `InterruptedWrite` with its `did`, `nonce`, and `transaction`; the `CancelledError` carries the same `did`, `nonce`, and `transaction` when it reaches you. `await client.resubmit(write)` sends it again under its nonce and removes it from `interrupted_writes`; pop an entry you handle otherwise.
+- A write CheckTx refused because its nonce is already used, at or below the base, or spent raises a `TransactionError` that says so, carries `transaction`, and leaves the nonce counted as used. Some transaction used that nonce: this one, if it reached the node before the answer (an API could pass it on and answer that its nonce is used), or another write signed by the same DID elsewhere. Read what the write wrote before calling it again; the client does not sign it again under another nonce. `resubmit` sends the same bytes under the same nonce, so it can't run the write twice. With `consensus_rpc_url` set, the client skips the nonces the node reports used, so an honest node answers this only for a write sent elsewhere since.
+- A write CheckTx refused for anything else (a `TransactionError` whose `transaction` is `None`) never ran: fix what the refusal says and call the write again.
 
 ```python
-# Store a whole dict of key -> value pairs in a subgrove
+from willow import NetworkError, TransactionError
+
+try:
+    result = await client.data.store_item("my-data", "k", {"v": 1})
+except (NetworkError, TransactionError) as error:
+    if error.transaction is None:
+        raise  # never left, or refused at CheckTx: fix it and call the write again
+    result = await client.resubmit(error)
+await client.wait_until_landed(result)
+
+# Writes cancelled while in flight, e.g. by a timeout around them
+for write in list(client.interrupted_writes.values()):
+    await client.wait_until_landed(await client.resubmit(write))
+```
+
+`ConsensusClient` does the same: a `willow.consensus.ConsensusError` (exported at the top level as `ConsensusModuleError`; it is neither `willow.ConsensusError` nor a `WillowError`) raised after every retry failed in transit, or a `BroadcastResult` for a gateway error, carries `did`, `nonce`, and, when it may have reached the node, `transaction`; `await consensus.resubmit(error_or_result)` returns a `BroadcastResult`. Its own retries send the same bytes and renew the nonce's lease before each attempt. A write refused because its nonce is already used, at or below the base, or spent raises that `ConsensusError`, carrying `transaction` (the write may have landed under it; read what it wrote before sending it again), instead of signing the write again under another nonce; a RegisterDid refused so returns the refused `BroadcastResult`. A retry refused for anything else returns a `BroadcastResult` carrying `transaction`. It keeps cancelled writes in `consensus.interrupted_writes` too. Each `BroadcastResult` carries `http_status`, `did`, and `nonce`.
+
+#### Waiting for writes to land
+
+Writes in flight may land in any order, and a write returns once CheckTx accepts it. Wait for a write to land before sending one that depends on it: anything the DID signs after its registration, a store into a subgrove just registered, a delete of a file being uploaded. Each write returns `{tx_hash, code, log, did, nonce}`; `wait_until_landed` takes those, lists of them, or the error of a write that may have reached the node (its `transaction` set), and returns once each nonce is used. The error of a write that was never sent or that CheckTx refused (`transaction` is `None`) raises `ValueError`: that write never ran, and a later write may take its nonce. A refusal that its nonce is used carries `transaction`, and waiting on it returns once the nonce is used, by this write or another (at once without `consensus_rpc_url`). A write that never lands keeps its nonce for 120 s; if this client hands the nonce to another write after that, waiting on the first raises (`ValueError` before the wait, `NotLandedError` during it) instead of reporting the other write's landing as its own:
+
+```python
+registration = await client.register_did(did_info["did_document"])
+await client.wait_until_landed(registration)
+
+results = await client.data.store("my-data", {"a": {"n": 1}, "b": {"n": 2}})
+await client.wait_until_landed(results, timeout=60.0)  # NotLandedError after 60 s
+
+removal = await client.files.delete("files", "old.png", signing)
+await client.wait_until_landed(removal)
+```
+
+A nonce counts as used once it is at or below the account's base, or the node reports it used above the base. With `consensus_rpc_url`, the client reads which nonces above the base are used (the ABCI query `/store/account_nonce_state/{did}`, sent without the API key), so each write counts as landed when its own nonce is used, and only that node's answer counts: while its query fails, no write counts as landed, and a base the API answers is taken for handing out nonces only up to the last base the consensus RPC answered. Without it, the client reads only the base from the API (and the nonces CheckTx has refused as already used). The base advances only over used nonces with no gap below them, so a write counts as landed only once every lower nonce of its DID is used too. A nonce no transaction uses (one given back after CheckTx refused its write, or one whose write failed in transit and was never resubmitted) then holds back every write above it, until the client hands that nonce to a later write and that write lands.
+
+A write refused in its block uses its nonce too, so read what it wrote to know it took effect. A RegisterDid uses its nonce only when it succeeds.
+
+### Data Operations
+
+```python
+# Store a whole dict of key -> JSON object in a subgrove: one StoreData
+# transaction per key, each under its own nonce
 await client.data.store("subgrove_id", {
     "key1": {"field": "value"},
     "key2": {"field": "value2"},
@@ -218,30 +385,36 @@ await client.data.store("subgrove_id", {
 # Store a single item
 await client.data.store_item("subgrove_id", "key1", {"field": "value"})
 
-# Get a single item (auto-verifies the proof)
-item = await client.data.get("subgrove_id", "key1")
-
-# Get without verification (faster; trust assumed)
-item = await client.data.get_unverified("subgrove_id", "key1")
-
-# Update
-await client.data.update("subgrove_id", "key1", {"field": "updated"})
-
-# Delete
-await client.data.delete("subgrove_id", "key1")
-
 # Batch store
 await client.data.batch_store("subgrove_id", [
-    {"key": "key1", "value": {"field": "value1"}},
-    {"key": "key2", "value": {"field": "value2"}},
+    {"key": "key3", "value": {"field": "value3"}},
+    {"key": "key4", "value": {"field": "value4"}},
 ])
+
+# Get a single item (once the write that stored it has landed: see Waiting
+# for writes to land), verified against its proof and the headers of the
+# consensus node you configure (consensus_rpc_url); ProofVerificationError
+# when it can't be verified, ProofHeightOutOfRangeError when it's stale
+item = await client.data.get("subgrove_id", "key1")
+
+# The same, with the header it is proven at
+verified = await client.data.get_verified("subgrove_id", "key1")
+print(verified.value, verified.height, verified.root_hash)
+
+# Get the value the API serves, without verification
+item = await client.data.get_unverified("subgrove_id", "key1")
 ```
+
+- Each value must be a JSON object (a `dict`); anything else raises `TypeError` before anything is sent. The data sent is `json.dumps(value, separators=(",", ":"), sort_keys=True, allow_nan=False)`: a value holding NaN or an infinity raises `ValueError` before anything is sent.
+- Each store returns the `{tx_hash, code, log, did, nonce}` of its transaction, or raises `TransactionError` if CheckTx refuses it. StoreData writes a new key: it is refused in its block for a key that already exists.
+- `store` and `batch_store` send their keys one at a time. If one fails (`TransactionError`, `NonceWindowFullError`, or `NetworkError`) or is cancelled (`asyncio.CancelledError`), the error's `submitted` holds the results of the keys sent before it and `failed_key` the key that failed; the keys after it are not sent.
+- `client.data.update` and `client.data.delete` raise `WillowError`: the node changes and deletes data only through UpdateData and DeleteData transactions, which this SDK does not build.
 
 ### Query Operations
 
 ```python
-# Filtered query (proof verified)
-result = await client.data.query("subgrove_id", {
+# Filtered query (the documents are not verified)
+result = await client.data.query_unverified("subgrove_id", {
     "filters": {
         "status": {"$eq": "active"},
         "age": {"$gte": 18},
@@ -253,37 +426,37 @@ result = await client.data.query("subgrove_id", {
 
 # Filter operators: $eq, $ne, $gt, $gte, $lt, $lte, $in, $contains
 
-# Skip verification
-result = await client.data.query_unverified("subgrove_id", {"filters": {}})
-
 for doc in result.documents:
     print(doc)
 print(f"Total: {result.total}")
 ```
 
+`client.data.query` raises `UnsupportedError` without sending anything: the API returns a query's documents without their keys, with a proof of the subgrove's whole data, so nothing binds a document to a proven value or to the query's filter, order, offset, and limit. `query_unverified` returns the documents unverified; `get` verifies a single key. `client.data.query_historical_verified` and `HistoricalQueryResponse.verify_proof` are deprecated and raise `UnsupportedError`: the node serves no historical proof.
+
 ### Registration Operations
 
+`register_subgrove` submits a DataStorage RegisterSubgrove transaction signed by the identity set on the client, which must be `owner_did`. The schema is sent as the node's schema JSON: each field's type, with required fields listed in `required_fields`. `dataset_path` has no on-chain counterpart and is not sent. `initial_funding`, in base units (10\*\*18 per WILL), moves from the owner's balance to the subgrove's when the registration lands, on top of the registration fee. StoreData is paid from the subgrove's balance, not the writer's: a subgrove registered without funding takes no write until it is funded. A key the request doesn't send, or a `signature`, `public_key_id`, or `nonce` (the client sets them), raises `ValueError`. `ConsensusClient.register_subgrove` takes every mode and field of the transaction.
+
+The node refuses a DataStorage or FileStorage registration whose subgrove ID is not 1 to 64 ASCII letters, digits, `-`, or `_` starting with a letter or digit, or whose schema declares indexes ("Schema indexes are not supported"). Both raise `ValueError` before anything is signed, as does a field flagged `indexed` or a schema `version` outside u32. `ConsensusClient.register_subgrove` takes the schema as JSON text, which for a data or file subgrove must parse as the node's `SchemaDefinition`: `{"version": 1, "fields": {"name": "string"}, "indexes": [], "required_fields": ["name"]}`, each field's type one of `string`, `number`, `boolean`, `array`, `object`, or `bytes`.
+
 ```python
-await client.registration.register_subgrove({
+registration = await client.registration.register_subgrove({
     "dataset_id": "my-data",
     "name": "My Data",
-    "dataset_path": ["collections"],
     "schema": {
         "version": 1,
         "fields": {
-            "name": {"type": "string", "indexed": True},
-            "email": {"type": "string", "indexed": True},
-            "age": {"type": "number", "indexed": True},
+            "name": {"type": "string", "required": True},
+            "email": {"type": "string"},
+            "age": {"type": "number"},
         },
-        "indexes": [
-            {"name": "by_name", "fields": ["name"], "unique": False, "type": "hash"},
-            {"name": "by_age", "fields": ["age"], "unique": False, "type": "range"},
-        ],
     },
     "owner_did": did,
     "writers": [did],
     "readers": [],
+    "initial_funding": 10**18,  # 1 WILL, from the owner's balance: pays for its writes
 })
+await client.wait_until_landed(registration)  # before storing into it
 
 subgroves = await client.registration.list_subgroves()
 subgrove = await client.registration.get_subgrove("my-data")
@@ -361,18 +534,55 @@ print(f"Verification rate: {stats.verification_rate:.1%}")
 ### Proof Operations
 
 ```python
-proof_data = await client.proof.get("subgrove_id", "key1")
-proof_hex = proof_data["proof"]
-value = proof_data["value"]
+from willow import ProofVerifier, subgrove_data_path
 
-from willow import ProofVerifier
+value = await client.data.get_unverified("subgrove_id", "key1")
+proof_data = await client.proof.get("subgrove_id", "key1")  # proof, path, key, height
 
-result = ProofVerifier.verify_item_proof(proof_hex, "key1", value)
-if result.error:
+result = ProofVerifier.verify_item_proof(
+    proof_data["proof"], "key1", value, subgrove_data_path("subgrove_id")
+)
+if not result.valid:
     print(f"Verification failed: {result.error}")
 else:
-    print(f"Root hash: {result.root_hash}")
+    # The proof binds the value to key1 under this root. It proves the value
+    # once the root is the app_hash of a header you trust at height + 1.
+    print(f"Root hash: {result.root_hash}, header height: {proof_data['height'] + 1}")
 ```
+
+### What the SDK verifies
+
+- **`client.data.get(subgrove, key)`** reads the value and its proof from the API. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the node at `consensus_rpc_url` serves it (`GET /header?height=`). It waits up to the client's `timeout` for a header the chain hasn't produced yet. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified. Without `consensus_rpc_url` it raises `ProofVerificationError` ("no trusted header source: set consensus_rpc_url") before sending anything. `get_unverified` reads a value without verification.
+- **Freshness.** The API chooses the height it proves at, so a replayed old proof would otherwise verify as current. The node proves at the last block with transactions, and a block without transactions leaves the app hash as it was, so the header after that block and every header up to the next block with transactions carry the proof's root. A header `G` carries the state after block `G - 1`, and is recent when `latest - (G - 1)` is at most `max_proof_lag_blocks` (a `WillowClient` argument, 20 by default), where `latest` is the latest height the consensus RPC reports. `data.get` accepts a proof when a recent header carries its root, and raises `ProofHeightOutOfRangeError` (a `ProofVerificationError`, so you can tell a stale answer from a forged one) when none does, or when the proof names a height more than `max_proof_lag_blocks` ahead of the latest. `data.get_verified(subgrove, key)` returns a `VerifiedValue` with the `value`, the `height` of the newest header found that carries the root (the latest header when it still does; the value is as of that header's state, the state after block `height - 1`), and the `root_hash`.
+- **What `data.get` trusts.** A verified read checks the proof against the app hash reported by the consensus node you configure (`consensus_rpc_url`); the SDK trusts that node and does not verify validator signatures, validator sets, or header hashes. `data.get` trusts the node at `consensus_rpc_url` for its headers, the way a client trusts its own node, and trusts nothing the API serves: a forged value or proof from the API fails, but a dishonest consensus node can make a forged value verify. Run that node yourself, or use one you trust.
+- **The light client** (`LightClient`, `HeaderVerifier`) verifies no header: `verify_header` never succeeds, so it holds only the header it trusts on first use (the first one its endpoints serve, as served), one you pass to `initialize_with_trusted_header`, or ones you import. A proof checked against a header it holds is only as trustworthy as that header's source. `data.get` doesn't use it.
+- **`ProofVerifier.verify_item_proof(proof, key, value, path)`** (and the async `GroveDBProofVerifier.verify_item_proof` and `verify_item_proof`, which you await) is valid only when the proof descends to `path`, proves an Item at exactly `key` there whose bytes the root commits to, and the Item's payload is `value` (the same bytes, or the same JSON value). A proof of another key or path, or a lone root hash, is invalid. It returns the root the proof computes: compare it with a root you trust, or pin one with `ProofVerificationOptions(expected_root_hash=...)`.
+- **`ProofVerifier.verify_query_proof(proof, documents, path)`** (synchronous, returning a `ProofVerificationResult`; or `await verify_query_proof(proof, documents, path)`, which returns the root hash and raises `ProofVerificationError`) proves that each document is an Item stored at `path` under the returned root. It does not prove a query's filter, order, offset, or limit, or that no document was left out. `QueryResponse.verify_proof` raises `UnsupportedError`.
+- **`verify_proof_quick`, `extract_root_hash_from_proof`, and `verify_proof_with_expected_root`** compute or compare the root a proof reproduces, and bind no key or value. The light client's `ProofVerifier.verify_inclusion_proof` takes the key's path and binds the key and value; `verify_absence_proof` raises `UnsupportedError`.
+- **Not verified.** These return what the API (or an indexer) serves, and the SDK verifies none of it: `data.get_unverified`, `data.query_unverified`, `data.query_historical`, `indexing.graphql_query` and `indexing.sql_query` (with or without `include_proof`), `proof.get` (the API's proof, unchecked until you verify it), the key-grant reads, token, validator, and subgrove reads, and `get_root_hash_local`.
+- **Proof decoding.** The SDK decodes grovedb's encoding (bincode's standard configuration, big-endian, variable-length integers) and reproduces grovedb's root for a proof. A malformed proof (one cut short, say, or nesting layers more than 64 deep) is refused as an invalid one is. A proof must descend to the path it is checked at, with no lower layer off it. A Hash node's hash stands for its whole subtree, so a proof that attaches a node under one is refused. An Item is returned only from the KV node grovedb proves it in, whose hash is computed from its bytes. Bytes carried beside a value hash are not returned, since only the hash enters the root, and bytes that don't hash to it are refused. Nor, by default, is an element of exactly 63 bytes (an Item with a 60-byte payload and no flags): its value hash has the form of a subtree's or a reference's, so a proof can't tell them apart. `data.get` does return one, since the chain stores nothing but Items in a subgrove's data tree; `willow.grovedb.verify_item_at_path(..., only_items_at_path=True)` (in `willow.grovedb`, not the top-level package) does the same for another path that holds only Items. The lower-level `verify_grovedb_proof` and `verify_proof_against_root` return each proven entry's bytes as `value` only when the root binds them: not for a 63-byte element, nor for a reference's referenced value of exactly 95 bytes (with the reference's value hash carried beside them, their hash has the form of a subtree root's, so a proof can carry a subtree as such a reference). Those bytes are in the entry's `ambiguous_value` instead.
+
+### File Storage
+
+`client.files.upload` submits the file's manifest as a StoreFileManifest transaction, then posts its chunks to the storage node. The storage node takes a chunk only once the manifest is on chain, so `upload` posts a chunk again every `poll_interval` seconds (1 by default) while the node refuses it for want of the manifest (HTTP 403, or 503 while it can't reach consensus), for up to `landing_timeout` seconds (60 by default). A chunk the node never takes raises `WillowError`, with `submission` the manifest's `{tx_hash, code, log, did, nonce}` and `chunk_index` the chunk. A manifest refused in its block never lands, so its chunks are never taken. `upload` returns once the storage node has taken every chunk, so the manifest is on chain; the returned manifest carries the same `submission`. `delete` and `unregister_storage_node` return their transaction's `{tx_hash, code, log, did, nonce}`. `download` checks the chunks against the manifest's chunk Merkle root and content hash.
+
+### Private Subgroves (key grants)
+
+```python
+from willow import EncryptedKeyGrant
+
+# Each is a transaction sent by the identity set on the client
+await client.privacy.grant_subgrove_key("private-sg", grant)        # an EncryptedKeyGrant
+await client.privacy.rotate_subgrove_key("private-sg", 2, new_grants)
+await client.privacy.revoke_subgrove_key("private-sg", "did:willow:...")
+
+# Nonce-signed reads: the grantee or the subgrove's owner
+mine = await client.privacy.get_my_key_grant("private-sg")          # an EncryptedKeyGrant
+grantees = await client.privacy.list_key_grantees("private-sg")    # grantee DIDs (owner only)
+proof = await client.privacy.get_key_grant_proof("private-sg", did) # {proof, subgrove_id, grantee_did}
+```
+
+An `EncryptedKeyGrant`'s `ephemeral_public_key` and `encrypted_key` take bytes, hex, or a list of ints. The key-grant reads return what the API serves, unverified; `get_key_grant_proof` returns the API's proof without checking it.
 
 ### Health Check
 
@@ -384,15 +594,16 @@ for name, component in health.components.items():
     print(f"  {name}: {component.status}")
 ```
 
-### Root Hash Verification
+`GET /health` answers the health object itself (not an envelope), with `timestamp` as RFC 3339 text and its components under `checks`.
+
+### Root Hash
 
 ```python
-verified_root = await client.get_root_hash()        # Consensus-verified
-local_root = await client.get_root_hash_local()     # Node's local view
-
-if verified_root == local_root:
-    print("Node is in sync with consensus")
+trusted_root = await client.get_root_hash()       # The app_hash of the latest header consensus_rpc_url serves
+local_root = await client.get_root_hash_local()   # The node's own GroveDB root, as the API reports it
 ```
+
+`get_root_hash` trusts the node at `consensus_rpc_url` (see What the SDK verifies) and raises `ProofVerificationError` without it.
 
 ## Error Handling
 
@@ -401,9 +612,8 @@ from willow import (
     WillowError,
     NetworkError,
     NotAuthenticatedError,
-    ValidationError,
-    NotFoundError,
     PermissionDeniedError,
+    ProofHeightOutOfRangeError,
     ProofVerificationError,
     RateLimitError,
 )
@@ -412,10 +622,10 @@ try:
     data = await client.data.get("subgrove", "key")
 except NotAuthenticatedError:
     print("Call client.set_identity(...) first")
-except NotFoundError as e:
-    print(f"Data not found: {e}")
+except ProofHeightOutOfRangeError as e:
+    print(f"Stale: {e}")  # the proof's state is not the chain's current one
 except ProofVerificationError as e:
-    print(f"Proof verification failed: {e}")
+    print(f"Not verified: {e}")  # client.data.get_unverified reads it unverified
 except PermissionDeniedError as e:
     print(f"Access denied: {e}")
 except RateLimitError as e:
@@ -423,8 +633,12 @@ except RateLimitError as e:
 except NetworkError as e:
     print(f"Network error: {e}")
 except WillowError as e:
+    # Includes a key that isn't there: the node answers "Data not found" as
+    # a refused read (HTTP 200, success false), not a 404
     print(f"Willow error: {e}")
 ```
+
+The SDK reads each answer under a cap on its size and stops reading past it, raising `ResponseTooLargeError` (a `NetworkError`), so an API, indexer, or node that streams an endless answer can't exhaust memory. The caps: 4 MiB for answers of fixed shape or short lists (an account's nonce, balances, the health check, a `/tx/submit` answer, one subgrove, validator, or indexer, file manifests, headers, and ABCI queries); 2 MiB for a file chunk, the storage node's body limit; 12 MiB for a `/data` value or a `/proof`, and CometBFT's `/tx`; 32 MiB for CometBFT's `/block`; and 64 MiB for the lists the API doesn't page (subgroves, validators, indexers, a subgrove's key grants, a DID's permissions) and answers whose size the request sets (`/query`, GraphQL, SQL, historical queries, a block's matched logs, and Ethereum state). Every request asks for the answer unencoded (`Accept-Encoding: identity`), and an answer in any other `Content-Encoding` is refused before it is decoded, raising `ResponseEncodingError` (a `NetworkError`): decoding takes memory a cap doesn't bound, as a few hundred bytes of nested gzip decode to gigabytes. So a cap bounds the bytes of one answer as sent, not the memory parsing them takes: parsing the JSON can take a multiple of the cap. A write whose answer is over its cap or encoded may have reached the node, so its error carries `transaction` for `resubmit`, as any `NetworkError` after connecting does.
 
 ## Type Definitions
 
@@ -464,22 +678,31 @@ isort src/willow --check
 
 ## CLI Usage
 
-```bash
-# Generate a new DID and save it locally
-willow-cli did generate --save
+Every command builds its client with `--consensus-rpc-url` (or `WILLOW_CONSENSUS_RPC_URL`) when given: `data get` verifies against its headers, and writes read from it which nonces are used.
 
-# Or save an existing identity (DID + private key + public key ID)
-willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id>
+```bash
+# Generate a new DID and save it locally, with its algorithm
+willow-cli did generate --save
+willow-cli did generate --algorithm secp256k1 --save
+
+# Or save an existing identity (DID + private key + public key ID + algorithm,
+# Ed25519 unless given; a login that keeps the saved DID and key keeps its algorithm)
+willow-cli auth login --did <did> --key <private-key-hex> --key-id <key-id> --algorithm secp256k1
 
 # Status / clear
 willow-cli auth status
 willow-cli auth logout
 
-# Data ops (reads the saved identity and signs per-request)
+# Register a DID document, signed with the saved identity (pre-fund the DID first)
+willow-cli did register did.json
+
+# Data ops (reads the saved identity; stores are signed StoreData transactions)
 willow-cli data store my-subgrove items.json
-willow-cli data get my-subgrove user1
-willow-cli data update my-subgrove user1 updated.json
-willow-cli data delete my-subgrove user1
+
+# Verified: checked against the headers of a consensus node you trust, or
+# exits with the reason (--consensus-rpc-url, or WILLOW_CONSENSUS_RPC_URL)
+willow-cli --consensus-rpc-url http://localhost:26657 data get my-subgrove user1
+willow-cli data get my-subgrove user1 --unverified  # the value the API serves
 
 # Proof
 willow-cli proof get my-subgrove user1

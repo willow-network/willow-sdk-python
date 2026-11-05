@@ -2,6 +2,8 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+from _mock_http import MockHttp
 from willow import WillowClient
 from willow.types import (
     TokenInfo,
@@ -31,8 +33,8 @@ def client():
 
 @pytest.fixture
 def mock_http_client():
-    """Create mock HTTP client."""
-    return AsyncMock()
+    """An httpx client whose answers come from its ``request`` mock."""
+    return MockHttp()
 
 
 @pytest.fixture

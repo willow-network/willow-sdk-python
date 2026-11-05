@@ -4,9 +4,10 @@ Willow Python SDK - Quickstart Example
 Demonstrates the core workflow:
 1. Generate a DID (identity)
 2. Connect to a Willow node
-3. Register the DID
-4. Set the identity for per-request signing
-5. Store and query data with automatic proof verification
+3. Set the identity for per-request signing
+4. Register the DID
+5. Register a subgrove, funded from the DID's balance
+6. Store data, and query it (query results are not verified)
 
 Prerequisites:
 - pip install willow-sdk
@@ -32,13 +33,8 @@ async def main():
 
     # 2. Connect to Willow node
     async with WillowClient("http://localhost:3031") as client:
-        # 3. Register the DID on the network
-        print("\nRegistering DID...")
-        await client.register_did(did_info["did_document"])
-        print("  DID registered successfully")
-
-        # 4. Set identity for per-request signing (synchronous).
-        # Each authenticated call signs with this key; there is no server session.
+        # 3. Set identity (synchronous). It signs each transaction and each
+        # authenticated request; there is no server session.
         print("\nSetting identity...")
         client.set_identity(
             did_info["did"],
@@ -47,29 +43,56 @@ async def main():
         )
         print("  Identity set")
 
-        # 5. Store data (automatic proof verification on reads).
-        # In a real app you'd register the subgrove/dataset first; see
-        # app_registration.py.
-        print("\nStoring data...")
-        try:
-            await client.data.store(
-                SUBGROVE,
-                {"name": "Alice", "email": "alice@example.com"},
-            )
-            print("  Data stored successfully")
-        except WillowError as e:
-            print(f"  Note: {e} (subgrove may need registration first)")
+        # 4. Register the DID on the network (a RegisterDid transaction).
+        # The DID must first be pre-funded with the DID and subgrove
+        # registration fees plus the subgrove's funding (see
+        # client.token.get_fee_schedule()). A write returns once CheckTx
+        # accepts it: wait for the registration to land before the DID signs
+        # anything else.
+        print("\nRegistering DID...")
+        registration = await client.register_did(did_info["did_document"])
+        await client.wait_until_landed(registration)
+        print("  DID registered")
 
-        # 6. Query data (automatic proof verification).
+        # 5. Register a subgrove the DID owns and writes to. StoreData is
+        # paid from the subgrove's balance, so fund it at registration (1
+        # WILL, 10**18 base units, from the DID's balance), and wait for it
+        # to land before storing into it.
+        print("\nRegistering subgrove...")
+        subgrove = await client.registration.register_subgrove({
+            "dataset_id": SUBGROVE,
+            "name": "Quickstart Users",
+            "schema": {
+                "version": 1,
+                "fields": {"name": {"type": "string"}, "email": {"type": "string"}},
+            },
+            "owner_did": did_info["did"],
+            "writers": [did_info["did"]],
+            "readers": [],
+            "initial_funding": 10**18,
+        })
+        await client.wait_until_landed(subgrove)
+        print(f"  Subgrove {SUBGROVE} registered")
+
+        # 6. Store data, and wait for it to land before reading it.
+        print("\nStoring data...")
+        writes = await client.data.store(
+            SUBGROVE,
+            {"user_1": {"name": "Alice", "email": "alice@example.com"}},
+        )
+        await client.wait_until_landed(writes)
+        print("  Data stored")
+
+        # 7. Query data. Query results are not verified; client.data.get
+        #    verifies a single key, given a consensus_rpc_url to check
+        #    against (see data_operations.py).
         print("\nQuerying data...")
         try:
-            result = await client.data.query(
+            result = await client.data.query_unverified(
                 SUBGROVE,
                 {"filters": {"name": "Alice"}},
             )
-            print(f"  Found {len(result.documents)} documents")
-            if result.proof:
-                print("  Proof verified automatically")
+            print(f"  Found {len(result.documents)} documents (unverified)")
         except WillowError as e:
             print(f"  Note: {e}")
 

@@ -1,8 +1,11 @@
 """
 Bincode Decoder for GroveDB Proofs
 
-Decodes the outer bincode-encoded GroveDBProof structure.
-Uses big-endian encoding as specified in GroveDB.
+Decodes the outer bincode-encoded GroveDBProof structure, and the element
+bytes inside it. grovedb encodes both with bincode 2's standard
+configuration, big-endian: every integer wider than a byte (an enum's
+variant, a length, a sum or count) is a variable-length integer (see
+``read_varint``), and a ``u8`` or ``bool`` is one byte.
 """
 
 from typing import Dict
@@ -83,9 +86,40 @@ class BincodeReader:
             raise GroveDBVerificationError(f"Invalid boolean value: {value}")
         return value == 1
 
+    def read_option_tag(self) -> bool:
+        """Read an Option's tag: whether a value follows."""
+        tag = self.read_u8()
+        if tag not in (0, 1):
+            raise GroveDBVerificationError(f"Invalid Option tag: {tag}")
+        return tag == 1
+
+    def read_varint(self, max_bytes: int = 8) -> int:
+        """Read a bincode variable-length unsigned integer.
+
+        A first byte below 251 is the value; 251, 252, 253, and 254 are
+        followed by the value as a big-endian u16, u32, u64, and u128.
+        ``max_bytes`` is the width of the integer read (4 for a u32 such as
+        an enum's variant, 8 for a u64 or a length, 16 for a u128): a wider
+        form is refused, as bincode refuses it.
+        """
+        first = self.read_u8()
+        if first < 251:
+            return first
+        width = {251: 2, 252: 4, 253: 8, 254: 16}.get(first)
+        if width is None or width > max_bytes:
+            raise GroveDBVerificationError(
+                f"Invalid varint discriminant {first} for a {max_bytes * 8}-bit integer"
+            )
+        return int.from_bytes(self.read_raw_bytes(width), byteorder="big")
+
+    def read_signed_varint(self, max_bytes: int = 8) -> int:
+        """Read a bincode variable-length signed integer (zigzag-encoded)."""
+        n = self.read_varint(max_bytes)
+        return (n >> 1) if n % 2 == 0 else -((n >> 1) + 1)
+
     def read_bytes(self) -> bytes:
-        """Read a length-prefixed byte array (bincode uses u64 for lengths)."""
-        length = self.read_u64()
+        """Read a length-prefixed byte array (the length a varint)."""
+        length = self.read_varint()
         if length > 1_000_000_000:
             raise GroveDBVerificationError(f"Suspiciously large byte array length: {length}")
         if self.offset + length > len(self.data):
@@ -103,21 +137,35 @@ class BincodeReader:
         return result
 
 
-def decode_layer_proof(reader: BincodeReader) -> LayerProof:
+# A proof nests one layer below another per path segment. A deeper proof
+# is refused, not recursed into.
+MAX_LAYER_DEPTH = 64
+
+
+def decode_layer_proof(reader: BincodeReader, depth: int = 0) -> LayerProof:
     """
     Decode a LayerProof from bincode.
 
     Args:
         reader: BincodeReader instance
+        depth: How many layers this one is nested below the root layer
 
     Returns:
         Decoded LayerProof
+
+    Raises:
+        GroveDBVerificationError: The bytes are not a LayerProof, or nest
+            layers more than ``MAX_LAYER_DEPTH`` deep.
     """
+    if depth > MAX_LAYER_DEPTH:
+        raise GroveDBVerificationError(
+            f"Proof layers nest deeper than {MAX_LAYER_DEPTH} levels"
+        )
     # merk_proof: Vec<u8>
     merk_proof = reader.read_bytes()
 
     # lower_layers: BTreeMap<Key, LayerProof>
-    map_length = reader.read_u64()
+    map_length = reader.read_varint()
     lower_layers: Dict[str, LayerProof] = {}
 
     for _ in range(map_length):
@@ -126,7 +174,7 @@ def decode_layer_proof(reader: BincodeReader) -> LayerProof:
         key_hex = bytes_to_hex(key)
 
         # Value is LayerProof (recursive)
-        layer_proof = decode_layer_proof(reader)
+        layer_proof = decode_layer_proof(reader, depth + 1)
 
         lower_layers[key_hex] = layer_proof
 
@@ -179,14 +227,17 @@ def decode_grovedb_proof(data: bytes) -> GroveDBProof:
     """
     reader = BincodeReader(data)
 
-    # Read enum variant (u32 for bincode enums)
-    variant = reader.read_u32()
+    # The enum's variant: a u32 varint
+    variant = reader.read_varint(max_bytes=4)
 
     if variant != 0:
         raise GroveDBVerificationError(f"Unknown GroveDBProof version: {variant}")
 
     proof = decode_grovedb_proof_v0(reader)
 
-    # Trailing bytes are acceptable - proof may include extra data for future compatibility
+    if reader.has_more():
+        raise GroveDBVerificationError(
+            f"Trailing bytes after the proof: {len(data) - reader.position()} at offset {reader.position()}"
+        )
 
     return GroveDBProof(version=0, proof=proof)
