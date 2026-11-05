@@ -3,17 +3,16 @@ Willow Python SDK - Light Client Example
 
 Demonstrates the CometBFT light client's interface:
 1. Configure the light client with the fluent builder
-2. Initialize with trust-on-first-use (or a hardcoded trusted header)
-3. Read the root hash (app_hash) of its latest trusted header
-4. Check later headers against the trusted set
+2. Initialize with trust-on-first-use (or a header you pass it)
+3. Read the root hash (app_hash) of the latest header it holds
+4. Check a later header (which never verifies)
 
-What it checks: trust-on-first-use trusts the first header it fetches as
-it is. A later header must follow a trusted one (height, time, validator
-set hash) and carry commit signatures over the trust threshold, but the
-signatures are checked over sign bytes that are not CometBFT's canonical
-vote encoding, and headers are read from `/block`, whose answer carries no
-commit for its own block or validator set: so against a CometBFT node it
-fetches no header, and verifies none.
+What it checks: trust-on-first-use holds the first header its endpoints
+serve, as served. The SDK does not verify CometBFT commit signatures, so
+`verify_header` never reports a header verified, and a proof checked against
+a header it holds is only as trustworthy as that header's source.
+`WillowClient.data.get` doesn't use it: it reads headers from the
+`consensus_rpc_url` you configure, and trusts that node.
 
 Prerequisites:
 - pip install willow-sdk
@@ -69,17 +68,17 @@ async def main():
             await light_client.initialize_with_trust_on_first_use()
             print("Light client initialized")
 
-            # 3. The latest trusted header's root hash (app_hash)
-            print("\n3. Trusted Root Hash")
+            # 3. The root hash (app_hash) of the latest header it holds
+            print("\n3. Root Hash (trusted on first use, not verified)")
             print("-" * 40)
             try:
                 root_hash = await light_client.get_verified_root_hash()
-                print(f"Latest trusted app_hash: {root_hash[:32]}...")
+                print(f"Latest held app_hash: {root_hash[:32]}...")
             except WillowError as e:
                 print(f"Error: {e}")
 
-            # 4. Fetch a header by height and verify it
-            print("\n4. Fetch and Verify a Header")
+            # 4. Fetch a header by height and check it: it never verifies
+            print("\n4. Fetch and Check a Header")
             print("-" * 40)
             try:
                 header = await light_client.get_header_by_height(1)

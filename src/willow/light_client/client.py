@@ -1,8 +1,9 @@
 """
 Light Client Implementation
 
-Provides cryptographically secure data verification through CometBFT light client protocol
-and GroveDB proof verification.
+Holds CometBFT headers it is given or trusts on first use, and checks GroveDB
+proofs against their app hashes. It does not verify commit signatures, so it
+verifies no header it fetches: see ``LightClient``.
 """
 
 import asyncio
@@ -24,9 +25,17 @@ logger = logging.getLogger(__name__)
 
 class LightClient:
     """
-    CometBFT light client with GroveDB proof verification.
-    
-    Provides cryptographically secure data verification without running a full node.
+    Holds CometBFT headers and checks GroveDB proofs against them.
+
+    Trust model: the SDK does not verify CometBFT commit signatures (see
+    ``HeaderVerifier``). The headers this client holds are the one it trusts
+    on first use (the first header its endpoints serve, as served), one you
+    pass to ``initialize_with_trusted_header``, or ones you import; it
+    verifies no other header, so ``verify_header`` and ``sync_to_latest``
+    fail, and ``get_header_by_height`` returns only a header it holds. A
+    proof checked against a held header is only as trustworthy as the
+    source of that header. ``WillowClient.data.get`` does not use it: it
+    reads headers from the consensus RPC you configure.
     """
     
     def __init__(self, config: LightClientConfig):
@@ -82,10 +91,10 @@ class LightClient:
         """
         Initialize the light client using trust-on-first-use.
 
-        Fetches the latest block from validators and trusts it as the
-        initial state. Every subsequent block is verified against that
-        initial trusted state. Pin a known-good checkpoint header instead
-        for production deployments.
+        Fetches the latest header from the endpoints and holds it as
+        trusted, as served: nothing verifies it, so it is only as
+        trustworthy as the endpoints. No later header is verified against
+        it (see ``LightClient``).
         """
         # Ensure session is started
         if not self._session:
@@ -106,10 +115,12 @@ class LightClient:
 
     async def get_verified_root_hash(self) -> str:
         """
-        Get the verified root hash (app_hash) from the latest trusted header.
+        The app_hash of the latest header this client holds (trusting on
+        first use when it holds none).
 
-        This is the cryptographically verified root hash that proofs should be
-        verified against for trustless data verification.
+        Despite the name, nothing verifies that header: it is the first one
+        the endpoints served, one passed to
+        ``initialize_with_trusted_header``, or an imported one.
 
         Returns:
             The app_hash as a hex string
@@ -128,17 +139,16 @@ class LightClient:
         """
         Initialize the light client with a trusted header.
 
-        This is the bootstrap process that establishes initial trust.
-        The trusted header should be obtained through a secure channel.
+        The header is held as trusted after its basic fields are checked
+        (chain ID, height, time); its signatures are not verified. Obtain it
+        through a channel you trust.
         """
-        # Validate the trusted header
-        result = self.header_verifier.verify_header(
-            trusted_header,
-            max_clock_drift_secs=self.config.max_clock_drift_secs
-        )
-        
-        if not result.success:
-            raise LightClientError(f"Trusted header validation failed: {result.error}")
+        try:
+            self.header_verifier._validate_basic_header(
+                trusted_header.header, self.config.max_clock_drift_secs
+            )
+        except LightClientError as e:
+            raise LightClientError(f"Trusted header validation failed: {e}") from e
         
         # Store as trusted
         height = trusted_header.header.height
@@ -150,13 +160,15 @@ class LightClient:
     
     async def verify_header(self, header: LightBlock) -> VerificationResult:
         """
-        Verify a header against the current trusted state.
-        
+        Check a header against the held headers (see
+        ``HeaderVerifier.verify_header``). It never succeeds: the SDK does
+        not verify commit signatures.
+
         Args:
-            header: Header to verify
-            
+            header: Header to check
+
         Returns:
-            VerificationResult indicating success/failure
+            A failed VerificationResult, whose ``error`` says why
         """
         if not self._trusted_headers:
             return VerificationResult(
@@ -189,7 +201,9 @@ class LightClient:
         return result
     
     async def get_header_by_height(self, height: int) -> Optional[LightBlock]:
-        """Get a verified header by height."""
+        """The header this client holds at ``height``, or ``None``. A header
+        it doesn't hold is fetched and checked, but no fetched header is
+        verified (see ``verify_header``), so that returns ``None``."""
         # Check if we already have it
         if height in self._trusted_headers:
             return self._trusted_headers[height]
@@ -213,7 +227,9 @@ class LightClient:
         return None
     
     async def sync_to_latest(self) -> VerificationResult:
-        """Synchronize to the latest blockchain state."""
+        """Fetch and check the headers up to the latest. Fails at the first
+        header it doesn't hold: no fetched header is verified (see
+        ``verify_header``)."""
         try:
             # Get latest height from validators
             latest_height = await self._get_latest_height_from_validators()

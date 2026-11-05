@@ -1,18 +1,15 @@
 """
 Light Client Verification
 
-Header verification using CometBFT light client protocol and GroveDB proof verification.
+Basic header checks (no commit signature verification: see
+``HeaderVerifier``) and GroveDB proof verification against a root.
 """
 
-import time
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.exceptions import InvalidSignature
 
 from .types import (
-    LightBlock, Header, Commit, ValidatorSet, Validator, CommitSig,
+    LightBlock, Header, ValidatorSet,
     TrustThreshold, VerificationResult, LightClientError, QueryProof
 )
 from ..errors import UnsupportedError
@@ -21,14 +18,28 @@ from ..grovedb import (
 )
 
 
+#: Why ``HeaderVerifier.verify_header`` reports no header verified.
+HEADER_NOT_VERIFIED = (
+    "Header not verified: this SDK does not verify CometBFT commit signatures, the "
+    "validator set against validators_hash, or the header against the commit's block ID"
+)
+
+
 class HeaderVerifier:
-    """Verifies block headers using CometBFT light client protocol."""
-    
+    """Checks a header's basic fields. It does not verify headers.
+
+    Verifying a CometBFT header takes the header's hash checked against the
+    commit's block ID, the validator set checked against ``validators_hash``
+    (and against the trusted one), and each commit signature checked over
+    CometBFT's canonical vote encoding. The SDK does none of these, so
+    ``verify_header`` never reports a header verified.
+    """
+
     def __init__(self, chain_id: str, trust_threshold: TrustThreshold):
         """Initialize header verifier with chain parameters."""
         self.chain_id = chain_id
         self.trust_threshold = trust_threshold
-    
+
     def verify_header(
         self,
         untrusted_header: LightBlock,
@@ -37,57 +48,39 @@ class HeaderVerifier:
         max_clock_drift_secs: int = 10
     ) -> VerificationResult:
         """
-        Verify an untrusted header against a trusted state.
-        
+        Check an untrusted header's basic fields (chain ID, height, time, and
+        its height, time, and validator set hash after ``trusted_header``).
+
+        It never succeeds: the SDK does not verify commit signatures, so
+        nothing here shows that the chain's validators signed the header. A
+        header that passes these checks fails with ``HEADER_NOT_VERIFIED``.
+
         Args:
-            untrusted_header: Header to verify
-            trusted_header: Previously verified trusted header (for sequential verification)
-            trusted_validators: Trusted validator set (for skipping verification)
+            untrusted_header: Header to check
+            trusted_header: A trusted header it follows
+            trusted_validators: Unused
             max_clock_drift_secs: Maximum allowed clock drift
-            
+
         Returns:
-            VerificationResult indicating success/failure and details
+            A failed VerificationResult, whose ``error`` says why
         """
         try:
-            # Basic header validation
             self._validate_basic_header(untrusted_header.header, max_clock_drift_secs)
-            
-            # If we have a trusted header, verify sequential progression
             if trusted_header is not None:
                 self._verify_sequential(untrusted_header, trusted_header)
-            
-            # Verify commit signatures
-            voting_power_result = self._verify_commit_signatures(
-                untrusted_header.commit,
-                untrusted_header.validators
-            )
-            
-            # Check trust threshold
-            if voting_power_result.trust_level < self.trust_threshold.fraction:
-                return VerificationResult(
-                    success=False,
-                    error=f"Insufficient voting power: {voting_power_result.trust_level:.3f} < {self.trust_threshold.fraction:.3f}",
-                    height=untrusted_header.header.height,
-                    trust_level=voting_power_result.trust_level
-                )
-            
-            # Additional validation for validator set transitions
-            if trusted_header is not None:
                 self._verify_validator_set_transition(untrusted_header, trusted_header)
-            
-            return VerificationResult(
-                success=True,
-                height=untrusted_header.header.height,
-                trust_level=voting_power_result.trust_level
-            )
-            
         except Exception as e:
             return VerificationResult(
                 success=False,
                 error=str(e),
                 height=getattr(untrusted_header.header, 'height', None)
             )
-    
+        return VerificationResult(
+            success=False,
+            error=HEADER_NOT_VERIFIED,
+            height=untrusted_header.header.height,
+        )
+
     def _validate_basic_header(self, header: Header, max_clock_drift_secs: int):
         """Validate basic header properties."""
         # Chain ID must match
@@ -115,77 +108,7 @@ class HeaderVerifier:
         # Time must progress forward
         if untrusted.header.time <= trusted.header.time:
             raise LightClientError("Time did not progress forward")
-    
-    def _verify_commit_signatures(
-        self, 
-        commit: Commit, 
-        validators: ValidatorSet
-    ) -> VerificationResult:
-        """Verify commit signatures and calculate voting power."""
-        if len(commit.signatures) != len(validators.validators):
-            raise LightClientError("Signature count mismatch with validator count")
-        
-        total_voting_power = 0
-        valid_voting_power = 0
-        
-        for i, (sig, validator) in enumerate(zip(commit.signatures, validators.validators)):
-            total_voting_power += validator.voting_power
-            
-            # Skip nil signatures (validator didn't sign)
-            if sig.signature is None or sig.block_id_flag != 2:  # 2 = BLOCK_ID_FLAG_COMMIT
-                continue
-            
-            # Verify signature
-            try:
-                if self._verify_signature(commit, validator, sig):
-                    valid_voting_power += validator.voting_power
-            except Exception:
-                # Invalid signature - skip this validator
-                continue
-        
-        trust_level = valid_voting_power / total_voting_power if total_voting_power > 0 else 0.0
-        
-        return VerificationResult(
-            success=True,
-            trust_level=trust_level
-        )
-    
-    def _verify_signature(self, commit: Commit, validator: Validator, sig: CommitSig) -> bool:
-        """Verify individual validator signature."""
-        # Create sign bytes (canonical representation)
-        sign_bytes = self._create_commit_sign_bytes(commit, sig)
-        
-        try:
-            # Parse Ed25519 public key and verify signature
-            public_key = ed25519.Ed25519PublicKey.from_public_bytes(validator.pub_key)
-            public_key.verify(sig.signature, sign_bytes)
-            return True
-        except (InvalidSignature, ValueError):
-            return False
-    
-    def _create_commit_sign_bytes(self, commit: Commit, sig: CommitSig) -> bytes:
-        """Create canonical sign bytes for commit signature verification."""
-        # This is a simplified version - in production, you'd need the full
-        # CometBFT canonical JSON encoding
-        sign_doc = {
-            "type": "tendermint/SocketPV/SignVote",
-            "height": str(commit.height),
-            "round": str(commit.round),
-            "step": 3,  # PrecommitType
-            "block_id": {
-                "hash": commit.block_id.hash.hex().upper(),
-                "part_set_header": {
-                    "total": commit.block_id.part_set_header_total,
-                    "hash": commit.block_id.part_set_header_hash.hex().upper()
-                }
-            },
-            "timestamp": sig.timestamp.isoformat() + "Z"
-        }
-        
-        import json
-        canonical_json = json.dumps(sign_doc, separators=(',', ':'), sort_keys=True)
-        return canonical_json.encode('utf-8')
-    
+
     def _verify_validator_set_transition(self, untrusted: LightBlock, trusted: LightBlock):
         """Verify validator set hash transition."""
         # The untrusted header's validators_hash should match the trusted next_validators_hash

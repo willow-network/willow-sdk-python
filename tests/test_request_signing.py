@@ -344,6 +344,7 @@ async def test_client_nonce_signs_graphql_and_both_reads_of_a_verified_get():
         return _ok(request)
 
     client = _client(handler)
+    client.consensus_rpc_url = "http://rpc.test:26657"
     with pytest.raises(ProofVerificationError, match="no proof"):
         await client.data.get("sg", "k")
     await client.indexing.graphql_query("sg", "{ items { id } }", source=QuerySource.VALIDATOR)

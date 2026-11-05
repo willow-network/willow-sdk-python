@@ -401,6 +401,7 @@ class TestDataOperations:
 
         mock_http_client.request = AsyncMock(return_value=mock_response)
         client._http = mock_http_client
+        client.consensus_rpc_url = "http://localhost:26657"
 
         with pytest.raises(ProofVerificationError, match="no proof"):
             await client.data.get("dataset1", "key1")

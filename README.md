@@ -19,7 +19,9 @@ pip install -e .
 
 ## Transaction submission
 
-Every write is a signed transaction submitted to the API server's `POST /tx/submit`: DID registration, subgrove registration, data and file writes, and key grants. The API accepts no writes over its REST routes. `api_url` is therefore **required** whenever you submit a tx; `consensus_rpc_url` is only used for read-only RPC queries (status, block, validators) and may be omitted or pointed at the same endpoint.
+Every write is a signed transaction submitted to the API server's `POST /tx/submit`: DID registration, subgrove registration, data and file writes, and key grants. The API accepts no writes over its REST routes. `api_url` is therefore **required** whenever you submit a tx.
+
+`consensus_rpc_url` is the CometBFT RPC (typically port 26657) of a node you run or trust: the client's trusted source of chain state. `data.get` checks proofs against the headers it serves and raises without it; the client reads from it which nonces are used (see Nonces), and the completeness checks read their on-chain anchors from it. Point it at a consensus node, not at the API: a header the API serves can't verify what the API serves.
 
 ## Quick Start
 
@@ -61,7 +63,7 @@ asyncio.run(main())
 ## Features
 
 - **DID Management** — generate and register DIDs (Ed25519 and secp256k1)
-- **Verified reads** — `data.get` returns a value only when its proof binds it to its key under a trusted root, and raises otherwise (see What the SDK verifies)
+- **Verified reads** — `data.get` returns a value only when its proof binds it to its key under the root of a header from the consensus node you configure, and raises otherwise (see What the SDK verifies)
 - **Signed transactions** — DID and subgrove registration, data and file writes, and key grants, each signed over every field and its nonce
 - **Rich query support** — filters, search, sort, pagination
 - **Token operations** — balances, fees, token info
@@ -85,7 +87,8 @@ client = WillowClient("http://localhost:3031")
 # With custom timeout
 client = WillowClient(api_url="http://localhost:3031", timeout=60.0)
 
-# With a validator's CometBFT RPC, to read which nonces are used (see Nonces)
+# With the CometBFT RPC of a node you trust: data.get verifies against its
+# headers, and the client reads which nonces are used from it (see Nonces)
 client = WillowClient("http://localhost:3031", consensus_rpc_url="http://localhost:26657")
 
 # Builder pattern
@@ -506,8 +509,9 @@ else:
 
 ### What the SDK verifies
 
-- **`client.data.get(subgrove, key)`** reads the value and its proof. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the client's light client gives it. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified. The API chooses the proof's height, so a verified value is the value as of that block, which may be older than the chain's latest; the SDK doesn't bound how old.
-- **The light client** trusts the first header it fetches (trust on first use) from the validator RPC derived from the API URL, as it is. It reads headers from `/block`, whose answer carries no commit for its own block or validator set, and checks commit signatures over sign bytes that are not CometBFT's canonical vote encoding. Against a CometBFT node it therefore fetches no header, `get_root_hash` raises, and `data.get` raises `ProofVerificationError`. `get_unverified` reads a value without verification.
+- **`client.data.get(subgrove, key)`** reads the value and its proof from the API. It returns a value only when the proof proves an Item at exactly `key` under the subgrove's data path (`subgrove_data_path(subgrove)`, which is `["subgroves", subgrove, "data"]`), that Item's JSON is the value served (compared by JSON type and value), and the root the proof computes is the `app_hash` of the CometBFT header at the proof's `height + 1` (the state after block `height`), as the node at `consensus_rpc_url` serves it (`GET /header?height=`). It waits up to the client's `timeout` for a header the chain hasn't produced yet. A missing proof, height, or header, or anything that differs, raises `ProofVerificationError`; nothing is returned unverified. Without `consensus_rpc_url` it raises `ProofVerificationError` ("no trusted header source: set consensus_rpc_url") before sending anything. `get_unverified` reads a value without verification.
+- **What `data.get` trusts.** The SDK does not verify CometBFT commit signatures, validator sets, or header hashes. `data.get` trusts the node at `consensus_rpc_url` for its headers, the way a client trusts its own node, and trusts nothing the API serves: a forged value or proof from the API fails, but a dishonest consensus node can make a forged value verify. Run that node yourself, or use one you trust.
+- **The light client** (`LightClient`, `HeaderVerifier`) verifies no header: `verify_header` never succeeds, so it holds only the header it trusts on first use (the first one its endpoints serve, as served), one you pass to `initialize_with_trusted_header`, or ones you import. A proof checked against a header it holds is only as trustworthy as that header's source. `data.get` doesn't use it.
 - **`ProofVerifier.verify_item_proof(proof, key, value, path)`** (and the async `GroveDBProofVerifier.verify_item_proof` and `verify_item_proof`, which you await) is valid only when the proof descends to `path`, proves an Item at exactly `key` there whose bytes the root commits to, and the Item's payload is `value` (the same bytes, or the same JSON value). A proof of another key or path, or a lone root hash, is invalid. It returns the root the proof computes: compare it with a root you trust, or pin one with `ProofVerificationOptions(expected_root_hash=...)`.
 - **`ProofVerifier.verify_query_proof(proof, documents, path)`** (synchronous, returning a `ProofVerificationResult`; or `await verify_query_proof(proof, documents, path)`, which returns the root hash and raises `ProofVerificationError`) proves that each document is an Item stored at `path` under the returned root. It does not prove a query's filter, order, offset, or limit, or that no document was left out. `QueryResponse.verify_proof` raises `UnsupportedError`.
 - **`verify_proof_quick`, `extract_root_hash_from_proof`, and `verify_proof_with_expected_root`** compute or compare the root a proof reproduces, and bind no key or value. The light client's `ProofVerifier.verify_inclusion_proof` takes the key's path and binds the key and value; `verify_absence_proof` raises `UnsupportedError`.
@@ -548,11 +552,11 @@ for name, component in health.components.items():
 ### Root Hash
 
 ```python
-trusted_root = await client.get_root_hash()       # The light client's latest trusted header's app_hash
+trusted_root = await client.get_root_hash()       # The app_hash of the latest header consensus_rpc_url serves
 local_root = await client.get_root_hash_local()   # The node's own GroveDB root, as the API reports it
 ```
 
-See What the SDK verifies for what the light client checks.
+`get_root_hash` trusts the node at `consensus_rpc_url` (see What the SDK verifies) and raises `ProofVerificationError` without it.
 
 ## Error Handling
 

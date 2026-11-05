@@ -9,7 +9,7 @@ import base64
 import httpx
 import json as _json
 import logging
-from typing import Callable, Optional, Dict, Any, FrozenSet, List, Set, Tuple, TYPE_CHECKING
+from typing import Callable, Optional, Dict, Any, FrozenSet, List, Set, Tuple
 
 from .types import (
     DidDocument,
@@ -89,9 +89,6 @@ from .privacy import PrivacyOperations
 from .files import FileOperations, _tx_submit_result
 from .completeness import CompletenessOperations
 
-if TYPE_CHECKING:
-    from .light_client import LightClient
-
 logger = logging.getLogger(__name__)
 
 
@@ -116,6 +113,12 @@ def _envelope_data(body: Any) -> Any:
             raise WillowError(body.get("error") or "Request failed")
         return body.get("data")
     return body
+
+
+_NO_TRUSTED_HEADER_SOURCE = (
+    "no trusted header source: set consensus_rpc_url to the CometBFT RPC of a node you trust "
+    "(data.get_unverified reads the value without verification)"
+)
 
 
 def _unsupported_data_write(operation: str, route: str, kind: str) -> WillowError:
@@ -269,18 +272,24 @@ class DataOperations:
 
     @require_auth
     async def get(self, subgrove_id: str, key: str) -> Dict[str, Any]:
-        """Get a single item from a subgrove, verified against its proof and a
-        trusted root.
+        """Get a single item from a subgrove, verified against its proof and
+        the header the configured consensus RPC serves.
 
         Reads the value (``GET /data/{subgrove_id}/{key}``) and its proof
-        (``GET /proof/{subgrove_id}/{key}``). The proof must prove an Item at
-        ``key`` under the subgrove's data path
+        (``GET /proof/{subgrove_id}/{key}``) from the API. The proof must
+        prove an Item at ``key`` under the subgrove's data path
         (``subgrove_data_path(subgrove_id)``) whose JSON is the value served,
         and the root it computes must be the ``app_hash`` of the CometBFT
         header at the proof's ``height + 1`` (the state after block
-        ``height``), as the light client gives it (see ``get_root_hash``).
-        It returns the value the proof proves. Anything missing or
-        different raises; nothing is returned unverified.
+        ``height``), as the node at ``consensus_rpc_url`` serves it
+        (``GET /header?height=``). It returns the value the proof proves.
+        Anything missing or different raises; nothing is returned
+        unverified.
+
+        Trust: the SDK does not verify CometBFT commit signatures. It trusts
+        the consensus node you configure for its headers, as a client trusts
+        its own node, and nothing the API serves. Point ``consensus_rpc_url``
+        at a node you run or trust, not at the API.
 
         Args:
 
@@ -291,12 +300,15 @@ class DataOperations:
             The data item
 
         Raises:
-            ProofVerificationError: The API returned no proof or no height,
-                the proof doesn't prove the value served at ``key`` under the
-                subgrove's data, the light client has no header for the
-                proof's state, or the roots differ.
+            ProofVerificationError: No ``consensus_rpc_url`` is configured
+                (raised before any request), the API returned no proof or no
+                height, the proof doesn't prove the value served at ``key``
+                under the subgrove's data, the consensus RPC serves no header
+                for the proof's state, or the roots differ.
             WillowError: A read was refused (a key that isn't there, say).
         """
+        if not self.client.consensus_rpc_url:
+            raise ProofVerificationError(_NO_TRUSTED_HEADER_SOURCE)
         data_response = await self.client._request(
             "GET",
             f"/data/{subgrove_id}/{key}",
@@ -352,10 +364,10 @@ class DataOperations:
             )
 
         trusted_root = await self.client._trusted_app_hash(height + 1)
-        if root_hash.hex() != trusted_root.lower():
+        if root_hash != trusted_root:
             raise ProofVerificationError(
                 f"Root hash mismatch for key {key!r}: the proof computes {root_hash.hex()}, "
-                f"the header at height {height + 1} has app_hash {trusted_root}"
+                f"the header at height {height + 1} has app_hash {trusted_root.hex()}"
             )
         return proven
 
@@ -964,7 +976,8 @@ class WillowClientBuilder:
         return self
 
     def light_client_config(self, config: Dict[str, Any]) -> "WillowClientBuilder":
-        """Set light client configuration."""
+        """Kept for compatibility, and ignored: the client makes no light
+        client (``data.get`` reads headers from ``consensus_rpc_url``)."""
         self._light_client_config = config
         return self
 
@@ -974,7 +987,9 @@ class WillowClientBuilder:
         return self
 
     def consensus_rpc_url(self, url: str) -> "WillowClientBuilder":
-        """Set a validator's CometBFT RPC URL, to read which nonces are used."""
+        """Set the CometBFT RPC URL of a node you trust: ``data.get`` reads
+        the headers it checks proofs against from it, and the client reads
+        which nonces are used from it."""
         self._consensus_rpc_url = url
         return self
 
@@ -1037,7 +1052,7 @@ class WillowClient:
             proof_verification_options: Optional configuration of the global
                 proof verifier (``ProofVerifier``, ``verify_item_proof``,
                 ``verify_query_proof``). ``data.get`` checks its proof
-                against the light client's header instead.
+                against a header from ``consensus_rpc_url`` instead.
             indexer_url: Optional indexer node URL for routing GraphQL/SQL
                 queries. Requests to it carry the API key; requests to
                 indexers found through discovery do not.
@@ -1048,14 +1063,22 @@ class WillowClient:
                 https://dashboard.willow.tech/account. Required for queries
                 and writes against managed ``api.willow.tech`` /
                 ``indexer.willow.tech``.
-            consensus_rpc_url: Optional CometBFT RPC URL of a validator
-                (typically port 26657). With it, the client reads which of
-                the nonces above an account's base are used (ABCI query
+            consensus_rpc_url: The CometBFT RPC URL (typically port 26657)
+                of a node you run or trust: the client's trusted source of
+                chain state. ``data.get`` and ``get_root_hash`` read headers
+                from it (``GET /header``) and raise
+                ``ProofVerificationError`` without it; the SDK does not
+                verify commit signatures, so it trusts this node, as a
+                client trusts its own node. Don't point it at the API: a
+                header the API serves verifies nothing the API serves. The
+                client also reads which of the nonces above an account's
+                base are used (ABCI query
                 ``/store/account_nonce_state/{did}``), so
                 ``wait_until_landed`` sees a write land even while a lower
-                nonce is unused. Without it, the client reads only the base
-                (``GET /account/{did}/nonce``). Requests to it carry no
-                ``X-API-Key``.
+                nonce is unused (without it, only the base, from
+                ``GET /account/{did}/nonce``), and
+                ``completeness`` reads its on-chain anchors from it.
+                Requests to it carry no ``X-API-Key``.
         """
         self.api_url = api_url.rstrip("/")
         self.indexer_url = indexer_url.rstrip("/") if indexer_url else None
@@ -1081,9 +1104,8 @@ class WillowClient:
         if proof_verification_options:
             configure_proof_verification(proof_verification_options)
 
-        # Light client for trustless verification
-        self._light_client: Optional["LightClient"] = None
-        self._light_client_init_lock = asyncio.Lock()
+        # Seconds between reads of a header the chain hasn't produced yet.
+        self._header_poll_interval = 0.5
 
         # Computed fields registry for SDK-side derived field computation
         self._computed_fields = ComputedFieldRegistry()
@@ -1112,13 +1134,13 @@ class WillowClient:
         # caller configures gets it (see _route_query).
         self._indexer_http = httpx.AsyncClient(timeout=timeout)
 
-        # Client-side completeness checks. The on-chain anchor is read from the
-        # validator's CometBFT RPC (derived from api_url, typically :3031 ->
-        # :26657, matching the light client) without the API key; the
-        # matched-log preimage comes from the configured indexer.
+        # Client-side completeness checks. The on-chain anchor is read from
+        # consensus_rpc_url (or, without it, the URL derived from api_url,
+        # :3031 -> :26657) without the API key; the matched-log preimage
+        # comes from the configured indexer.
         self.completeness = CompletenessOperations(
             self._http,
-            self.api_url.replace(":3031", ":26657"),
+            self.consensus_rpc_url or self.api_url.replace(":3031", ":26657"),
             self.indexer_url,
             rpc_http=self._rpc_http,
         )
@@ -1442,84 +1464,89 @@ class WillowClient:
         """
         return self._computed_fields.has(dataset_id)
 
-    async def _get_or_create_light_client(self) -> "LightClient":
-        """Get or create the light client.
+    async def _consensus_header(self, height: Optional[int] = None) -> Optional[Tuple[int, bytes]]:
+        """The ``(height, app_hash)`` of the CometBFT header at ``height``
+        (the latest without one), as the node at ``consensus_rpc_url`` serves
+        it (``GET /header``), sent without the API key; ``None`` when the
+        node answers an error (a height it hasn't produced, or has pruned).
 
-        Auto-initializes a light client using trust-on-first-use: the
-        first block received from validators is trusted as it is (see
-        ``get_root_hash`` for what it checks after).
+        Raises:
+            ProofVerificationError: No ``consensus_rpc_url``, the request
+                failed, or the answer isn't a header (at ``height``).
         """
-        if self._light_client is not None:
-            return self._light_client
-
-        async with self._light_client_init_lock:
-            # Double-check after acquiring lock
-            if self._light_client is not None:
-                return self._light_client
-
-            # Import here to avoid circular imports
-            from .light_client import LightClient, LightClientConfig
-            from .light_client.types import TrustThreshold
-
-            config = LightClientConfig(
-                chain_id="willow-chain",
-                # Derive CometBFT RPC endpoint from API URL (typically :3031 -> :26657)
-                validator_endpoints=[self.api_url.replace(":3031", ":26657")],
-                trust_threshold=TrustThreshold(numerator=2, denominator=3),
-                trusting_period_secs=86400,  # 24 hours
-                max_clock_drift_secs=30,
-                auto_sync=False,
-                min_validators_for_consensus=1,  # For single-node development
-                request_timeout_secs=30,
-                sync_interval_secs=60
+        if not self.consensus_rpc_url:
+            raise ProofVerificationError(_NO_TRUSTED_HEADER_SOURCE)
+        where = "the latest header" if height is None else f"the header at height {height}"
+        try:
+            response = await self._rpc_http.get(
+                f"{self.consensus_rpc_url}/header",
+                params=None if height is None else {"height": str(height)},
             )
-
-            lc = LightClient(config)
-            await lc.initialize_with_trust_on_first_use()
-            self._light_client = lc
-            return lc
+            body = response.json()
+        except (httpx.HTTPError, ValueError, RecursionError) as e:
+            raise ProofVerificationError(f"No trusted root: reading {where} from the consensus RPC failed: {e}") from e
+        if isinstance(body, dict) and body.get("error") is not None and body.get("result") is None:
+            return None
+        result = body.get("result") if isinstance(body, dict) else None
+        header = result.get("header") if isinstance(result, dict) else None
+        served = header.get("height") if isinstance(header, dict) else None
+        app_hash = header.get("app_hash") if isinstance(header, dict) else None
+        try:
+            if isinstance(served, bool) or not isinstance(served, (str, int)):
+                raise ValueError("no height")
+            served = int(served)
+            root = bytes.fromhex(app_hash) if isinstance(app_hash, str) else b""
+            if len(root) != 32:
+                raise ValueError("no 32-byte app_hash")
+        except ValueError as e:
+            raise ProofVerificationError(
+                f"No trusted root: the consensus RPC answered no header for {where} ({e})"
+            ) from e
+        if response.status_code != 200 or (height is not None and served != height):
+            raise ProofVerificationError(
+                f"No trusted root: the consensus RPC answered a header at height {served} "
+                f"(HTTP {response.status_code}) for {where}"
+            )
+        return served, root
 
     async def get_root_hash(self) -> str:
-        """The ``app_hash`` of the light client's latest trusted header.
-
-        The light client starts with trust-on-first-use: it trusts the
-        first header it fetches from the validator RPC derived from the API
-        URL. It reads headers from ``/block``, whose answer carries no commit
-        for its own block or validator set, and checks commit signatures
-        over sign bytes that are not CometBFT's canonical vote encoding: so
-        against a CometBFT node it fetches no header and this raises.
-
-        Returns:
-            The root hash as hex
+        """The ``app_hash`` (hex) of the latest header the node at
+        ``consensus_rpc_url`` serves: the root of the state after the block
+        before it. The SDK verifies no commit signature: it trusts that node.
 
         Raises:
-            WillowError: If root hash is not available
+            ProofVerificationError: No ``consensus_rpc_url`` is configured,
+                or it served no header.
         """
-        # Always use light client for trustless verification
-        # This auto-initializes the light client on first use (trust-on-first-use)
-        light_client = await self._get_or_create_light_client()
-        return await light_client.get_verified_root_hash()
-
-    async def _trusted_app_hash(self, height: int) -> str:
-        """The ``app_hash`` (hex) of the CometBFT header at ``height``, as the
-        light client gives it: a header it trusts, or one it verifies
-        against one it trusts.
-
-        Raises:
-            ProofVerificationError: The light client has no such header.
-        """
-        try:
-            light_client = await self._get_or_create_light_client()
-            header = await light_client.get_header_by_height(height)
-        except Exception as e:
-            raise ProofVerificationError(
-                f"No trusted root: the light client has no header at height {height}: {e}"
-            ) from e
+        header = await self._consensus_header()
         if header is None:
-            raise ProofVerificationError(
-                f"No trusted root: the light client has no verified header at height {height}"
-            )
-        return header.header.app_hash.hex()
+            raise ProofVerificationError("No trusted root: the consensus RPC served no latest header")
+        return header[1].hex()
+
+    async def _trusted_app_hash(self, height: int) -> bytes:
+        """The ``app_hash`` of the CometBFT header at ``height``, as the node
+        at ``consensus_rpc_url`` serves it. A header the chain hasn't
+        produced yet is waited for, for up to ``timeout`` seconds.
+
+        Raises:
+            ProofVerificationError: No such header.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout
+        produced = False
+        while True:
+            header = await self._consensus_header(height)
+            if header is not None:
+                return header[1]
+            latest = None if produced else await self._consensus_header()
+            if latest is None or loop.time() >= deadline:
+                raise ProofVerificationError(
+                    f"No trusted root: the consensus RPC serves no header at height {height}"
+                )
+            # Produced since the read above: read it once more.
+            produced = latest[0] >= height
+            if not produced:
+                await asyncio.sleep(self._header_poll_interval)
 
     async def get_root_hash_local(self) -> str:
         """Get the current local root hash from the node.

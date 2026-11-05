@@ -23,13 +23,57 @@ BOB = FX["single_key_subgrove_data"]
 BOB_ROOT = bytes.fromhex(BOB["root_hex"])
 
 
+RPC = "http://rpc.test:26657"
+
+
 def _envelope(data):
     return {"success": True, "data": data, "error": None}
 
 
-def _get_client(proof=None, served=None, root=BOB_ROOT):
-    """A client whose API serves bob's value and proof, and whose light
-    client trusts ``root`` at the height asked."""
+def _header(height, app_hash):
+    """``GET /header``'s answer, as CometBFT 0.38 writes it (hashes as
+    upper-case hex, heights as strings)."""
+    return {"jsonrpc": "2.0", "id": -1, "result": {"header": {
+        "version": {"block": "11", "app": "0"}, "chain_id": "willow-chain", "height": str(height),
+        "time": "2026-01-01T00:00:00.000000000Z",
+        "last_block_id": {"hash": "AB" * 32, "parts": {"total": 1, "hash": "CD" * 32}},
+        "last_commit_hash": "", "data_hash": "", "validators_hash": "EF" * 32,
+        "next_validators_hash": "EF" * 32, "consensus_hash": "01" * 32,
+        "app_hash": app_hash.hex().upper(), "last_results_hash": "", "evidence_hash": "",
+        "proposer_address": "02" * 20,
+    }}}
+
+
+def _rpc_error(message):
+    return {"jsonrpc": "2.0", "id": -1, "error": {"code": -32603, "message": "Internal error", "data": message}}
+
+
+def _consensus_rpc(seen, root_at, latest):
+    """A CometBFT RPC serving, up to the height ``latest()``, header ``h``
+    with app_hash ``root_at(h)`` (an error where that is None)."""
+    def handler(request):
+        assert "x-api-key" not in request.headers, "the consensus RPC got the API key"
+        if request.url.path != "/header":
+            return httpx.Response(404, json=_rpc_error("no route"))
+        top = latest()
+        asked = request.url.params.get("height")
+        height = top if asked is None else int(asked)
+        seen["heights"].append(None if asked is None else height)
+        if height > top:
+            return httpx.Response(500, json=_rpc_error(
+                f"height {height} must be less than or equal to the current blockchain height {top}"
+            ))
+        root = root_at(height)
+        if root is None:
+            return httpx.Response(500, json=_rpc_error(f"height {height} is not available"))
+        return httpx.Response(200, json=_header(height, root))
+    return handler
+
+
+def _get_client(proof=None, served=None, root=BOB_ROOT, latest=42, root_at=None, api_url="http://api.test"):
+    """A client whose API serves bob's value and proof, and whose consensus
+    RPC serves headers up to ``latest`` (an int, or a function read on each
+    request), each carrying ``root`` (or ``root_at(height)``)."""
     seen = {"requests": [], "heights": []}
     proof_data = {"proof": BOB["proof_hex"], "path": [], "key": b"user:bob".hex(), "height": 41}
     if proof is not None:
@@ -43,19 +87,13 @@ def _get_client(proof=None, served=None, root=BOB_ROOT):
             return httpx.Response(200, json=_envelope(proof_data))
         return httpx.Response(404, json={"success": False, "error": "not found"})
 
-    client = WillowClient("http://api.test")
+    client = WillowClient(api_url, api_key="wk_test", consensus_rpc_url=RPC)
     client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(_consensus_rpc(
+        seen, root_at or (lambda height: root), latest if callable(latest) else (lambda: latest)
+    )))
     d = generate_did()
     client.set_identity(d["did"], d["private_key"], d["public_key_id"])
-
-    class FakeLightClient:
-        async def get_header_by_height(self, height):
-            seen["heights"].append(height)
-            if root is None:
-                return None
-            return SimpleNamespace(header=SimpleNamespace(app_hash=root))
-
-    client._light_client = FakeLightClient()
     return client, seen
 
 
@@ -176,17 +214,202 @@ async def test_get_returns_a_value_whose_item_is_63_bytes():
 
 
 @pytest.mark.asyncio
-async def test_get_raises_when_the_light_client_cant_start():
+async def test_get_raises_when_the_consensus_rpc_cant_be_reached():
     client, _ = _get_client()
 
-    async def no_light_client():
-        raise RuntimeError("no validator answered")
+    def unreachable(request):
+        raise httpx.ConnectError("connection refused")
 
-    client._light_client = None
-    client._get_or_create_light_client = no_light_client
-    with pytest.raises(ProofVerificationError, match="No trusted root.*no validator answered"):
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(unreachable))
+    with pytest.raises(ProofVerificationError, match="No trusted root.*connection refused"):
         await client.data.get("my-sub", "user:bob")
     await client.close()
+
+
+# ---------------------------------------------------------------------------
+# The trusted root comes only from the consensus RPC the caller configures
+
+
+@pytest.mark.asyncio
+async def test_get_needs_a_consensus_rpc_and_sends_nothing_without_one():
+    sent = []
+    client = WillowClient("http://api.test")
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(500)))
+    client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(500)))
+    d = generate_did()
+    client.set_identity(d["did"], d["private_key"], d["public_key_id"])
+    with pytest.raises(ProofVerificationError, match="no trusted header source: set consensus_rpc_url"):
+        await client.data.get("my-sub", "user:bob")
+    with pytest.raises(ProofVerificationError, match="no trusted header source: set consensus_rpc_url"):
+        await client.get_root_hash()
+    assert sent == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_trusts_no_header_the_api_serves(monkeypatch):
+    # A hostile API serves a forged value with a proof of it, and would serve
+    # a header carrying the forged root to anything that asks it for one (as
+    # the light client did, at the API's own URL). The consensus RPC serves
+    # the real root, so the forgery is refused.
+    from willow.light_client import LightClient
+
+    payload = b'{"balance":1000000000}'
+    forged_proof, forged_root = _bobs_proof(b"\x00" + bytes([len(payload)]) + payload + b"\x00")
+    asked_the_api = []
+
+    async def trust_the_api(self):
+        asked_the_api.extend(self.config.validator_endpoints)
+
+    async def header_from_the_api(self, height):
+        asked_the_api.extend(self.config.validator_endpoints)
+        return SimpleNamespace(header=SimpleNamespace(app_hash=forged_root))
+
+    monkeypatch.setattr(LightClient, "initialize_with_trust_on_first_use", trust_the_api)
+    monkeypatch.setattr(LightClient, "get_header_by_height", header_from_the_api)
+    client, seen = _get_client(
+        proof={"proof": forged_proof.hex(), "height": 41}, served={"balance": 1000000000},
+        api_url="https://api.example.com",
+    )
+    with pytest.raises(ProofVerificationError, match="Root hash mismatch"):
+        await client.data.get("my-sub", "user:bob")
+    assert asked_the_api == []
+    assert 42 in seen["heights"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_waits_for_a_header_the_chain_hasnt_produced_yet():
+    # The proof is of the state after the latest block, 41: header 42 comes next.
+    reads = {"n": 0}
+
+    def latest():
+        reads["n"] += 1
+        return 41 if reads["n"] < 4 else 42
+
+    client, seen = _get_client(latest=latest)
+    client._header_poll_interval = 0
+    assert await client.data.get("my-sub", "user:bob") == {"balance": 250}
+    assert seen["heights"][0] == 42 and seen["heights"][-1] == 42 and None in seen["heights"]
+    await client.close()
+
+    client, _ = _get_client(latest=41)
+    client._header_poll_interval = 0
+    client.timeout = 0
+    with pytest.raises(ProofVerificationError, match="serves no header at height 42"):
+        await client.data.get("my-sub", "user:bob")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_refuses_a_header_at_another_height_or_without_an_app_hash():
+    for body in (_header(43, BOB_ROOT), {"jsonrpc": "2.0", "id": -1, "result": {"header": None}},
+                 {"jsonrpc": "2.0", "id": -1, "result": {"header": {"height": "42", "app_hash": ""}}}):
+        client, _ = _get_client()
+        asked = []
+        client._rpc_http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda r, b=body: asked.append(str(r.url)) or httpx.Response(200, json=b)
+        ))
+        with pytest.raises(ProofVerificationError, match="No trusted root: the consensus RPC answered"):
+            await client.data.get("my-sub", "user:bob")
+        assert asked == [f"{RPC}/header?height=42"]
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_root_hash_is_the_consensus_rpcs_latest_app_hash():
+    client, seen = _get_client(root_at=lambda height: bytes([height]) * 32)
+    assert await client.get_root_hash() == (bytes([42]) * 32).hex()
+    assert seen["heights"] == [None]
+    await client.close()
+
+
+def test_completeness_reads_its_anchor_from_the_consensus_rpc():
+    client = WillowClient("http://api.test:3031", consensus_rpc_url=RPC)
+    assert client.completeness._rpc_url == RPC
+    assert WillowClient("http://api.test:3031").completeness._rpc_url == "http://api.test:26657"
+
+
+# ---------------------------------------------------------------------------
+# The light client verifies no header
+
+
+def _forged_light_block(height, app_hash, validators_hash, next_validators_hash, signer):
+    """A header with one validator, the signer's, and its commit signed over
+    the sign bytes the SDK used to check (its own JSON, not CometBFT's
+    canonical vote encoding)."""
+    import base64
+    from datetime import datetime, timedelta, timezone
+    from cryptography.hazmat.primitives import serialization
+    from willow.light_client.types import LightBlock
+
+    b64 = lambda b: base64.b64encode(b).decode()
+    now = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=height - 100)
+    stamp = now.isoformat().replace("+00:00", "Z")
+    pub = signer.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    block_hash, parts_hash = b"\x11" * 32, b"\x22" * 32
+    sign_doc = {
+        "type": "tendermint/SocketPV/SignVote", "height": str(height), "round": "0", "step": 3,
+        "block_id": {"hash": block_hash.hex().upper(),
+                     "part_set_header": {"total": 1, "hash": parts_hash.hex().upper()}},
+        "timestamp": now.isoformat() + "Z",
+    }
+    signature = signer.sign(json.dumps(sign_doc, separators=(",", ":"), sort_keys=True).encode())
+    return LightBlock.from_dict({
+        "header": {
+            "version": {"block": "11"}, "chain_id": "willow-chain", "height": str(height), "time": stamp,
+            "last_block_id": None, "last_commit_hash": b64(b""), "data_hash": b64(b""),
+            "validators_hash": b64(validators_hash), "next_validators_hash": b64(next_validators_hash),
+            "consensus_hash": b64(b""), "app_hash": b64(app_hash), "last_results_hash": b64(b""),
+            "evidence_hash": b64(b""), "proposer_address": b64(b""),
+        },
+        "commit": {
+            "height": str(height), "round": "0",
+            "block_id": {"hash": b64(block_hash), "part_set_header": {"total": "1", "hash": b64(parts_hash)}},
+            "signatures": [{"block_id_flag": 2, "validator_address": b64(b"\x33" * 20),
+                            "timestamp": stamp, "signature": b64(signature)}],
+        },
+        "validators": {"validators": [{"address": b64(b"\x33" * 20), "pub_key": {"value": b64(pub)},
+                                       "voting_power": "10"}]},
+    })
+
+
+@pytest.mark.asyncio
+async def test_a_header_signed_by_anyone_is_not_reported_verified():
+    # A successor to a trusted header, carrying a forged app_hash, whose
+    # validator set is the attacker's own key (never hashed against
+    # validators_hash), signed over the SDK's own JSON sign bytes.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from willow.light_client import HeaderVerifier, LightClient
+    from willow.light_client.types import LightClientConfig, TrustThreshold
+
+    attacker = Ed25519PrivateKey.generate()
+    trusted = _forged_light_block(100, bytes(32), b"REAL" * 8, b"NEXT" * 8, attacker)
+    forged = _forged_light_block(101, BOB_ROOT, b"NEXT" * 8, b"NEXT" * 8, attacker)
+    verifier = HeaderVerifier("willow-chain", TrustThreshold(2, 3))
+    for result in (verifier.verify_header(forged, trusted, max_clock_drift_secs=300),
+                   verifier.verify_header(forged, max_clock_drift_secs=300)):
+        assert not result.success
+        assert "not verified" in result.error
+
+    light_client = LightClient(LightClientConfig(
+        chain_id="willow-chain", validator_endpoints=["http://validator.test"], max_clock_drift_secs=300,
+        min_validators_for_consensus=1,
+    ))
+    await light_client.initialize_with_trusted_header(trusted)
+
+    async def serve_forged(height):
+        return forged
+
+    async def latest_is_the_forged_one():
+        return 101
+
+    light_client._fetch_header_from_validators = serve_forged
+    light_client._get_latest_height_from_validators = latest_is_the_forged_one
+    assert await light_client.get_header_by_height(101) is None
+    assert not (await light_client.verify_header(forged)).success
+    assert not (await light_client.sync_to_latest()).success
+    assert await light_client.get_header_by_height(100) is trusted
 
 
 @pytest.mark.asyncio
