@@ -581,6 +581,11 @@ class DataOperations:
         Routes through consensus to available indexer nodes that serve
         historical data for this checkpoint. The answer, its proof, and its
         state root are what the API serves: the SDK verifies none of them.
+        The API passes the provider's proof through without checking it
+        against the checkpoint, and nothing requires the checkpoint's state
+        root to commit to the provider's store (the reference indexer's is a
+        SHA-256 of the subgrove id, block range, and entity count, not a root
+        of the data).
 
         Args:
             subgrove_id: Subgrove/dataset identifier
@@ -599,7 +604,7 @@ class DataOperations:
             json=query_request.model_dump(exclude_none=True),
             limit=_body.LARGE,
         )
-        return HistoricalQueryResponse(**response["data"])
+        return HistoricalQueryResponse(**response)
 
     async def query_historical_verified(
         self,
@@ -610,9 +615,11 @@ class DataOperations:
         """Deprecated and not supported: raises ``UnsupportedError`` without a
         request.
 
-        The node serves no historical proof, and the checkpoint state root a
-        historical answer carries is not a trusted root, so nothing can be
-        verified. ``query_historical`` returns the unverified answer.
+        The API passes the provider's proof through without checking it
+        against the checkpoint, and nothing requires the checkpoint's state
+        root to commit to the provider's store, so the proof shows nothing
+        about the checkpoint. ``query_historical`` returns the unverified
+        answer.
         """
         raise UnsupportedError(_HISTORICAL_UNSUPPORTED)
 

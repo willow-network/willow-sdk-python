@@ -431,7 +431,7 @@ for doc in result.documents:
 print(f"Total: {result.total}")
 ```
 
-`client.data.query` raises `UnsupportedError` without sending anything: the API returns a query's documents without their keys, with a proof of the subgrove's whole data, so nothing binds a document to a proven value or to the query's filter, order, offset, and limit. `query_unverified` returns the documents unverified; `get` verifies a single key. `client.data.query_historical_verified` and `HistoricalQueryResponse.verify_proof` are deprecated and raise `UnsupportedError`: the node serves no historical proof.
+`client.data.query` raises `UnsupportedError` without sending anything: the API returns a query's documents without their keys, with a proof of the subgrove's whole data, so nothing binds a document to a proven value or to the query's filter, order, offset, and limit. `query_unverified` returns the documents unverified; `get` verifies a single key. `client.data.query_historical_verified` and `HistoricalQueryResponse.verify_proof` are deprecated and raise `UnsupportedError`: the API passes the provider's proof through without checking it against the checkpoint, and nothing requires the checkpoint's state root to commit to the provider's store.
 
 ### Registration Operations
 

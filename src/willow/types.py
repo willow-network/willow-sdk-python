@@ -340,27 +340,29 @@ class HistoricalQueryResponse(BaseModel):
     success: bool
     provider_did: Optional[str] = None
     provider_endpoint: Optional[str] = None
-    state_root: str  # Checkpoint state root for proof verification
+    state_root: str  # The checkpoint's state root as its indexer submitted it (not necessarily a data root)
     block_range: tuple[int, int]  # Block range covered by the checkpoint
     data: Any  # Query results from the indexer
-    proof: Optional[str] = None  # Merkle proof (hex-encoded)
+    proof: Optional[str] = None  # The provider's GroveDB proof (hex) of its own store, not checked against the checkpoint
     can_reindex: Optional[bool] = None  # Whether data can be re-indexed
     error: Optional[str] = None
 
     def verify_proof(self) -> str:
         """Deprecated and not supported: raises ``UnsupportedError``.
 
-        The node serves no historical proof, and a checkpoint's state root
-        in the same response is not a root to trust.
+        ``proof`` is the provider's proof of its own store, which the API
+        doesn't check against the checkpoint, and nothing requires the
+        checkpoint's ``state_root`` to commit to that store.
         """
         from .errors import UnsupportedError
         raise UnsupportedError(_HISTORICAL_UNSUPPORTED)
 
 
 _HISTORICAL_UNSUPPORTED = (
-    "Verifying a historical query is deprecated and not supported: the node serves no "
-    "historical proof, and the checkpoint state root the same response carries is not "
-    "a trusted root. Use query_historical for the unverified answer."
+    "Verifying a historical query is deprecated and not supported: the API passes the "
+    "provider's proof through without checking it against the checkpoint, and nothing "
+    "requires the checkpoint's state root to commit to the provider's store. Use "
+    "query_historical for the unverified answer."
 )
 
 
