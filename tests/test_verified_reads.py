@@ -575,11 +575,38 @@ async def test_a_verified_query_raises_without_a_request():
     client.set_identity(d["did"], d["private_key"], d["public_key_id"])
     with pytest.raises(UnsupportedError, match="query_unverified"):
         await client.data.query("sg", {})
-    with pytest.raises(UnsupportedError, match="historical"):
+    with pytest.raises(UnsupportedError, match="without checking it against the checkpoint.*nothing requires the checkpoint's state root to commit"):
         await client.data.query_historical_verified("sg", "cp", {"path": [[1]]})
     assert sent == []
     with pytest.raises(UnsupportedError):
         QueryResponse(documents=[{"a": 1}], total=1, proof="00").verify_proof()
-    with pytest.raises(UnsupportedError):
+    with pytest.raises(UnsupportedError, match="nothing requires the checkpoint's state root to commit"):
         HistoricalQueryResponse(success=True, state_root="00" * 32, block_range=(1, 2), data={}, proof="00").verify_proof()
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", [[{"key": "6b", "value": "76"}], {"a": 1}, None])
+async def test_query_historical_reads_the_api_answer_unenveloped(data):
+    # The API answers a historical query with the response itself, not in a
+    # {success, data} envelope; its `data` is the indexer's answer.
+    answer = {
+        "success": True,
+        "provider_did": "did:willow:indexer",
+        "provider_endpoint": "http://indexer.test",
+        "state_root": "ab" * 32,
+        "block_range": [1, 2],
+        "data": data,
+        "proof": "00",
+        "verification": "unverified",
+        "truncated": False,
+        "can_reindex": False,
+    }
+    client = WillowClient("http://api.test")
+    client._http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=answer)))
+    response = await client.data.query_historical("sg", "cp", {"path": [[1]]})
+    assert response.data == data
+    assert response.state_root == "ab" * 32
+    assert response.block_range == (1, 2)
+    assert response.proof == "00"
     await client.close()
